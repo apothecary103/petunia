@@ -118,6 +118,20 @@ impl Message {
         found
     }
 
+    /// Records what an image turned out to be, for the senders who do not say.
+    /// Without it the layout has only the maximum box to go on and stretches a
+    /// photo to fill it.
+    pub fn set_image_size(&mut self, id: &attachment::Id, measured: attachment::Size) {
+        for attached in self.attachments_mut() {
+            if attached.id == *id
+                && let attachment::Kind::Image { size, .. } = &mut attached.kind
+                && size.is_none()
+            {
+                *size = Some(measured);
+            }
+        }
+    }
+
     /// Every attachment on the message, including the ones hanging off a quote,
     /// a link preview or a sticker.
     pub fn attachment_refs(&self) -> impl Iterator<Item = &Attachment> {
@@ -194,13 +208,11 @@ impl Message {
     }
 
     pub fn plain(id: MessageId, body: String) -> Self {
-        Self::new(
-            id,
-            Content::Text {
-                body,
-                ranges: Vec::new(),
-            },
-        )
+        Self::written(id, body, Vec::new())
+    }
+
+    pub fn written(id: MessageId, body: String, ranges: Vec<Range>) -> Self {
+        Self::new(id, Content::Text { body, ranges })
     }
 
     fn new(id: MessageId, content: Content) -> Self {

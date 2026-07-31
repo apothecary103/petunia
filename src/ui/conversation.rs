@@ -5,12 +5,12 @@ use gpui::{Context, Entity, MouseButton, ScrollHandle, SharedString, Window, div
 use super::avatar::avatar;
 use super::composer::Composer;
 use super::kit;
-use super::message::group::{self, Entry};
 use super::message::content;
+use super::message::group::{self, Entry};
 use super::relative;
 use crate::config::Theme;
 use crate::config::messages::{Spacing, Timestamps};
-use crate::data::{Message, State, Thread};
+use crate::data::{Message, MessageId, State, Thread};
 use crate::signal::Command;
 use crate::store::{Focus, Store};
 use crate::theme::ActivePalette;
@@ -23,8 +23,7 @@ pub type Download =
 /// composer beneath it.
 pub struct Conversation {
     store: Entity<Store>,
-    /// Whether the formatting toolbar is showing.
-    formatting: bool,
+    composer: Entity<Composer>,
     scroll: ScrollHandle,
     /// The thread the scroll position belongs to, so switching conversations
     /// starts at the newest message rather than wherever the last one was.
@@ -32,14 +31,101 @@ pub struct Conversation {
 }
 
 impl Conversation {
-    pub fn new(store: Entity<Store>, cx: &mut Context<Self>) -> Self {
+    pub fn new(store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.observe(&store, |_, _, cx| cx.notify()).detach();
+        let composer = cx.new(|cx| Composer::new(store.clone(), window, cx));
         Self {
             store,
+            composer,
             scroll: ScrollHandle::new(),
             anchored: None,
-            formatting: false,
         }
+    }
+
+    pub fn composer(&self) -> &Entity<Composer> {
+        &self.composer
+    }
+
+    /// Replies to a message, snapshotting what it says for the banner.
+    pub fn reply_to(&mut self, target: MessageId, window: &mut Window, cx: &mut Context<Self>) {
+        let summary = self
+            .store
+            .read(cx)
+            .state()
+            .and_then(|state| {
+                state
+                    .histories
+                    .values()
+                    .find_map(|history| history.find(&target))
+            })
+            .map(Message::summary)
+            .unwrap_or_default();
+
+        self.composer
+            .update(cx, |composer, cx| composer.reply_to(target, summary, window, cx));
+    }
+
+    pub fn edit(&mut self, target: MessageId, window: &mut Window, cx: &mut Context<Self>) {
+        let body = self
+            .store
+            .read(cx)
+            .state()
+            .and_then(|state| {
+                state
+                    .histories
+                    .values()
+                    .find_map(|history| history.find(&target))
+            })
+            .and_then(|message| message.text())
+            .unwrap_or_default()
+            .to_string();
+
+        self.composer
+            .update(cx, |composer, cx| composer.edit(target, body, window, cx));
+    }
+
+    /// Up on an empty composer edits the last thing you said, which is what
+    /// every chat client trains you to expect.
+    pub fn edit_last(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.composer.read(cx).is_empty(cx) {
+            return;
+        }
+        let Some(target) = self.last_own_message(cx) else {
+            return;
+        };
+        self.edit(target, window, cx);
+    }
+
+    pub fn reply_to_last(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let store = self.store.read(cx);
+        let Some(target) = store
+            .active()
+            .and_then(|thread| store.state()?.history(thread))
+            .and_then(|history| {
+                history
+                    .messages()
+                    .iter()
+                    .rev()
+                    .find(|message| message.is_addressable())
+            })
+            .map(|message| message.id)
+        else {
+            return;
+        };
+        self.reply_to(target, window, cx);
+    }
+
+    fn last_own_message(&self, cx: &Context<Self>) -> Option<MessageId> {
+        let store = self.store.read(cx);
+        let state = store.state()?;
+        let history = state.history(store.active()?)?;
+
+        history
+            .messages()
+            .iter()
+            .rev()
+            .find(|message| message.sender() == state.aci && message.is_addressable())
+            .map(|message| message.id)
     }
 
     fn inspect(&mut self, sender: uuid::Uuid, cx: &mut Context<Self>) {
@@ -71,14 +157,11 @@ impl Render for Conversation {
         let store = self.store.read(cx);
 
         let Some(thread) = store.active().cloned() else {
-            return empty(&palette, "Pick a conversation to start reading.");
+            return empty(&palette, "Pick a conversation to start reading.").into_any_element();
         };
         let Some(state) = store.state() else {
-            return empty(&palette, "Still connecting…");
+            return empty(&palette, "Still connecting…").into_any_element();
         };
-
-        let title = state.title(&thread);
-        let typing = describe_typing(state, &thread);
 
         let spacing = store.config.messages.density.spacing();
         let timestamps = store.config.messages.timestamps;
@@ -92,22 +175,12 @@ impl Render for Conversation {
         let Some(history) = state.history(&thread).filter(|history| !history.is_empty()) else {
             return div()
                 .size_full()
-                .flex().flex_col()
+                .flex()
+                .flex_col()
                 .bg(palette.background)
                 .child(empty(&palette, "No messages here yet.").flex_1())
-                .child(
-                    Composer {
-                        placeholder: format!("Message {title}…"),
-                        typing: None,
-                        palette: &palette,
-                        formatting: self.formatting,
-                        on_formatting: Box::new(cx.listener(|this: &mut Self, _, _, cx| {
-                            this.formatting = !this.formatting;
-                            cx.notify();
-                        })),
-                    }
-                    .render(),
-                );
+                .child(self.composer.clone())
+                .into_any_element();
         };
 
         let on_download: Download = {
@@ -197,9 +270,22 @@ impl Render for Conversation {
         }
 
         div()
+            .id("conversation")
             .size_full()
-            .flex().flex_col()
+            .flex()
+            .flex_col()
             .bg(palette.background)
+            .on_drop(cx.listener(
+                |this: &mut Self, paths: &gpui::ExternalPaths, _, cx| {
+                    // One message carrying everything, rather than one message
+                    // per file: the platform delivers them together and that is
+                    // how they were meant.
+                    let paths = paths.paths().to_vec();
+                    this.composer
+                        .clone()
+                        .update(cx, |composer, cx| composer.attach(paths, cx));
+                },
+            ))
             .child(
                 div()
                     .id("messages")
@@ -219,33 +305,8 @@ impl Render for Conversation {
                             .child(list),
                     ),
             )
-            .child(
-                Composer {
-                    placeholder: format!("Message {title}…"),
-                    typing,
-                    palette: &palette,
-                    formatting: self.formatting,
-                    on_formatting: Box::new(cx.listener(|this: &mut Self, _, _, cx| {
-                        this.formatting = !this.formatting;
-                        cx.notify();
-                    })),
-                }
-                .render(),
-            )
-    }
-}
-
-fn describe_typing(state: &State, thread: &Thread) -> Option<String> {
-    let names: Vec<_> = state
-        .typing(thread)
-        .into_iter()
-        .map(|who| state.name_of(who))
-        .collect();
-
-    match names.as_slice() {
-        [] => None,
-        [one] => Some(format!("{one} is typing…")),
-        [rest @ .., last] => Some(format!("{} and {last} are typing…", rest.join(", "))),
+            .child(self.composer.clone())
+            .into_any_element()
     }
 }
 

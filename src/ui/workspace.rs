@@ -60,14 +60,14 @@ impl Workspace {
         // An already-linked store never emits `Linked` a second time, so the
         // shell has to come up if the account is there on the first read.
         if store.read(cx).state().is_some() {
-            workspace.enter_main(cx);
+            workspace.enter_main(window, cx);
         }
         workspace
     }
 
-    fn enter_main(&mut self, cx: &mut Context<Self>) {
+    fn enter_main(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let sidebar = cx.new(|cx| Sidebar::new(self.store.clone(), cx));
-        let conversation = cx.new(|cx| Conversation::new(self.store.clone(), cx));
+        let conversation = cx.new(|cx| Conversation::new(self.store.clone(), window, cx));
         let details = cx.new(|cx| Details::new(self.store.clone(), cx));
 
         if let Some(thread) = self.session.active.clone() {
@@ -86,12 +86,12 @@ impl Workspace {
         &mut self,
         _store: &Entity<Store>,
         event: &StoreEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match event {
             StoreEvent::Linked => {
-                self.enter_main(cx);
+                self.enter_main(window, cx);
                 cx.notify();
             }
             // Clicking a name is a request to see it, so the panel opens
@@ -126,6 +126,44 @@ impl Workspace {
 
         switcher.update(cx, |switcher, cx| switcher.reset(window, cx));
         cx.notify();
+    }
+
+    fn conversation(&self) -> Option<&Entity<Conversation>> {
+        match &self.screen {
+            Screen::Main { conversation, .. } => Some(conversation),
+            Screen::Linking(_) => None,
+        }
+    }
+
+    /// Escape, in the order a person means it: the overlay first, then whatever
+    /// the composer is carrying.
+    fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.switcher.take().is_some() {
+            cx.notify();
+            return;
+        }
+        let Some(conversation) = self.conversation().cloned() else {
+            return;
+        };
+        conversation.update(cx, |conversation, cx| {
+            conversation
+                .composer()
+                .clone()
+                .update(cx, |composer, cx| composer.cancel(window, cx));
+        });
+        cx.notify();
+    }
+
+    fn with_conversation(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        act: impl FnOnce(&mut Conversation, &mut Window, &mut Context<Conversation>),
+    ) {
+        let Some(conversation) = self.conversation().cloned() else {
+            return;
+        };
+        conversation.update(cx, |conversation, cx| act(conversation, window, cx));
     }
 
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
@@ -244,9 +282,35 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &actions::QuickSwitcher, window, cx| {
                 this.open_switcher(window, cx)
             }))
-            .on_action(cx.listener(|this, _: &actions::Cancel, _, cx| {
-                if this.switcher.take().is_some() {
-                    cx.notify();
+            .on_action(cx.listener(|this, _: &actions::Cancel, window, cx| {
+                this.cancel(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &actions::FocusComposer, window, cx| {
+                this.with_conversation(window, cx, |conversation, window, cx| {
+                    conversation
+                        .composer()
+                        .clone()
+                        .update(cx, |composer, cx| composer.focus(window, cx));
+                })
+            }))
+            .on_action(cx.listener(|this, _: &actions::ReplyToLast, window, cx| {
+                this.with_conversation(window, cx, Conversation::reply_to_last)
+            }))
+            .on_action(cx.listener(|this, _: &actions::EditLast, window, cx| {
+                this.with_conversation(window, cx, Conversation::edit_last)
+            }))
+            .on_action(cx.listener(|this, _: &actions::AttachFile, window, cx| {
+                this.with_conversation(window, cx, |conversation, window, cx| {
+                    conversation
+                        .composer()
+                        .clone()
+                        .update(cx, |composer, cx| composer.pick_files(window, cx));
+                })
+            }))
+            .on_action(cx.listener(|this, _: &actions::MarkRead, _, cx| {
+                let thread = this.store.read(cx).active().cloned();
+                if let Some(thread) = thread {
+                    this.store.update(cx, |store, _| store.mark_read(thread));
                 }
             }))
             .child(body)

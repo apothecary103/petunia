@@ -12,8 +12,8 @@ use uuid::Uuid;
 use crate::data::message::{Range, range};
 use crate::data::{MessageId, Thread};
 
-pub fn text(thread: &Thread, body: String, timestamp: u64) -> DataMessage {
-    message(thread, body, Vec::new(), timestamp)
+pub fn text(thread: &Thread, body: String, ranges: &[Range], timestamp: u64) -> DataMessage {
+    message(thread, body, ranges, Vec::new(), timestamp)
 }
 
 /// The single builder for anything petunia sends. Both the wire message and the
@@ -22,10 +22,12 @@ pub fn text(thread: &Thread, body: String, timestamp: u64) -> DataMessage {
 pub fn message(
     thread: &Thread,
     body: String,
+    ranges: &[Range],
     attachments: Vec<AttachmentPointer>,
     timestamp: u64,
 ) -> DataMessage {
     DataMessage {
+        body_ranges: range::to_proto(&body, ranges),
         body: Some(body).filter(|body| !body.is_empty()),
         attachments,
         timestamp: Some(timestamp),
@@ -92,10 +94,16 @@ pub fn delete(thread: &Thread, target: u64, timestamp: u64) -> DataMessage {
 
 /// The edit's own timestamp orders revisions; `target_sent_timestamp` keeps it
 /// attached to the original, which is also how presage derives its identity.
-pub fn edit(thread: &Thread, target: u64, body: String, timestamp: u64) -> EditMessage {
+pub fn edit(
+    thread: &Thread,
+    target: u64,
+    body: String,
+    ranges: &[Range],
+    timestamp: u64,
+) -> EditMessage {
     EditMessage {
         target_sent_timestamp: Some(target),
-        data_message: Some(message(thread, body, Vec::new(), timestamp)),
+        data_message: Some(message(thread, body, ranges, Vec::new(), timestamp)),
     }
 }
 
@@ -202,13 +210,13 @@ mod tests {
     #[test]
     fn a_contact_message_carries_no_group_context() {
         let thread = Thread::Contact(ContactId::Aci(Uuid::new_v4()));
-        assert!(text(&thread, "hi".into(), 1).group_v2.is_none());
+        assert!(text(&thread, "hi".into(), &[], 1).group_v2.is_none());
     }
 
     #[test]
     fn a_group_message_carries_its_master_key() {
         let master_key = [9u8; 32];
-        let message = text(&Thread::Group(master_key), "hi".into(), 1);
+        let message = text(&Thread::Group(master_key), "hi".into(), &[], 1);
 
         let context = message.group_v2.unwrap();
         assert_eq!(context.master_key.unwrap(), master_key.to_vec());
@@ -218,7 +226,7 @@ mod tests {
     fn the_echoed_row_projects_back_to_the_message_that_was_sent() {
         let aci = Uuid::new_v4();
         let thread = Thread::Contact(ContactId::Aci(Uuid::new_v4()));
-        let message = text(&thread, "hello".into(), 1234);
+        let message = text(&thread, "hello".into(), &[], 1234);
 
         let content = envelope(aci, DeviceId::new(1).unwrap(), &thread, message, 1234);
         let (_, projected) = from_content(&content).unwrap();
@@ -236,7 +244,7 @@ mod tests {
     fn a_contact_echo_cannot_have_its_thread_derived_from_the_content() {
         let aci = Uuid::new_v4();
         let thread = Thread::Contact(ContactId::Aci(Uuid::new_v4()));
-        let message = text(&thread, "hello".into(), 1234);
+        let message = text(&thread, "hello".into(), &[], 1234);
 
         let content = envelope(aci, DeviceId::new(1).unwrap(), &thread, message, 1234);
         let (derived, _) = from_content(&content).unwrap();
@@ -311,7 +319,7 @@ mod tests {
     fn an_edit_round_trips_carrying_the_new_body_and_the_old_identity() {
         let thread = Thread::Contact(ContactId::Aci(Uuid::new_v4()));
 
-        let built = edit(&thread, 500, "fixed".into(), 900);
+        let built = edit(&thread, 500, "fixed".into(), &[], 900);
 
         let Fragment::Edit { target, message } = echo(&thread, built) else {
             panic!("expected an edit");
@@ -325,7 +333,7 @@ mod tests {
         let thread = Thread::Contact(ContactId::Aci(Uuid::new_v4()));
         let target = target();
         let built = replying_to(
-            text(&thread, "agreed".into(), 900),
+            text(&thread, "agreed".into(), &[], 900),
             quote(&target, "the original", &[]),
         );
 
@@ -352,7 +360,7 @@ mod tests {
             style: Style::Bold,
         };
         let built = replying_to(
-            text(&thread, "yes".into(), 900),
+            text(&thread, "yes".into(), &[], 900),
             quote(&target(), body, &[bold]),
         );
 
@@ -434,7 +442,7 @@ mod tests {
     fn a_group_echo_lands_in_the_group_thread() {
         let aci = Uuid::new_v4();
         let thread = Thread::Group([4u8; 32]);
-        let message = text(&thread, "team".into(), 77);
+        let message = text(&thread, "team".into(), &[], 77);
 
         let content = envelope(aci, DeviceId::new(1).unwrap(), &thread, message, 77);
         let (derived, projected) = from_content(&content).unwrap();

@@ -137,8 +137,8 @@ async fn serve(mut commands: UnboundedReceiver<Command>, mut events: Events) -> 
                 queue(&mut manager, &db, &mut events, &mut pending, queue_drained, outgoing).await;
             }
             command = commands.recv() => match command {
-                Some(Command::SendText { thread, body, quote, timestamp }) => {
-                    let mut message = outgoing::text(&thread, body, timestamp);
+                Some(Command::SendText { thread, body, ranges, quote, timestamp }) => {
+                    let mut message = outgoing::text(&thread, body, &ranges, timestamp);
                     if let Some(quoted) = quote {
                         message = outgoing::replying_to(
                             message,
@@ -161,8 +161,8 @@ async fn serve(mut commands: UnboundedReceiver<Command>, mut events: Events) -> 
                     let outgoing = Prepared::untracked(thread, message, timestamp);
                     queue(&mut manager, &db, &mut events, &mut pending, queue_drained, outgoing).await;
                 }
-                Some(Command::EditMessage { thread, target, body, timestamp }) => {
-                    let message = outgoing::edit(&thread, target, body, timestamp);
+                Some(Command::EditMessage { thread, target, body, ranges, timestamp }) => {
+                    let message = outgoing::edit(&thread, target, body, &ranges, timestamp);
                     save_outgoing(&manager, &thread, message.clone(), timestamp).await;
                     // Reports against the original: the edit replaces that
                     // bubble, so its status is what the UI shows.
@@ -170,13 +170,12 @@ async fn serve(mut commands: UnboundedReceiver<Command>, mut events: Events) -> 
                         .reporting(target);
                     queue(&mut manager, &db, &mut events, &mut pending, queue_drained, outgoing).await;
                 }
-                Some(Command::SendAttachments { thread, body, paths, quote, timestamp }) => {
+                Some(Command::SendAttachments { thread, body, ranges, paths, quote, timestamp }) => {
                     tokio::task::spawn_local(upload(
                         media.clone(),
                         thread,
-                        body,
+                        Composed { body, ranges, quote },
                         paths,
-                        quote,
                         timestamp,
                     ));
                 }
@@ -512,14 +511,33 @@ async fn hydrate(cache: &Cache, messages: &mut [data::Message]) {
     for message in messages {
         let attachments: Vec<_> = message
             .attachment_refs()
-            .map(|attached| attached.id.clone())
+            .map(|attached| (attached.id.clone(), wants_measuring(attached)))
             .collect();
-        for id in attachments {
+        for (id, measure) in attachments {
             if let Some(path) = cache.attachment(&id).await {
+                if measure && let Some(size) = measured(&path).await {
+                    message.set_image_size(&id, size);
+                }
                 message.set_blob(&id, attachment::Blob::Cached(path));
             }
         }
     }
+}
+
+/// An image whose sender did not declare its dimensions. Signal usually does,
+/// but a wrong aspect ratio is visible in a way a missing one is not.
+fn wants_measuring(attached: &attachment::Attachment) -> bool {
+    matches!(attached.kind, attachment::Kind::Image { size: None, .. })
+}
+
+/// Reads the header rather than decoding the pixels, so this is a few hundred
+/// bytes off disk however large the picture is.
+async fn measured(path: &Path) -> Option<attachment::Size> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || attachment::dimensions(&path))
+        .await
+        .ok()
+        .flatten()
 }
 
 /// Bounds concurrent downloads so opening a media-heavy thread does not fire a
@@ -622,14 +640,22 @@ async fn queue(
 /// Reads and uploads the files, then queues the finished message. Runs off the
 /// command loop because `upload_attachments` needs only `&Manager`, so a large
 /// file does not stall every other send.
+/// The parts of a message that survive an upload, held together so the send path
+/// does not take five positional arguments that are easy to transpose.
+struct Composed {
+    body: String,
+    ranges: Vec<data::message::Range>,
+    quote: Option<super::command::Quoted>,
+}
+
 async fn upload(
     context: Media,
     thread: Thread,
-    body: String,
+    composed: Composed,
     paths: Vec<PathBuf>,
-    quote: Option<super::command::Quoted>,
     timestamp: u64,
 ) {
+    let Composed { body, ranges, quote } = composed;
     let Media {
         manager,
         cache,
@@ -676,7 +702,7 @@ async fn upload(
         adopt(&cache, &db, path, pointer).await;
     }
 
-    let mut message = outgoing::message(&thread, body, pointers, timestamp);
+    let mut message = outgoing::message(&thread, body, &ranges, pointers, timestamp);
     if let Some(quoted) = quote {
         message = outgoing::replying_to(
             message,
@@ -769,6 +795,19 @@ async fn download_all(
         let Ok(_permit) = limiter.acquire().await else {
             return;
         };
+        // presage reads the whole attachment before it verifies the digest, so
+        // there is no byte count to report along the way; what the UI gets is
+        // "this one is in flight", which is what its bar shows.
+        emit(
+            &mut events,
+            Event::Attachment {
+                thread: thread.clone(),
+                id: id.clone(),
+                blob: attachment::Blob::Downloading,
+                measured: None,
+            },
+        )
+        .await;
         match manager.get_attachment(&pointer).await {
             Ok(bytes) => match cache.put_attachment(&id, &content_type, &bytes).await {
                 Ok(path) => {
@@ -776,12 +815,17 @@ async fn download_all(
                     {
                         warn!(%error, "failed to record a cached blob");
                     }
+                    let measured = match content_type.starts_with("image/") {
+                        true => measured(&path).await,
+                        false => None,
+                    };
                     emit(
                         &mut events,
                         Event::Attachment {
                             thread: thread.clone(),
                             id,
                             blob: attachment::Blob::Cached(path),
+                            measured,
                         },
                     )
                     .await;
@@ -806,6 +850,7 @@ async fn fail(events: &mut Events, thread: &Thread, id: attachment::Id, error: S
             thread: thread.clone(),
             id,
             blob: attachment::Blob::Failed(error),
+            measured: None,
         },
     )
     .await;

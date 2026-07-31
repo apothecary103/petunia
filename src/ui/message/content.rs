@@ -1,17 +1,19 @@
 use gpui::prelude::*;
 use gpui::{
     AnyElement, Div, FontStyle, FontWeight, HighlightStyle, MouseButton, SharedString, StyledText,
-    div, img, px,
+    div, px,
 };
-use gpui_component::IconName;
+use gpui_component::progress::Progress;
+use gpui_component::{IconName, Sizable};
 
 use crate::config::Theme;
+use crate::ui::image;
 use crate::config::messages::Spacing;
 use crate::data::attachment::{Attachment, Blob, Kind};
 use crate::data::message::{Content, Quote, Range, Reaction, Status, Update};
 use crate::data::{Message, State};
 use crate::ui::kit;
-use super::format;
+use super::{emoji, format};
 
 /// Everything one message shows: its body, whatever it carries, and whatever
 /// was done to it afterwards.
@@ -39,13 +41,21 @@ impl Body<'_> {
             });
 
         block = match &self.message.content {
-            Content::Text { body, ranges } => block.child(
-                div()
-                    .text_size(px(spacing.body))
-                    .line_height(px(spacing.body * theme.typography.line_height))
-                    .text_color(theme.text)
-                    .child(styled(body, ranges, self.state, theme)),
-            ),
+            Content::Text { body, ranges } => {
+                // A message that is nothing but a couple of emoji is drawn at a
+                // size you can read, the way Signal does.
+                let size = match emoji::jumbo(body) {
+                    Some(scale) if ranges.is_empty() => spacing.body * scale,
+                    _ => spacing.body,
+                };
+                block.child(
+                    div()
+                        .text_size(px(size))
+                        .line_height(px(size * theme.typography.line_height))
+                        .text_color(theme.text)
+                        .child(styled(body, ranges, self.state, theme)),
+                )
+            }
             Content::Sticker(sticker) => block.child(self.sticker(sticker.image.as_ref())),
             Content::Deleted => block.child(
                 div()
@@ -80,14 +90,11 @@ impl Body<'_> {
         block
     }
 
-    fn sticker(&self, image: Option<&Attachment>) -> AnyElement {
+    fn sticker(&self, sticker: Option<&Attachment>) -> AnyElement {
         let edge = self.spacing.sticker;
 
-        match image.map(|image| &image.blob) {
-            Some(Blob::Cached(path)) => img(path.clone())
-                .max_w(px(edge))
-                .max_h(px(edge))
-                .into_any_element(),
+        match sticker.map(|sticker| &sticker.blob) {
+            Some(Blob::Cached(path)) => image::picture(path, edge, edge).into_any_element(),
             _ => div()
                 .size(px(edge * 0.5))
                 .flex()
@@ -108,9 +115,7 @@ impl Body<'_> {
             // other axis.
             (Kind::Image { size, .. }, Blob::Cached(path)) => {
                 let (width, height) = fit(*size, self.max_image);
-                img(path.clone())
-                    .w(px(width))
-                    .h(px(height))
+                image::picture(path, width, height)
                     .rounded(px(kit::RADIUS))
                     .into_any_element()
             }
@@ -118,9 +123,7 @@ impl Body<'_> {
                 file_chip(attachment, Some(path.to_string_lossy().into_owned()), theme)
                     .into_any_element()
             }
-            (_, Blob::Downloading(progress)) => {
-                progress_chip(attachment, *progress, theme).into_any_element()
-            }
+            (_, Blob::Downloading) => downloading_chip(attachment, theme).into_any_element(),
             (_, Blob::Failed(error)) => status_chip(
                 attachment,
                 format!("Could not download — {error}"),
@@ -350,13 +353,45 @@ fn file_chip(attachment: &Attachment, cached: Option<String>, theme: &Theme) -> 
         )
 }
 
-fn progress_chip(attachment: &Attachment, progress: f32, theme: &Theme) -> Div {
-    status_chip(
-        attachment,
-        format!("Downloading… {:.0}%", progress * 100.0),
-        theme.text_muted,
-        theme,
-    )
+/// An attachment in flight. The bar slides rather than fills: presage hands back
+/// the whole file at once, so the only honest thing to show is that something is
+/// happening and roughly how much of it there is.
+fn downloading_chip(attachment: &Attachment, theme: &Theme) -> Div {
+    chip_shell(theme)
+        .child(kit::icon(icon_for(&attachment.kind), 16.0, theme.text_muted))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .gap_1()
+                .child(
+                    div()
+                        .truncate()
+                        .text_size(px(theme.typography.ui_size))
+                        .text_color(theme.text)
+                        .child(SharedString::from(label(attachment))),
+                )
+                .child(
+                    Progress::new(SharedString::from(format!(
+                        "download-{}",
+                        attachment.id.as_str()
+                    )))
+                    .loading(true)
+                    .color(theme.accent)
+                    .with_size(gpui_component::Size::XSmall),
+                )
+                .child(
+                    div()
+                        .text_size(px(theme.typography.ui_size - 3.0))
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(format!(
+                            "Downloading… {}",
+                            size(attachment.size)
+                        ))),
+                ),
+        )
 }
 
 fn status_chip(

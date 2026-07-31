@@ -20,6 +20,8 @@ pub enum Command {
     SendText {
         thread: Thread,
         body: String,
+        /// Signal carries formatting as offsets over the body, not as markup.
+        ranges: Vec<Range>,
         /// Set when this is a reply; carries a snapshot of the quoted message
         /// because the recipient may not have the original.
         quote: Option<Quoted>,
@@ -42,6 +44,7 @@ pub enum Command {
         thread: Thread,
         target: u64,
         body: String,
+        ranges: Vec<Range>,
         timestamp: u64,
     },
     /// Uploads the files, then sends them with an optional caption. Paths rather
@@ -49,6 +52,7 @@ pub enum Command {
     SendAttachments {
         thread: Thread,
         body: String,
+        ranges: Vec<Range>,
         paths: Vec<PathBuf>,
         quote: Option<Quoted>,
         timestamp: u64,

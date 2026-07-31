@@ -1,8 +1,9 @@
 use gpui::prelude::*;
-use gpui::{Context, Entity, SharedString, Window, div, img, px};
+use gpui::{Context, Entity, SharedString, Window, div, px};
 use uuid::Uuid;
 
 use super::avatar::avatar;
+use super::image;
 use super::kit;
 use crate::config::Theme;
 use crate::data::attachment::{Blob, Kind};
@@ -131,8 +132,7 @@ fn conversation(thread: &Thread, state: &State, palette: &Theme) -> gpui::Div {
                             .flex_wrap()
                             .gap_1p5()
                             .children(shared.into_iter().map(|path| {
-                                img(path)
-                                    .size(px(62.0))
+                                image::cropped(&path, 62.0)
                                     .rounded(px(kit::RADIUS))
                                     .into_any_element()
                             })),

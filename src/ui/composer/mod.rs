@@ -1,0 +1,570 @@
+pub mod draft;
+
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use gpui::prelude::*;
+use gpui::{Context, Div, Entity, MouseButton, SharedString, Subscription, Window, div, px};
+use gpui_component::IconName;
+use gpui_component::input::{Input, InputEvent, InputState};
+
+use super::kit;
+use crate::actions;
+use crate::config::Theme;
+use crate::data::message::range::Style;
+use crate::data::{MessageId, Thread};
+use crate::signal::Command;
+use crate::store::Store;
+use crate::theme::ActivePalette;
+
+/// Signal re-sends "started" about every ten seconds while typing continues, and
+/// the receiving side ages an indicator out after fifteen.
+const TYPING_INTERVAL: Duration = Duration::from_secs(10);
+
+/// What this message is doing besides being sent: answering one, or replacing
+/// one. Both are cancelled by Escape.
+#[derive(Debug, Clone)]
+pub enum Intent {
+    Reply { target: MessageId, summary: String },
+    Edit { target: MessageId },
+}
+
+/// The composer card. A rounded panel floating over the conversation with its
+/// controls inside it, a context strip beneath, and whatever the message is
+/// carrying stacked above.
+pub struct Composer {
+    store: Entity<Store>,
+    input: Entity<InputState>,
+    intent: Option<Intent>,
+    attachments: Vec<PathBuf>,
+    formatting: bool,
+    /// When the last typing indicator went out, so the re-send is throttled.
+    announced: Option<Instant>,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl Composer {
+    pub fn new(store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .multi_line(true)
+                .submit_on_enter(true)
+                .auto_grow(1, 8)
+                .placeholder("Message")
+        });
+
+        let subscriptions = vec![cx.subscribe_in(&input, window, Self::on_input)];
+
+        Self {
+            store,
+            input,
+            intent: None,
+            attachments: Vec::new(),
+            formatting: false,
+            announced: None,
+            _subscriptions: subscriptions,
+        }
+    }
+
+    pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| input.focus(window, cx));
+    }
+
+    pub fn is_empty(&self, cx: &gpui::App) -> bool {
+        self.input.read(cx).value().trim().is_empty()
+    }
+
+    /// Starts a reply. The quoted text is snapshotted here because the recipient
+    /// may not have the original.
+    pub fn reply_to(
+        &mut self,
+        target: MessageId,
+        summary: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.intent = Some(Intent::Reply { target, summary });
+        self.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Starts an edit, seeding the field with what is being replaced.
+    pub fn edit(
+        &mut self,
+        target: MessageId,
+        body: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.intent = Some(Intent::Edit { target });
+        self.input
+            .update(cx, |input, cx| input.set_value(body, window, cx));
+        self.focus(window, cx);
+        cx.notify();
+    }
+
+    pub fn attach(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        self.attachments.extend(paths);
+        cx.notify();
+    }
+
+    /// Escape. Drops the reply or edit first and only then the attachments, so
+    /// one press never throws away more than one thing.
+    pub fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if let Some(intent) = self.intent.take() {
+            // An edit put its subject in the field, so leaving that behind would
+            // look like a new message the user never wrote.
+            if matches!(intent, Intent::Edit { .. }) {
+                self.input
+                    .update(cx, |input, cx| input.set_value("", window, cx));
+            }
+            cx.notify();
+            return true;
+        }
+        if !self.attachments.is_empty() {
+            self.attachments.clear();
+            cx.notify();
+            return true;
+        }
+        false
+    }
+
+    fn on_input(
+        &mut self,
+        _input: &Entity<InputState>,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            // Shift+Enter has already inserted its newline by the time this
+            // arrives, so only the bare press sends.
+            InputEvent::PressEnter { shift: false, .. } => self.submit(window, cx),
+            InputEvent::Change => self.announce_typing(cx),
+            _ => {}
+        }
+    }
+
+    /// The first keystroke says so, and nothing more often than every ten
+    /// seconds; emptying the field says it stopped.
+    fn announce_typing(&mut self, cx: &mut Context<Self>) {
+        let Some(thread) = self.store.read(cx).active().cloned() else {
+            return;
+        };
+
+        if self.is_empty(cx) {
+            self.stop_typing(&thread, cx);
+            return;
+        }
+        let due = self
+            .announced
+            .is_none_or(|when| when.elapsed() >= TYPING_INTERVAL);
+        if due {
+            self.announced = Some(Instant::now());
+            self.store.update(cx, |store, _| {
+                store.send(Command::Typing {
+                    thread,
+                    started: true,
+                })
+            });
+        }
+    }
+
+    fn stop_typing(&mut self, thread: &Thread, cx: &mut Context<Self>) {
+        if self.announced.take().is_none() {
+            return;
+        }
+        let thread = thread.clone();
+        self.store.update(cx, |store, _| {
+            store.send(Command::Typing {
+                thread,
+                started: false,
+            })
+        });
+    }
+
+    fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(thread) = self.store.read(cx).active().cloned() else {
+            return;
+        };
+        let typed = self.input.read(cx).value().to_string();
+        let (body, ranges) = draft::shortcuts(typed.trim());
+        let attachments = std::mem::take(&mut self.attachments);
+
+        if body.is_empty() && attachments.is_empty() {
+            return;
+        }
+
+        let intent = self.intent.take();
+        self.input
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        // The field is empty now, so nobody should still be watching a typing
+        // indicator that will only age out fifteen seconds later.
+        self.stop_typing(&thread, cx);
+
+        self.store.update(cx, |store, cx| {
+            store.compose(thread, body, ranges, attachments, intent, cx)
+        });
+        cx.notify();
+    }
+
+    /// A toolbar button wraps the selection in the marker it stands for, so what
+    /// the button does is visible in the field rather than hidden in state the
+    /// composer would have to keep in step with every keystroke.
+    fn mark(&mut self, style: Style, window: &mut Window, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| {
+            let text = input.value().to_string();
+            let (wrapped, selection) = draft::wrap(&text, input.selected_range(), style);
+            input.set_value(wrapped, window, cx);
+            input.set_selected_range(selection, cx);
+            input.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    pub fn pick_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The platform's own dialog rather than a crate's: gpui already owns the
+        // event loop a file picker has to run on.
+        let picked = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Attach".into()),
+        });
+
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = picked.await else {
+                return;
+            };
+            this.update(cx, |this, cx| this.attach(paths, cx)).ok();
+        })
+        .detach();
+    }
+}
+
+impl Render for Composer {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = cx.palette().clone();
+        let store = self.store.read(cx);
+        let title = store
+            .active()
+            .zip(store.state())
+            .map(|(thread, state)| state.title(thread))
+            .unwrap_or_default();
+        let typing = store
+            .active()
+            .zip(store.state())
+            .and_then(|(thread, state)| describe_typing(state, thread));
+
+        let field = div()
+            .flex()
+            .items_end()
+            .gap_2()
+            .px_3p5()
+            .py_2p5()
+            .rounded(px(kit::RADIUS_LG))
+            .bg(palette.elevated)
+            .border_1()
+            .border_color(palette.border)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(Input::new(&self.input).appearance(false).bordered(false)),
+            )
+            .child(
+                div()
+                    .id("formatting")
+                    .flex_none()
+                    .size(px(26.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(7.0))
+                    .cursor_pointer()
+                    .when(self.formatting, |this| this.bg(palette.active))
+                    .hover(|this| this.bg(palette.hover))
+                    .text_size(px(12.0))
+                    .text_color(if self.formatting {
+                        palette.text_dim
+                    } else {
+                        palette.text_muted
+                    })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.formatting = !this.formatting;
+                            cx.notify();
+                        }),
+                    )
+                    .child("Aa"),
+            )
+            .child(kit::icon_button(
+                "attach",
+                IconName::Plus,
+                &palette,
+                cx.listener(|this, _, window, cx| this.pick_files(window, cx)),
+            ))
+            .child(send(
+                &palette,
+                cx.listener(|this, _, window, cx| this.submit(window, cx)),
+            ));
+
+        kit::measured()
+            .flex()
+            .flex_col()
+            .gap_1p5()
+            .px_4()
+            .pb_4()
+            .pt_2()
+            .on_action(
+                cx.listener(|this, _: &actions::AttachFile, window, cx| {
+                    this.pick_files(window, cx)
+                }),
+            )
+            .when_some(typing, |this, who| {
+                this.child(
+                    div()
+                        .px_1()
+                        .text_size(px(palette.typography.ui_size - 2.0))
+                        .text_color(palette.text_muted)
+                        .child(SharedString::from(who)),
+                )
+            })
+            .when_some(self.intent.clone(), |this, intent| {
+                this.child(banner(&intent, &palette, cx))
+            })
+            .when(!self.attachments.is_empty(), |this| {
+                this.child(strip(&self.attachments, &palette, cx))
+            })
+            .when(self.formatting, |this| this.child(toolbar(&palette, cx)))
+            .child(field)
+            .child(context(&title, &palette))
+    }
+}
+
+fn describe_typing(state: &crate::data::State, thread: &Thread) -> Option<String> {
+    let names: Vec<_> = state
+        .typing(thread)
+        .into_iter()
+        .map(|who| state.name_of(who))
+        .collect();
+
+    match names.as_slice() {
+        [] => None,
+        [one] => Some(format!("{one} is typing…")),
+        [rest @ .., last] => Some(format!("{} and {last} are typing…", rest.join(", "))),
+    }
+}
+
+/// What this message is answering or replacing, with the way out beside it.
+fn banner(intent: &Intent, palette: &Theme, cx: &mut Context<Composer>) -> Div {
+    let (label, detail) = match intent {
+        Intent::Reply { summary, .. } => ("Replying to", summary.clone()),
+        Intent::Edit { .. } => ("Editing", String::new()),
+    };
+
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .px_3()
+        .py_1p5()
+        .rounded(px(kit::RADIUS))
+        .bg(palette.surface)
+        .border_1()
+        .border_color(palette.border)
+        .child(
+            div()
+                .flex_none()
+                .text_size(px(palette.typography.ui_size - 2.0))
+                .text_color(palette.text_muted)
+                .child(label),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(px(palette.typography.ui_size - 1.0))
+                .text_color(palette.text_dim)
+                .child(SharedString::from(detail)),
+        )
+        .child(kit::icon_button(
+            "cancel-intent",
+            IconName::Close,
+            palette,
+            cx.listener(|this: &mut Composer, _, window, cx| {
+                this.cancel(window, cx);
+            }),
+        ))
+}
+
+/// What is going out with the message, each with its own way off.
+fn strip(paths: &[PathBuf], palette: &Theme, cx: &mut Context<Composer>) -> Div {
+    div()
+        .flex()
+        .flex_wrap()
+        .gap_1p5()
+        .children(paths.iter().enumerate().map(|(index, path)| {
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+
+            div()
+                .id(SharedString::from(format!("attached-{index}")))
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .px_2()
+                .py_1()
+                .rounded(px(kit::RADIUS))
+                .bg(palette.elevated)
+                .border_1()
+                .border_color(palette.border)
+                .child(thumbnail(path, palette))
+                .child(
+                    div()
+                        .max_w(px(140.0))
+                        .truncate()
+                        .text_size(px(palette.typography.ui_size - 2.0))
+                        .text_color(palette.text_dim)
+                        .child(SharedString::from(name)),
+                )
+                .child(kit::icon_button(
+                    SharedString::from(format!("drop-{index}")),
+                    IconName::Close,
+                    palette,
+                    cx.listener(move |this: &mut Composer, _, _, cx| {
+                        if index < this.attachments.len() {
+                            this.attachments.remove(index);
+                            cx.notify();
+                        }
+                    }),
+                ))
+        }))
+}
+
+/// A picture of what is being sent when it is a picture, and the kind of thing
+/// it is otherwise.
+fn thumbnail(path: &Path, palette: &Theme) -> gpui::AnyElement {
+    let kind = crate::data::attachment::content_type(path);
+    if kind.starts_with("image/") {
+        return super::image::cropped(path, 28.0)
+            .rounded(px(4.0))
+            .into_any_element();
+    }
+
+    let icon = match kind.split('/').next().unwrap_or_default() {
+        "video" => IconName::Play,
+        "audio" => IconName::Bell,
+        _ => IconName::File,
+    };
+    kit::icon(icon, 16.0, palette.text_muted).into_any_element()
+}
+
+/// Signal's own formatting. Each button is drawn in the style it applies, so it
+/// shows what it does rather than needing an icon to say so -- the icon set has
+/// no bold or italic, and the box-drawing glyph a spoiler wanted is simply
+/// absent from the system font.
+fn toolbar(palette: &Theme, cx: &mut Context<Composer>) -> Div {
+    const MARKS: [(&str, Style); 5] = [
+        ("bold", Style::Bold),
+        ("italic", Style::Italic),
+        ("strikethrough", Style::Strikethrough),
+        ("monospace", Style::Monospace),
+        ("spoiler", Style::Spoiler),
+    ];
+
+    div()
+        .flex()
+        .items_center()
+        .gap_0p5()
+        .p_1()
+        .rounded(px(kit::RADIUS))
+        .bg(palette.elevated)
+        .border_1()
+        .border_color(palette.border)
+        .children(MARKS.map(|(id, style)| {
+            // A fixed square with everything centred inside it, so a glyph and
+            // an icon sit on the same baseline instead of drifting apart.
+            let button = div()
+                .id(id)
+                .size(px(26.0))
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .rounded(px(6.0))
+                .cursor_pointer()
+                .hover(|this| this.bg(palette.hover))
+                .text_size(px(palette.typography.ui_size))
+                .text_color(palette.text_dim)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this: &mut Composer, _, window, cx| {
+                        this.mark(style, window, cx)
+                    }),
+                );
+
+            match style {
+                Style::Bold => button.font_weight(gpui::FontWeight::BOLD).child("B"),
+                Style::Italic => button.italic().child("I"),
+                Style::Strikethrough => button.line_through().child("S"),
+                Style::Monospace => button
+                    .font_family(palette.typography.mono.clone())
+                    .child("M"),
+                _ => button.child(kit::icon(IconName::EyeOff, 15.0, palette.text_dim)),
+            }
+        }))
+}
+
+/// The strip under the composer, carrying whatever is true about where this
+/// message is going rather than another row of buttons.
+fn context(title: &str, palette: &Theme) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_3()
+        .px_1()
+        .text_size(px(palette.typography.ui_size - 3.0))
+        .text_color(palette.text_muted)
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .child(SharedString::from(if title.is_empty() {
+                    "Signal".to_string()
+                } else {
+                    format!("To {title}")
+                })),
+        )
+        .child(
+            div()
+                .flex_none()
+                .child("Enter to send · Shift+Enter for a new line"),
+        )
+}
+
+/// The one bright thing on the screen, so the eye knows where the action is.
+fn send(
+    palette: &Theme,
+    on_click: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut gpui::App) + 'static,
+) -> gpui::Stateful<Div> {
+    div()
+        .id("send")
+        .flex_none()
+        .size(px(28.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .cursor_pointer()
+        .bg(palette.accent)
+        .text_size(px(13.0))
+        .text_color(palette.on_accent)
+        .on_mouse_down(MouseButton::Left, on_click)
+        .child("↑")
+}

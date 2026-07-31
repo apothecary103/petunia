@@ -55,7 +55,10 @@ pub enum Kind {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Blob {
     Missing,
-    Downloading(f32),
+    /// In flight. Carries no fraction: presage reads an attachment whole before
+    /// it can verify the digest, so there is no byte count to report and a
+    /// percentage here would be invented.
+    Downloading,
     Cached(PathBuf),
     Failed(String),
 }
@@ -125,6 +128,13 @@ pub fn content_type(path: &Path) -> String {
         _ => "application/octet-stream",
     }
     .to_string()
+}
+
+/// An image's real dimensions, read from its header rather than by decoding it,
+/// so this costs a few hundred bytes off disk however large the picture is.
+pub fn dimensions(path: &Path) -> Option<Size> {
+    let (width, height) = image::image_dimensions(path).ok()?;
+    Some(Size { width, height })
 }
 
 fn kind(pointer: &AttachmentPointer, content_type: &str) -> Kind {

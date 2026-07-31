@@ -121,9 +121,17 @@ impl History {
 
     /// A digest is shared by every copy of the same bytes, so a single download
     /// resolves the attachment wherever it was forwarded to.
-    pub fn set_blob(&mut self, id: &attachment::Id, blob: attachment::Blob) {
+    pub fn set_blob(
+        &mut self,
+        id: &attachment::Id,
+        blob: attachment::Blob,
+        measured: Option<attachment::Size>,
+    ) {
         for message in &mut self.messages {
             message.set_blob(id, blob.clone());
+            if let Some(measured) = measured {
+                message.set_image_size(id, measured);
+            }
         }
     }
 

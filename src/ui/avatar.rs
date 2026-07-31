@@ -1,8 +1,9 @@
 use std::path::Path;
 
 use gpui::prelude::*;
-use gpui::{Hsla, IntoElement, SharedString, img, px};
+use gpui::{Hsla, IntoElement, SharedString, px};
 
+use super::image;
 use crate::config::Theme;
 
 /// A cached avatar, or the first letter of the name on a colour picked from the
@@ -17,8 +18,7 @@ pub fn avatar(
     let tint = theme.accent_for(seed);
 
     match path {
-        Some(path) => img(path.to_path_buf())
-            .size(px(size))
+        Some(path) => image::cropped(path, size)
             .rounded_full()
             .into_any_element(),
         None => gpui::div()

@@ -1,6 +1,6 @@
 pub mod bridge;
 mod cache;
-mod command;
+pub mod command;
 mod db;
 mod event;
 mod outgoing;

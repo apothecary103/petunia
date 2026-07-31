@@ -35,6 +35,9 @@ pub enum Event {
         thread: Thread,
         id: attachment::Id,
         blob: attachment::Blob,
+        /// What an image turned out to be, when the sender did not say. Read
+        /// from the file's header rather than by decoding it.
+        measured: Option<attachment::Size>,
     },
     Preview {
         thread: Thread,

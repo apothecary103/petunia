@@ -2,6 +2,7 @@ pub mod avatar;
 pub mod composer;
 pub mod conversation;
 pub mod details;
+pub mod image;
 pub mod kit;
 pub mod linking;
 pub mod message;

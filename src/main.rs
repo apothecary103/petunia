@@ -30,14 +30,8 @@ fn main() {
     let app = gpui_platform::application().with_assets(gpui_component_assets::Assets);
 
     app.run(|cx: &mut App| {
-        gpui_component::init(cx);
-
         let loaded = config::load();
-        theme::install((*loaded.theme).clone(), cx);
-        actions::bind(&loaded.config.keys, cx);
-        for error in &loaded.errors {
-            tracing::warn!(%error, "config problem");
-        }
+        install(&loaded, cx);
 
         let config = Arc::new(loaded.config);
         let store = cx.new(|_| Store::new(config));
@@ -76,6 +70,21 @@ fn main() {
     });
 }
 
+/// Applies a freshly read config. The order matters and is not obvious:
+/// `actions::bind` clears **every** keybinding, including the ones the widget
+/// library installs for its own text input, so the library has to be initialised
+/// after it or the composer loses backspace, enter and every arrow key. The
+/// theme goes last because `gpui_component::init` seeds its own palette.
+fn install(loaded: &config::Loaded, cx: &mut App) {
+    actions::bind(&loaded.config.keys, cx);
+    gpui_component::init(cx);
+    theme::install((*loaded.theme).clone(), cx);
+
+    for error in &loaded.errors {
+        tracing::warn!(%error, "config problem");
+    }
+}
+
 /// Re-reads the config whenever it or a theme file changes, so an edit applies
 /// without a restart.
 fn watch_config(store: gpui::Entity<Store>, cx: &mut App) {
@@ -96,12 +105,8 @@ fn watch_config(store: gpui::Entity<Store>, cx: &mut App) {
 
             let loaded = config::load();
             cx.update(|cx| {
-                theme::install((*loaded.theme).clone(), cx);
-                actions::bind(&loaded.config.keys, cx);
-                for error in &loaded.errors {
-                    tracing::warn!(%error, "config problem");
-                }
-                let config = Arc::new(loaded.config);
+                install(&loaded, cx);
+                let config = Arc::new(loaded.config.clone());
                 store.update(cx, |store, cx| store.config_changed(config, cx));
             });
             tracing::info!("reloaded config");

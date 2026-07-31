@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{Context, EventEmitter};
@@ -5,8 +6,11 @@ use tokio::sync::mpsc::UnboundedSender;
 use tracing::{error, warn};
 
 use crate::config::Config;
-use crate::data::{self, Fragment, History, State, Thread};
+use crate::data::message::Range;
+use crate::data::{self, Fragment, History, MessageId, State, Thread};
+use crate::signal::command::Quoted;
 use crate::signal::{Command, Connection, Event};
+use crate::ui::composer::Intent;
 
 /// Everything the views read, and the one way they talk back to the Signal
 /// worker. Views observe this entity rather than owning any of it.
@@ -100,6 +104,9 @@ impl Store {
         if let Some(state) = self.state.as_mut() {
             state.index.clear_unread(&thread);
         }
+        // Looking at a conversation is what reading it means, so the receipts it
+        // owes go out now rather than waiting to be asked for.
+        self.mark_read(thread.clone());
 
         self.active = Some(thread);
         // Opening a conversation is not a claim about whose profile you wanted.
@@ -112,6 +119,181 @@ impl Store {
             .as_ref()
             .map(|state| state.connection)
             .unwrap_or_default()
+    }
+
+    /// Sends what the composer built, and puts it on screen before the network
+    /// has heard of it. The echo carries `Sending`, which the worker replaces
+    /// with what actually happened.
+    pub fn compose(
+        &mut self,
+        thread: Thread,
+        body: String,
+        ranges: Vec<Range>,
+        attachments: Vec<PathBuf>,
+        intent: Option<Intent>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(aci) = self.state.as_ref().map(|state| state.aci) else {
+            return;
+        };
+        let timestamp = now();
+
+        // An edit replaces a bubble that already exists rather than adding one,
+        // so it takes neither a new timestamp nor an echo of its own.
+        if let Some(Intent::Edit { target }) = &intent {
+            let target = *target;
+            self.send(Command::EditMessage {
+                thread: thread.clone(),
+                target: target.timestamp,
+                body: body.clone(),
+                ranges: ranges.clone(),
+                timestamp,
+            });
+            if let Some(state) = self.state.as_mut() {
+                let edit = data::Message::written(
+                    MessageId {
+                        timestamp,
+                        sender: aci,
+                    },
+                    body,
+                    ranges,
+                );
+                state.history_mut(&thread).apply_edit(&target, edit, timestamp);
+            }
+            cx.notify();
+            return;
+        }
+
+        let quote = match &intent {
+            Some(Intent::Reply { target, .. }) => self.quoted(*target),
+            _ => None,
+        };
+
+        let mut echo = data::Message::written(
+            MessageId {
+                timestamp,
+                sender: aci,
+            },
+            body.clone(),
+            ranges.clone(),
+        );
+        echo.status = Some(data::Status::Sending);
+        echo.quote = quote.as_ref().map(|quoted| {
+            Box::new(data::message::Quote {
+                id: quoted.id,
+                body: quoted.body.clone(),
+                ranges: quoted.ranges.clone(),
+                thumbnail: None,
+            })
+        });
+        for path in &attachments {
+            let size = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+            echo.attachments
+                .push(crate::data::attachment::from_path(path.clone(), size));
+        }
+
+        self.send(if attachments.is_empty() {
+            Command::SendText {
+                thread: thread.clone(),
+                body,
+                ranges,
+                quote,
+                timestamp,
+            }
+        } else {
+            Command::SendAttachments {
+                thread: thread.clone(),
+                body,
+                ranges,
+                paths: attachments,
+                quote,
+                timestamp,
+            }
+        });
+
+        if let Some(state) = self.state.as_mut() {
+            state.record(&thread, &echo);
+            state.history_mut(&thread).insert(echo);
+        }
+        cx.notify();
+    }
+
+    /// A reply carries a snapshot of what it answers, because the recipient may
+    /// not have the original.
+    fn quoted(&self, target: MessageId) -> Option<Quoted> {
+        let message = self
+            .state
+            .as_ref()?
+            .histories
+            .values()
+            .find_map(|history| history.find(&target))?;
+
+        Some(Quoted {
+            id: target,
+            body: message.summary(),
+            ranges: message.ranges().to_vec(),
+        })
+    }
+
+    /// Reacts to a message, or takes the reaction back when it is already ours.
+    pub fn react(&mut self, thread: Thread, target: MessageId, emoji: String, cx: &mut Context<Self>) {
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        let aci = state.aci;
+        let mine = state
+            .history(&thread)
+            .and_then(|history| history.find(&target))
+            .is_some_and(|message| {
+                message
+                    .reactions
+                    .iter()
+                    .any(|reaction| reaction.author == aci && reaction.emoji == emoji)
+            });
+
+        let timestamp = now();
+        state.history_mut(&thread).apply_reaction(
+            &target,
+            data::Reaction {
+                author: aci,
+                emoji: emoji.clone(),
+                timestamp,
+            },
+            mine,
+        );
+        self.send(Command::React {
+            thread,
+            target,
+            emoji,
+            remove: mine,
+            timestamp,
+        });
+        cx.notify();
+    }
+
+    pub fn delete(&mut self, thread: Thread, target: MessageId, cx: &mut Context<Self>) {
+        if let Some(state) = self.state.as_mut() {
+            state.history_mut(&thread).apply_delete(&target);
+        }
+        self.send(Command::DeleteMessage {
+            thread,
+            target: target.timestamp,
+            timestamp: now(),
+        });
+        cx.notify();
+    }
+
+    /// Owns up to everything unread in a thread: a receipt to each sender and a
+    /// sync to our own other devices.
+    pub fn mark_read(&mut self, thread: Thread) {
+        let Some(state) = self.state.as_ref() else {
+            return;
+        };
+        let messages = state.unread_receipts(&thread);
+        if messages.is_empty() {
+            return;
+        }
+        self.send(Command::MarkRead { thread, messages });
     }
 
     pub fn send(&mut self, command: Command) {
@@ -175,8 +357,13 @@ impl Store {
                 started,
             } => state.set_typing(&thread, sender, started),
             Event::Connection(connection) => state.connection = connection,
-            Event::Attachment { thread, id, blob } => {
-                state.history_mut(&thread).set_blob(&id, blob);
+            Event::Attachment {
+                thread,
+                id,
+                blob,
+                measured,
+            } => {
+                state.history_mut(&thread).set_blob(&id, blob, measured);
             }
             Event::Preview { thread, message } => state.record(&thread, &message),
             Event::History {
@@ -253,12 +440,22 @@ impl Store {
 
         state.record(&thread, &message);
 
-        if message.sender() != state.aci && active.as_ref() != Some(&thread) {
+        let unread = message.sender() != state.aci && active.as_ref() != Some(&thread);
+        if unread {
             let mentioned = message.mentions(state.aci);
             state.index.mark_unread(&thread, mentioned);
         }
-
+        let sender = message.sender();
+        let timestamp = message.timestamp();
         state.history_mut(&thread).insert(message);
+
+        // Arriving in the conversation you are looking at is arriving read.
+        if !unread && sender != state.aci {
+            self.send(Command::MarkRead {
+                thread,
+                messages: vec![(sender, timestamp)],
+            });
+        }
     }
 
     /// An edit or a delete changes what the sidebar should say, but only if it
@@ -271,5 +468,10 @@ impl Store {
             state.record(thread, &last);
         }
     }
+}
 
+/// Signal identifies a message by when it was sent, so this is an identity as
+/// much as a clock reading.
+fn now() -> u64 {
+    chrono::Utc::now().timestamp_millis() as u64
 }
