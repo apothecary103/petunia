@@ -36,6 +36,36 @@ pub fn message(
     }
 }
 
+/// A sticker, sent as its own kind of message rather than as a picture.
+///
+/// The pointer is a *fresh upload* of the sticker's bytes. presage's stored pack
+/// keeps the decrypted image and drops the `AttachmentPointer` it arrived under
+/// (`store.rs`), so there is nothing to forward; recipients fetch
+/// `sticker.data` like any other attachment, and the pack id and key beside it
+/// are what let them install the pack for themselves.
+pub fn sticker(
+    thread: &Thread,
+    pack_id: Vec<u8>,
+    pack_key: Vec<u8>,
+    sticker_id: u32,
+    emoji: Option<String>,
+    data: AttachmentPointer,
+    timestamp: u64,
+) -> DataMessage {
+    DataMessage {
+        sticker: Some(data_message::Sticker {
+            pack_id: Some(pack_id),
+            pack_key: Some(pack_key),
+            sticker_id: Some(sticker_id),
+            emoji,
+            data: Some(data),
+        }),
+        timestamp: Some(timestamp),
+        group_v2: group_context(thread),
+        ..Default::default()
+    }
+}
+
 /// Attaches a reply to a message that has already been built, so the reply path
 /// does not need a second builder that could drift from this one.
 pub fn replying_to(mut message: DataMessage, quote: data_message::Quote) -> DataMessage {

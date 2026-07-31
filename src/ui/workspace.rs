@@ -3,7 +3,7 @@ use gpui::{App, Context, Entity, Focusable as _, SharedString, Subscription, Win
 use gpui_component::{ActiveTheme, IconName};
 
 use super::conversation::{Conversation, Viewing};
-use super::details::Details;
+use super::details::{self, Details};
 use super::kit;
 use super::linking::Linking;
 use super::palette::{Dismissed, Switcher};
@@ -83,6 +83,10 @@ impl Workspace {
             Conversation::new(self.store.clone(), self.player.clone(), window, cx)
         });
         let details = cx.new(|cx| Details::new(self.store.clone(), cx));
+        cx.subscribe_in(&details, window, |this, _, event: &details::Viewing, window, cx| {
+            this.view_media(event.0.clone(), window, cx)
+        })
+        .detach();
 
         // A picture asked for full size opens over everything, so the viewer is
         // the workspace's rather than the conversation column's.

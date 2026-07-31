@@ -221,6 +221,14 @@ async fn serve(mut commands: UnboundedReceiver<Command>, mut events: Events) -> 
                         debug!(%error, "failed to send a typing indicator");
                     }
                 }
+                Some(Command::SendSticker { thread, pack_id, key, sticker_id, emoji, path, timestamp }) => {
+                    tokio::task::spawn_local(upload_sticker(
+                        media.clone(),
+                        thread,
+                        Chosen { pack_id, key, sticker_id, emoji, path },
+                        timestamp,
+                    ));
+                }
                 Some(Command::InstallStickerPack { pack_id, key }) => {
                     match manager.install_sticker_pack(&pack_id, &key).await {
                         Ok(()) => {
@@ -725,6 +733,66 @@ async fn upload(
             outgoing::quote(&quoted.id, &quoted.body, &quoted.ranges),
         );
     }
+    save_outgoing(&manager, &thread, message.clone(), timestamp).await;
+    let _ = prepared.send(Prepared::tracked(thread, message, timestamp));
+}
+
+/// Which sticker, and where its bytes are on disk.
+struct Chosen {
+    pack_id: Vec<u8>,
+    key: Vec<u8>,
+    sticker_id: u32,
+    emoji: Option<String>,
+    path: PathBuf,
+}
+
+async fn upload_sticker(context: Media, thread: Thread, chosen: Chosen, timestamp: u64) {
+    let Media {
+        manager,
+        mut events,
+        prepared,
+        ..
+    } = context;
+
+    let bytes = match tokio::fs::read(&chosen.path).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            error!(%error, "failed to read a sticker");
+            fail_send(&mut events, timestamp).await;
+            return;
+        }
+    };
+    let spec = AttachmentSpec {
+        content_type: attachment::content_type(&chosen.path),
+        length: bytes.len(),
+        ..Default::default()
+    };
+
+    let pointer = match manager.upload_attachments(vec![(spec, bytes)]).await {
+        Ok(mut uploaded) => match uploaded.pop() {
+            Some(Ok(pointer)) => pointer,
+            _ => {
+                error!("sticker upload produced no pointer");
+                fail_send(&mut events, timestamp).await;
+                return;
+            }
+        },
+        Err(error) => {
+            error!(%error, "failed to upload a sticker");
+            fail_send(&mut events, timestamp).await;
+            return;
+        }
+    };
+
+    let message = outgoing::sticker(
+        &thread,
+        chosen.pack_id,
+        chosen.key,
+        chosen.sticker_id,
+        chosen.emoji,
+        pointer,
+        timestamp,
+    );
     save_outgoing(&manager, &thread, message.clone(), timestamp).await;
     let _ = prepared.send(Prepared::tracked(thread, message, timestamp));
 }

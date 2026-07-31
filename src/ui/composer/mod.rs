@@ -1,4 +1,5 @@
 pub mod draft;
+pub mod stickers;
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -38,6 +39,10 @@ pub struct Composer {
     intent: Option<Intent>,
     attachments: Vec<PathBuf>,
     formatting: bool,
+    /// Which pack the sticker picker is showing, or `None` when it is closed.
+    stickers: Option<stickers::Showing>,
+    /// What is typed into the picker's own filter, which is not the message.
+    sticker_query: Entity<InputState>,
     /// When the last typing indicator went out, so the re-send is throttled.
     announced: Option<Instant>,
     _subscriptions: Vec<Subscription>,
@@ -53,7 +58,17 @@ impl Composer {
                 .placeholder("Message")
         });
 
-        let subscriptions = vec![cx.subscribe_in(&input, window, Self::on_input)];
+        let sticker_query = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Search stickers")
+        });
+
+        let subscriptions = vec![
+            cx.subscribe_in(&input, window, Self::on_input),
+            cx.subscribe_in(&sticker_query, window, |this: &mut Self, _, _: &InputEvent, _, cx| {
+                cx.notify();
+                let _ = this;
+            }),
+        ];
 
         Self {
             store,
@@ -61,6 +76,8 @@ impl Composer {
             intent: None,
             attachments: Vec::new(),
             formatting: false,
+            stickers: None,
+            sticker_query,
             announced: None,
             _subscriptions: subscriptions,
         }
@@ -121,12 +138,29 @@ impl Composer {
             cx.notify();
             return true;
         }
+        if self.stickers.take().is_some() {
+            cx.notify();
+            return true;
+        }
         if !self.attachments.is_empty() {
             self.attachments.clear();
             cx.notify();
             return true;
         }
         false
+    }
+
+    /// Sends a sticker, which goes on its own rather than with whatever is
+    /// typed: Signal has no way to carry both.
+    fn send_sticker(&mut self, chosen: stickers::Chosen, cx: &mut Context<Self>) {
+        let Some(thread) = self.store.read(cx).active().cloned() else {
+            return;
+        };
+        self.stickers = None;
+        self.store.update(cx, |store, cx| {
+            store.send_sticker(thread, chosen, cx);
+        });
+        cx.notify();
     }
 
     fn on_input(
@@ -245,16 +279,32 @@ impl Composer {
 impl Render for Composer {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = cx.palette().clone();
-        let store = self.store.read(cx);
-        let title = store
-            .active()
-            .zip(store.state())
-            .map(|(thread, state)| state.title(thread))
-            .unwrap_or_default();
-        let typing = store
-            .active()
-            .zip(store.state())
-            .and_then(|(thread, state)| describe_typing(state, thread));
+        // Read out of the store and let the borrow go: everything below needs
+        // the context mutably to build its listeners.
+        let (title, typing, packs) = {
+            let store = self.store.read(cx);
+            let title = store
+                .active()
+                .zip(store.state())
+                .map(|(thread, state)| state.title(thread))
+                .unwrap_or_default();
+            let typing = store
+                .active()
+                .zip(store.state())
+                .and_then(|(thread, state)| describe_typing(state, thread));
+            // Only cloned when the picker is up, because a pack is a list of
+            // stickers and this runs every frame.
+            let query = self.sticker_query.read(cx).value().to_string();
+            let packs = match self.stickers.is_some() {
+                true => store
+                    .state()
+                    .map(|state| state.sticker_packs.clone())
+                    .unwrap_or_default(),
+                false => Vec::new(),
+            };
+            (title, typing, (packs, query))
+        };
+        let (packs, query) = packs;
 
         let field = div()
             .flex()
@@ -299,6 +349,31 @@ impl Render for Composer {
                     )
                     .child("Aa"),
             )
+            .child(
+                div()
+                    .id("stickers")
+                    .flex_none()
+                    .size(px(26.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(7.0))
+                    .cursor_pointer()
+                    .when(self.stickers.is_some(), |this| this.bg(palette.active))
+                    .hover(|this| this.bg(palette.hover))
+                    .text_size(px(14.0))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.stickers = match this.stickers {
+                                Some(_) => None,
+                                None => Some(stickers::Showing::default()),
+                            };
+                            cx.notify();
+                        }),
+                    )
+                    .child("☺"),
+            )
             .child(kit::icon_button(
                 "attach",
                 IconName::Plus,
@@ -336,6 +411,29 @@ impl Render for Composer {
             })
             .when(!self.attachments.is_empty(), |this| {
                 this.child(strip(&self.attachments, &palette, cx))
+            })
+            .when_some(self.stickers.clone(), |this, showing| {
+                this.child(
+                    stickers::Picker {
+                        packs: &packs,
+                        showing: &showing,
+                        query: &query,
+                        search: &self.sticker_query,
+                        theme: &palette,
+                        on_pack: std::rc::Rc::new(cx.listener(
+                            |this: &mut Self, showing: &stickers::Showing, _, cx| {
+                                this.stickers = Some(showing.clone());
+                                cx.notify();
+                            },
+                        )),
+                        on_pick: std::rc::Rc::new(cx.listener(
+                            |this: &mut Self, chosen: &stickers::Chosen, _, cx| {
+                                this.send_sticker(chosen.clone(), cx)
+                            },
+                        )),
+                    }
+                    .render(),
+                )
             })
             .when(self.formatting, |this| this.child(toolbar(&palette, cx)))
             .child(field)

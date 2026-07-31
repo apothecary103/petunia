@@ -74,6 +74,17 @@ pub enum Command {
         thread: Thread,
         started: bool,
     },
+    /// Sends a sticker from an installed pack. The bytes are re-uploaded because
+    /// presage keeps the decrypted image and drops the pointer it arrived under.
+    SendSticker {
+        thread: Thread,
+        pack_id: Vec<u8>,
+        key: Vec<u8>,
+        sticker_id: u32,
+        emoji: Option<String>,
+        path: PathBuf,
+        timestamp: u64,
+    },
     /// Installs the pack a received sticker came from, and tells our other
     /// devices. The key only ever travels alongside the sticker itself.
     InstallStickerPack {

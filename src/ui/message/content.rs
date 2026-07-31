@@ -10,8 +10,8 @@ use super::{bar, emoji, format, media};
 use crate::audio::Playback;
 use crate::config::Theme;
 use crate::config::messages::Spacing;
-use crate::data::attachment::{Attachment, Blob};
-use crate::data::message::{Content, Quote, Range, Reaction, Status, Sticker, Update};
+use crate::data::attachment::Blob;
+use crate::data::message::{Content, Quote, Range, Status, Sticker, Update};
 use crate::data::{Message, State};
 use crate::ui::kit;
 

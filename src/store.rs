@@ -218,6 +218,52 @@ impl Store {
         cx.notify();
     }
 
+    /// Sends a sticker. It goes on its own rather than alongside whatever is
+    /// typed, because Signal has no way to carry both.
+    pub fn send_sticker(
+        &mut self,
+        thread: Thread,
+        chosen: crate::ui::composer::stickers::Chosen,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(aci) = self.state.as_ref().map(|state| state.aci) else {
+            return;
+        };
+        let timestamp = now();
+
+        let mut echo = data::Message::plain(
+            MessageId {
+                timestamp,
+                sender: aci,
+            },
+            String::new(),
+        );
+        echo.status = Some(data::Status::Sending);
+        echo.content = data::message::Content::Sticker(Box::new(data::message::Sticker {
+            pack_id: chosen.pack_id.clone(),
+            pack_key: Some(chosen.key.clone()),
+            sticker_id: chosen.sticker_id,
+            emoji: chosen.emoji.clone(),
+            image: Some(crate::data::attachment::from_path(chosen.path.clone(), 0)),
+        }));
+
+        self.send(Command::SendSticker {
+            thread: thread.clone(),
+            pack_id: chosen.pack_id,
+            key: chosen.key,
+            sticker_id: chosen.sticker_id,
+            emoji: chosen.emoji,
+            path: chosen.path,
+            timestamp,
+        });
+
+        if let Some(state) = self.state.as_mut() {
+            state.record(&thread, &echo);
+            state.history_mut(&thread).insert(echo);
+        }
+        cx.notify();
+    }
+
     /// A reply carries a snapshot of what it answers, because the recipient may
     /// not have the original.
     fn quoted(&self, target: MessageId) -> Option<Quoted> {
