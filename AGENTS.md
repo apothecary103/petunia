@@ -60,8 +60,14 @@ four call sites.
 
 ## Building
 
-`protoc` must be on `PATH`; a presage dependency generates code from `.proto`
-files at build time.
+`protoc` must be on `PATH`; two dependencies (presage's protocol crates and
+`spqr`) generate code from `.proto` files at build time. A `target/` full of
+cached artifacts hides this until something invalidates one of them, and the
+failure then names `spqr` rather than the missing tool.
+
+Xcode's `metal` must be on `PATH` too, for gpui's shaders. Anything that
+*replaces* the environment rather than adding to it — `nix-shell -p protobuf`,
+say — will satisfy the first and break the second.
 
 ## Traps
 
