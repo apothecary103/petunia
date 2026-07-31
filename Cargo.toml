@@ -12,6 +12,7 @@ presage-store-sqlite = { git = "https://github.com/whisperfish/presage", rev = "
 gpui = { git = "https://github.com/zed-industries/zed" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "x11", "wayland"] }
 gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "88f102d13654fe25aa2fede076274b6b751a3704" }
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "88f102d13654fe25aa2fede076274b6b751a3704" }
 image = { version = "0.25", features = ["webp"] }
 qrcode = { version = "0.14", default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "fs", "time"] }
