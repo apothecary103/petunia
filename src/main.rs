@@ -10,7 +10,7 @@ mod ui;
 use std::sync::Arc;
 
 use gpui::prelude::*;
-use gpui::{App, Bounds, WindowBounds, WindowOptions, px, size};
+use gpui::{App, Bounds, TitlebarOptions, WindowBounds, WindowOptions, point, px, size};
 use gpui_component::Root;
 
 use session::Session;
@@ -50,6 +50,14 @@ fn main() {
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                // The traffic lights float over petunia's own header strip,
+                // which is where the panel toggles live.
+                titlebar: Some(TitlebarOptions {
+                    title: Some("Petunia".into()),
+                    appears_transparent: true,
+                    traffic_light_position: Some(point(px(14.0), px(14.0))),
+                }),
+                window_min_size: Some(size(px(560.0), px(420.0))),
                 ..Default::default()
             },
             |window, cx| {

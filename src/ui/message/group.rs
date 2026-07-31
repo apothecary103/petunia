@@ -31,7 +31,7 @@ pub struct Run<'a> {
 pub fn entries<'a>(
     messages: &'a [Message],
     first_unread: Option<u64>,
-    group_within: u64,
+    group_within_ms: u64,
 ) -> Vec<Entry<'a>> {
     let mut entries = Vec::new();
     let mut day: Option<NaiveDate> = None;
@@ -55,7 +55,7 @@ pub fn entries<'a>(
             continue;
         }
 
-        let end = run_end(messages, start, date, first_unread, group_within);
+        let end = run_end(messages, start, date, first_unread, group_within_ms);
         entries.push(Entry::Run(Run {
             sender: message.sender(),
             messages: &messages[start..end],
@@ -73,7 +73,7 @@ fn run_end(
     start: usize,
     date: NaiveDate,
     first_unread: Option<u64>,
-    group_within: u64,
+    group_within_ms: u64,
 ) -> usize {
     let first = &messages[start];
     let mut end = start + 1;
@@ -84,7 +84,7 @@ fn run_end(
             || matches!(next.content, Content::Update(_))
             || local_date(next.timestamp()) != date
             || first_unread == Some(next.timestamp())
-            || next.timestamp().saturating_sub(messages[end - 1].timestamp()) > group_within;
+            || next.timestamp().saturating_sub(messages[end - 1].timestamp()) > group_within_ms;
 
         if breaks {
             break;

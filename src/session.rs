@@ -14,8 +14,26 @@ pub struct Session {
     pub window: WindowSize,
     /// The conversation to reopen on launch.
     pub active: Option<Thread>,
+    #[serde(default = "sidebar")]
     pub sidebar: PanelState,
+    #[serde(default = "details")]
     pub details: PanelState,
+}
+
+fn sidebar() -> PanelState {
+    PanelState {
+        open: true,
+        width: 260.0,
+    }
+}
+
+/// Closed until asked for: an empty panel taking a fifth of the window is worse
+/// than no panel.
+fn details() -> PanelState {
+    PanelState {
+        open: false,
+        width: 300.0,
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -39,24 +57,15 @@ impl Default for Session {
                 height: 720.0,
             },
             active: None,
-            sidebar: PanelState {
-                open: true,
-                width: 240.0,
-            },
-            details: PanelState {
-                open: false,
-                width: 280.0,
-            },
+            sidebar: sidebar(),
+            details: details(),
         }
     }
 }
 
 impl Default for PanelState {
     fn default() -> Self {
-        Self {
-            open: true,
-            width: 240.0,
-        }
+        sidebar()
     }
 }
 

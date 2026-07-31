@@ -131,23 +131,25 @@ pub fn dark() -> Theme {
     Theme {
         name: "dark".into(),
         appearance: Some(Appearance::Dark),
-        background: c(0x0e0e12),
-        surface: c(0x15151b),
-        elevated: c(0x1d1d25),
-        sunken: c(0x0a0a0d),
-        border: c(0x26262f),
-        border_focus: c(0x584a86),
-        text: c(0xe3e3ec),
-        text_dim: c(0x9d9dae),
-        text_muted: c(0x6a6a7b),
-        hover: c(0x1d1d25),
-        active: c(0x26262f),
-        selected: c(0x272040),
-        accent: c(0xa78bfa),
-        on_accent: c(0x120f1c),
-        success: c(0x6ee7a8),
-        warning: c(0xf3c46a),
-        danger: c(0xf87b8a),
+        background: c(0x0f0f0f),
+        surface: c(0x0a0a0a),
+        elevated: c(0x161616),
+        sunken: c(0x070707),
+        border: c(0x1f1f1f),
+        border_focus: c(0x333333),
+        text: c(0xe9e9e9),
+        text_dim: c(0x8f8f8f),
+        text_muted: c(0x5d5d5d),
+        hover: c(0x141414),
+        active: c(0x1f1f1f),
+        selected: c(0x181818),
+        // Near-white: the reference spends its only bright value on the send
+        // button, and nothing else competes with it.
+        accent: c(0xededed),
+        on_accent: c(0x0f0f0f),
+        success: c(0x6fcf97),
+        warning: c(0xd6a545),
+        danger: c(0xe5747d),
         accents: ACCENTS_DARK.iter().copied().map(c).collect(),
         typography: Typography::default(),
     }
@@ -157,23 +159,23 @@ pub fn light() -> Theme {
     Theme {
         name: "light".into(),
         appearance: Some(Appearance::Light),
-        background: c(0xfbfbfd),
-        surface: c(0xf3f3f7),
+        background: c(0xfcfcfc),
+        surface: c(0xf5f5f5),
         elevated: c(0xffffff),
-        sunken: c(0xeaeaf0),
-        border: c(0xdcdce4),
-        border_focus: c(0xa08cf0),
-        text: c(0x1a1a21),
-        text_dim: c(0x55555f),
-        text_muted: c(0x82828f),
-        hover: c(0xeeeef3),
-        active: c(0xe3e3eb),
-        selected: c(0xeae2fd),
-        accent: c(0x7c5cf0),
-        on_accent: c(0xffffff),
-        success: c(0x1c9159),
-        warning: c(0xa9700c),
-        danger: c(0xd0384a),
+        sunken: c(0xebebeb),
+        border: c(0xe0e0e0),
+        border_focus: c(0xb4b4b4),
+        text: c(0x1b1b1b),
+        text_dim: c(0x5c5c5c),
+        text_muted: c(0x8a8a8a),
+        hover: c(0xf0f0f0),
+        active: c(0xe4e4e4),
+        selected: c(0xededed),
+        accent: c(0x1b1b1b),
+        on_accent: c(0xfcfcfc),
+        success: c(0x1f7a45),
+        warning: c(0x8a6100),
+        danger: c(0xbb3a44),
         accents: ACCENTS_LIGHT.iter().copied().map(c).collect(),
         typography: Typography::default(),
     }
@@ -181,12 +183,14 @@ pub fn light() -> Theme {
 
 /// Sender colours. Spread around the wheel so adjacent names stay tellable
 /// apart, and held to a similar lightness so none of them shouts.
+/// Sender colours are the one chromatic thing in a neutral theme, so they are
+/// desaturated to sit inside it rather than on top of it.
 const ACCENTS_DARK: [u32; 8] = [
-    0xa78bfa, 0x6ee7a8, 0xf3c46a, 0xf99f6b, 0x7cc4f8, 0x5ed4c4, 0xf58cc8, 0xf87b8a,
+    0x9ab8d8, 0x9dc9a6, 0xd6bb87, 0xd8a48c, 0xb6a6d4, 0x8cc6c2, 0xd3a3bd, 0xd49399,
 ];
 
 const ACCENTS_LIGHT: [u32; 8] = [
-    0x7c5cf0, 0x1c9159, 0xa9700c, 0xc2570e, 0x1f6fd0, 0x0f8d84, 0xc0359a, 0xd0384a,
+    0x35618c, 0x2f6b41, 0x8a6100, 0x99522a, 0x5b4a8a, 0x2a6d69, 0x8a3f68, 0x9b414a,
 ];
 
 /// Two themes compile in so `theme = "light"` works with no files on disk;

@@ -1,10 +1,12 @@
-use chrono::{DateTime, Local, NaiveDate};
+use chrono::{Local, NaiveDate};
 use gpui::prelude::*;
 use gpui::{Context, Entity, MouseButton, SharedString, Window, div, px};
-use gpui_component::StyledExt;
 
 use super::avatar::avatar;
+use super::composer::Composer;
+use super::kit;
 use super::message::group::{self, Entry};
+use super::relative;
 use crate::config::Theme;
 use crate::config::messages::{Spacing, Timestamps};
 use crate::data::{Message, State, Thread};
@@ -54,21 +56,35 @@ impl Render for Conversation {
             return empty(&palette, "Still connecting…");
         };
 
+        let title = state.title(&thread);
+        let typing = describe_typing(state, &thread);
+
         let spacing = store.config.messages.density.spacing();
         let timestamps = store.config.messages.timestamps;
-        let group_within = store.config.messages.group_within;
+        // The config counts seconds; message timestamps are milliseconds.
+        let group_within_ms = store.config.messages.group_within * 1000;
 
-        let Some(history) = state.history(&thread) else {
-            return empty(&palette, "Loading…");
+        let Some(history) = state.history(&thread).filter(|history| !history.is_empty()) else {
+            return div()
+                .size_full()
+                .flex().flex_col()
+                .bg(palette.background)
+                .child(empty(&palette, "No messages here yet.").flex_1())
+                .child(
+                    Composer {
+                        placeholder: format!("Message {title}…"),
+                        typing: None,
+                        palette: &palette,
+                    }
+                    .render(),
+                );
         };
-        if history.is_empty() {
-            return empty(&palette, "No messages here yet.");
-        }
 
-        let entries = group::entries(history.messages(), history.first_unread(), group_within);
+        let entries = group::entries(history.messages(), history.first_unread(), group_within_ms);
 
-        let mut list = div()
-            .v_flex()
+        let mut list = kit::measured()
+            .flex()
+            .flex_col()
             .px(px(spacing.padding_x))
             .py(px(spacing.padding_y))
             .gap(px(spacing.between_runs));
@@ -114,21 +130,55 @@ impl Render for Conversation {
 
         div()
             .size_full()
+            .flex().flex_col()
             .bg(palette.background)
             .child(
                 div()
                     .id("messages")
-                    .size_full()
+                    .flex_1()
+                    .min_h_0()
                     .overflow_y_scroll()
-                    .child(list),
+                    .child(
+                        // A short thread sits at the bottom of the window, not
+                        // stranded at the top of an empty one.
+                        div()
+                            .flex()
+                            .flex_col()
+                            .justify_end()
+                            .min_h_full()
+                            .w_full()
+                            .child(list),
+                    ),
             )
+            .child(
+                Composer {
+                    placeholder: format!("Message {title}…"),
+                    typing,
+                    palette: &palette,
+                }
+                .render(),
+            )
+    }
+}
+
+fn describe_typing(state: &State, thread: &Thread) -> Option<String> {
+    let names: Vec<_> = state
+        .typing(thread)
+        .into_iter()
+        .map(|who| state.name_of(who))
+        .collect();
+
+    match names.as_slice() {
+        [] => None,
+        [one] => Some(format!("{one} is typing…")),
+        [rest @ .., last] => Some(format!("{} and {last} are typing…", rest.join(", "))),
     }
 }
 
 fn empty(palette: &Theme, message: &'static str) -> gpui::Div {
     div()
         .size_full()
-        .v_flex()
+        .flex().flex_col()
         .items_center()
         .justify_center()
         .bg(palette.background)
@@ -186,7 +236,7 @@ fn run_block(
         ))
         .child(
             div()
-                .v_flex()
+                .flex().flex_col()
                 .flex_1()
                 .min_w_0()
                 .gap(px(spacing.within_run))
@@ -243,7 +293,7 @@ fn rule(palette: &Theme) -> gpui::Div {
 }
 
 fn clock(timestamp: u64) -> String {
-    local(timestamp)
+    relative::local(timestamp)
         .map(|at| at.format("%H:%M").to_string())
         .unwrap_or_default()
 }
@@ -258,8 +308,4 @@ fn day_label(date: NaiveDate) -> String {
     } else {
         date.format("%A, %-d %B %Y").to_string()
     }
-}
-
-fn local(timestamp: u64) -> Option<DateTime<Local>> {
-    DateTime::from_timestamp_millis(timestamp as i64).map(|at| at.with_timezone(&Local))
 }

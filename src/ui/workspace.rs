@@ -1,8 +1,9 @@
 use gpui::prelude::*;
-use gpui::{App, Context, Entity, MouseButton, SharedString, Subscription, Window, div, px};
-use gpui_component::{ActiveTheme, StyledExt};
+use gpui::{App, Context, Entity, SharedString, Subscription, Window, div, px};
+use gpui_component::ActiveTheme;
 
 use super::conversation::Conversation;
+use super::kit;
 use super::linking::Linking;
 use super::sidebar::Sidebar;
 use crate::actions;
@@ -132,8 +133,9 @@ impl Render for Workspace {
                     })
                     .unwrap_or_default();
 
-                div()
-                    .size_full()
+                let panels = div()
+                    .flex_1()
+                    .min_h_0()
                     .flex()
                     .when(self.session.sidebar.open, |this| {
                         this.child(
@@ -145,14 +147,7 @@ impl Render for Workspace {
                                 .child(sidebar.clone()),
                         )
                     })
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .v_flex()
-                            .child(self.header(&title, &palette, cx))
-                            .child(div().flex_1().min_h_0().child(conversation.clone())),
-                    )
+                    .child(div().flex_1().min_w_0().child(conversation.clone()))
                     .when(self.session.details.open, |this| {
                         this.child(
                             div()
@@ -162,10 +157,17 @@ impl Render for Workspace {
                                 .border_color(border)
                                 .bg(palette.surface)
                                 .p_4()
+                                .text_size(px(palette.typography.ui_size))
                                 .text_color(palette.text_muted)
                                 .child("Details"),
                         )
-                    })
+                    });
+
+                div()
+                    .size_full()
+                    .flex().flex_col()
+                    .child(self.header(&title, &palette, cx))
+                    .child(panels)
                     .into_any_element()
             }
         };
@@ -197,14 +199,14 @@ impl Workspace {
             .flex()
             .items_center()
             .gap_2()
-            .px_4()
-            .h(px(38.0))
+            // Clears the traffic lights, which float over this strip.
+            .pl(px(84.0))
+            .pr_3()
+            .h(px(44.0))
             .flex_none()
-            .border_b_1()
-            .border_color(palette.border)
-            .child(toggle(
+            .child(kit::icon_button(
                 "toggle-sidebar",
-                "▚",
+                "◧",
                 palette,
                 cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)),
             ))
@@ -212,36 +214,22 @@ impl Workspace {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .truncate()
-                    .text_size(px(palette.typography.ui_size))
-                    .text_color(palette.text)
-                    .child(SharedString::from(title.to_owned())),
+                    .flex()
+                    .justify_center()
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(palette.typography.ui_size))
+                            .text_color(palette.text_dim)
+                            .child(SharedString::from(title.to_owned())),
+                    ),
             )
-            .child(toggle(
+            .child(kit::icon_button(
                 "toggle-details",
-                "▐",
+                "◨",
                 palette,
                 cx.listener(|this, _, _, cx| this.toggle_details(cx)),
             ))
     }
 }
 
-fn toggle(
-    id: &'static str,
-    glyph: &'static str,
-    palette: &crate::config::Theme,
-    on_click: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    div()
-        .id(id)
-        .size(px(24.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(5.0))
-        .text_size(px(11.0))
-        .text_color(palette.text_muted)
-        .hover(|this| this.bg(palette.hover))
-        .on_mouse_down(MouseButton::Left, on_click)
-        .child(glyph)
-}

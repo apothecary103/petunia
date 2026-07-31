@@ -1,6 +1,6 @@
 use gpui::prelude::*;
 use gpui::{Context, Entity, Window, div, px, white};
-use gpui_component::{ActiveTheme, StyledExt};
+use gpui_component::ActiveTheme;
 use qrcode::QrCode;
 
 use crate::store::Store;
@@ -25,7 +25,7 @@ impl Render for Linking {
 
         let body = match (&store.link_failure, &store.link_url) {
             (Some(failure), _) => div()
-                .v_flex()
+                .flex().flex_col()
                 .gap_2()
                 .items_center()
                 .child(
@@ -47,13 +47,13 @@ impl Render for Linking {
                 )
                 .into_any_element(),
             (None, Some(url)) => div()
-                .v_flex()
+                .flex().flex_col()
                 .gap_6()
                 .items_center()
                 .child(qr(url))
                 .child(
                     div()
-                        .v_flex()
+                        .flex().flex_col()
                         .gap_1()
                         .items_center()
                         .child(div().child("Scan this with Signal on your phone"))
@@ -73,7 +73,7 @@ impl Render for Linking {
 
         div()
             .size_full()
-            .v_flex()
+            .flex().flex_col()
             .items_center()
             .justify_center()
             .bg(theme.background)

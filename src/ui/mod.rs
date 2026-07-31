@@ -1,6 +1,9 @@
 pub mod avatar;
+pub mod composer;
 pub mod conversation;
+pub mod kit;
 pub mod linking;
 pub mod message;
+pub mod relative;
 pub mod sidebar;
 pub mod workspace;

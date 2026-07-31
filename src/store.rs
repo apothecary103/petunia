@@ -15,6 +15,9 @@ pub struct Store {
     /// `None` until the worker reports which account it linked.
     state: Option<State>,
     commands: Option<UnboundedSender<Command>>,
+    /// The window is up and clickable well before the worker reports in, so
+    /// anything asked for in that gap waits here rather than being lost.
+    queued: Vec<Command>,
     /// The linking QR, while there is one to show.
     pub link_url: Option<String>,
     pub link_failure: Option<String>,
@@ -41,6 +44,7 @@ impl Store {
             config,
             state: None,
             commands: None,
+            queued: Vec::new(),
             link_url: None,
             link_failure: None,
             active: None,
@@ -83,12 +87,12 @@ impl Store {
             .unwrap_or_default()
     }
 
-    pub fn send(&self, command: Command) {
+    pub fn send(&mut self, command: Command) {
         match &self.commands {
             Some(sender) => {
                 let _ = sender.send(command);
             }
-            None => warn!("signal worker not ready, dropping command"),
+            None => self.queued.push(command),
         }
     }
 
@@ -102,6 +106,9 @@ impl Store {
     pub fn apply(&mut self, event: Event, cx: &mut Context<Self>) {
         match event {
             Event::Ready(sender) => {
+                for command in self.queued.drain(..) {
+                    let _ = sender.send(command);
+                }
                 self.commands = Some(sender);
                 return;
             }
