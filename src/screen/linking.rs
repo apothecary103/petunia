@@ -1,8 +1,8 @@
-use iced::widget::{column, container, image, text};
+use iced::widget::{column, container, qr_code, text};
 use iced::{Center, Fill};
 
 use crate::theme;
-use crate::widget::{Element, qr};
+use crate::widget::Element;
 
 pub struct Linking {
     state: State,
@@ -10,7 +10,7 @@ pub struct Linking {
 
 enum State {
     Connecting,
-    Url(image::Handle),
+    Url(qr_code::Data),
     Failed(String),
 }
 
@@ -22,9 +22,9 @@ impl Linking {
     }
 
     pub fn set_url(&mut self, url: &str) {
-        self.state = match qr::handle(url) {
-            Some(handle) => State::Url(handle),
-            None => State::Failed("failed to render the provisioning QR code".into()),
+        self.state = match qr_code::Data::new(url) {
+            Ok(data) => State::Url(data),
+            Err(error) => State::Failed(format!("failed to render the provisioning code: {error}")),
         };
     }
 
@@ -38,14 +38,14 @@ impl Linking {
                 .size(14)
                 .style(theme::text_dim)
                 .into(),
-            State::Url(handle) => column![
+            State::Url(data) => column![
                 text("Link Petunia to your phone")
                     .size(18)
                     .font(theme::FONT_BOLD),
                 text("Open Signal on your phone, go to Settings, Linked devices, and scan this code.")
                     .size(13)
                     .style(theme::text_dim),
-                image(handle.clone()),
+                qr_code(data).cell_size(6),
             ]
             .spacing(16)
             .align_x(Center)

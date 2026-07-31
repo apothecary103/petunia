@@ -3,9 +3,9 @@ use iced::widget::{button, column, container, row, text};
 use iced::{Center, Fill, Shrink, Task};
 use uuid::Uuid;
 
-use crate::config;
 use crate::data::{self, State, Thread};
 use crate::pane::{self, Pane};
+use crate::session;
 use crate::signal;
 use crate::theme;
 use crate::widget::{Element, avatar, sidebar};
@@ -31,7 +31,7 @@ pub enum Message {
 }
 
 impl Main {
-    pub fn new(aci: Uuid, layout: Option<&config::Layout>) -> (Self, Vec<signal::Command>) {
+    pub fn new(aci: Uuid, layout: Option<&session::Layout>) -> (Self, Vec<signal::Command>) {
         let (panes, threads) = match layout {
             Some(layout) => {
                 let (configuration, threads) = restore(layout);
@@ -219,7 +219,7 @@ impl Main {
         self.state.history_mut(&thread).insert(message);
     }
 
-    pub fn layout(&self) -> config::Layout {
+    pub fn layout(&self) -> session::Layout {
         node_layout(self.panes.layout(), &self.panes)
     }
 
@@ -320,36 +320,36 @@ fn controls<'a>() -> Element<'a, Message> {
     .into()
 }
 
-fn node_layout(node: &pane_grid::Node, panes: &pane_grid::State<Pane>) -> config::Layout {
+fn node_layout(node: &pane_grid::Node, panes: &pane_grid::State<Pane>) -> session::Layout {
     match node {
         pane_grid::Node::Split {
             axis, ratio, a, b, ..
-        } => config::Layout::Split {
+        } => session::Layout::Split {
             axis: match axis {
-                pane_grid::Axis::Horizontal => config::Axis::Horizontal,
-                pane_grid::Axis::Vertical => config::Axis::Vertical,
+                pane_grid::Axis::Horizontal => session::Axis::Horizontal,
+                pane_grid::Axis::Vertical => session::Axis::Vertical,
             },
             ratio: *ratio,
             a: Box::new(node_layout(a, panes)),
             b: Box::new(node_layout(b, panes)),
         },
         pane_grid::Node::Pane(pane) => {
-            config::Layout::Pane(panes.get(*pane).and_then(Pane::thread).cloned())
+            session::Layout::Pane(panes.get(*pane).and_then(Pane::thread).cloned())
         }
     }
 }
 
-fn restore(layout: &config::Layout) -> (pane_grid::Configuration<Pane>, Vec<Thread>) {
+fn restore(layout: &session::Layout) -> (pane_grid::Configuration<Pane>, Vec<Thread>) {
     match layout {
-        config::Layout::Split { axis, ratio, a, b } => {
+        session::Layout::Split { axis, ratio, a, b } => {
             let (a, mut threads) = restore(a);
             let (b, more) = restore(b);
             threads.extend(more);
             (
                 pane_grid::Configuration::Split {
                     axis: match axis {
-                        config::Axis::Horizontal => pane_grid::Axis::Horizontal,
-                        config::Axis::Vertical => pane_grid::Axis::Vertical,
+                        session::Axis::Horizontal => pane_grid::Axis::Horizontal,
+                        session::Axis::Vertical => pane_grid::Axis::Vertical,
                     },
                     ratio: *ratio,
                     a: Box::new(a),
@@ -358,7 +358,7 @@ fn restore(layout: &config::Layout) -> (pane_grid::Configuration<Pane>, Vec<Thre
                 threads,
             )
         }
-        config::Layout::Pane(thread) => {
+        session::Layout::Pane(thread) => {
             let pane = match thread {
                 Some(thread) => Pane::chat(thread.clone()),
                 None => Pane::empty(),

@@ -6,10 +6,9 @@ edition = "2024"
 [dependencies]
 presage = { git = "https://github.com/whisperfish/presage", rev = "63482efd0cbdc0780baf0650517c7d55f1cac05d" }
 presage-store-sqlite = { git = "https://github.com/whisperfish/presage", rev = "63482efd0cbdc0780baf0650517c7d55f1cac05d" }
-iced = { version = "0.14", features = ["tokio", "canvas", "image", "advanced"] }
+iced = { version = "0.14", features = ["tokio", "canvas", "image", "advanced", "qr_code"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "fs", "time"] }
 futures = "0.3"
-qrcode = "0.14"
 uuid = { version = "1", features = ["serde", "v4"] }
 chrono = "0.4"
 serde = { version = "1", features = ["derive"] }

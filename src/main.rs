@@ -3,6 +3,7 @@ mod config;
 mod data;
 mod pane;
 mod screen;
+mod session;
 mod signal;
 mod theme;
 mod widget;

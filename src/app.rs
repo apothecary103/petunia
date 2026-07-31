@@ -2,7 +2,7 @@ use iced::{Size, Subscription, Task, Theme, window};
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{error, warn};
 
-use crate::config::{Session, WindowSize};
+use crate::session::{Session, WindowSize};
 use crate::screen::{self, Screen};
 use crate::signal;
 use crate::theme;
