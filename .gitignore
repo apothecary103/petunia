@@ -24,3 +24,7 @@ target
 # Added by cargo
 
 /target
+
+# Added by the nix devShell
+/.direnv/
+/result

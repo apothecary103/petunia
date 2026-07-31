@@ -72,14 +72,21 @@ four call sites.
 
 ## Building
 
-`protoc` must be on `PATH`; two dependencies (presage's protocol crates and
-`spqr`) generate code from `.proto` files at build time. A `target/` full of
-cached artifacts hides this until something invalidates one of them, and the
-failure then names `spqr` rather than the missing tool.
+`nix develop` (or `direnv allow`, via `.envrc`) is the shell this builds in, and
+`cargo build --workspace` inside it works from cold.
 
-Xcode's `metal` must be on `PATH` too, for gpui's shaders. Anything that
-*replaces* the environment rather than adding to it — `nix-shell -p protobuf`,
-say — will satisfy the first and break the second.
+Two things have to be on `PATH` and only one of them is packaged. `protoc`,
+because two dependencies (presage's protocol crates and `spqr`) generate code
+from `.proto` files at build time — a `target/` full of cached artifacts hides
+this until something invalidates one of them, and the failure then names `spqr`
+rather than the missing tool. And Xcode's `metal`, for gpui's shaders, which is
+not in nixpkgs and lives behind a cryptex mount whose path changes with every
+toolchain update. `flake.nix` asks `xcrun` where it is, with `DEVELOPER_DIR`
+unset for the question only: nixpkgs points that at the SDK from the store,
+which carries no toolchain, so `xcrun -f metal` under it answers "not found".
+
+Anything that *replaces* the environment rather than adding to it — `nix-shell
+-p protobuf`, say — satisfies the first and breaks the second.
 
 ## Traps
 
