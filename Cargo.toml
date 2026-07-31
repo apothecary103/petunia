@@ -6,7 +6,6 @@ edition = "2024"
 [dependencies]
 presage = { git = "https://github.com/whisperfish/presage", rev = "63482efd0cbdc0780baf0650517c7d55f1cac05d" }
 presage-store-sqlite = { git = "https://github.com/whisperfish/presage", rev = "63482efd0cbdc0780baf0650517c7d55f1cac05d" }
-iced = { version = "0.14", features = ["tokio", "canvas", "image", "advanced", "qr_code"] }
 gpui = "0.2.2"
 gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "88f102d13654fe25aa2fede076274b6b751a3704" }
 image = { version = "0.25", features = ["webp"] }

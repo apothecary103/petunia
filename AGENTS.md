@@ -4,13 +4,31 @@ Petunia is a native Signal client, named after the flower.
 
 - **Signal library:** [`presage`](https://github.com/whisperfish/presage) — follow
   its examples for how to link, send, and receive.
-- **GUI framework:** [`iced`](https://github.com/iced-rs/iced).
-- **Look and feel:** modeled on [Halloy](https://github.com/squidowl/halloy), the
-  iced IRC client — including movable, resizable panes, one per chat.
+- **GUI framework:** [`gpui`](https://gpui.rs), via the
+  [`gpui-ce`](https://github.com/gpui-ce/gpui-ce) community fork, with
+  [`gpui-component`](https://github.com/longbridge/gpui-component) for widgets.
+  Both are pinned to git revisions in `Cargo.toml`: gpui-component's published
+  release does not build against gpui-ce's HEAD.
+- **Look and feel:** modeled on [Zed](https://zed.dev) — a collapsible left
+  sidebar, one focused conversation, and an optional right details panel. No
+  tabs, and no movable pane grid.
+- **Themes:** TOML files in `~/.config/petunia/themes/`, documented by
+  `themes.example.toml`. A theme carries a full semantic colour token set plus
+  typography, and is hot-reloaded.
 
 The first version implements only basic features, but the goal is a fully-featured
 Signal client. Structure the project so that future features can be added without
 reworking what already exists.
+
+## Layout
+
+- `src/signal/` — the Signal engine: the worker thread, the command/event
+  protocol, presage's store, petunia's own sqlite tables, and the media cache.
+  Framework-agnostic apart from `bridge.rs`.
+- `src/data/` — the model the views read: threads, messages, history, the
+  sidebar index. Framework-agnostic; no gpui imports belong here.
+- `src/config/` — `config.toml`, themes, and keybindings.
+- `src/ui/` — everything gpui.
 
 ## Coding rules
 
@@ -23,3 +41,8 @@ reworking what already exists.
 - **No comments** unless absolutely necessary — code should explain itself.
   Comment only what stays genuinely surprising (protocol quirks, invariants,
   `unsafe`).
+
+## Building
+
+`protoc` must be on `PATH` (a presage dependency generates code from `.proto`
+files at build time).

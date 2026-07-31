@@ -1,0 +1,71 @@
+# A Petunia theme.
+#
+# Copy to ~/.config/petunia/themes/<name>.toml and select it with
+# `theme = "<name>"` in config.toml. Every key is optional; anything you leave
+# out keeps its value from the built-in dark theme, so a file that sets only an
+# accent colour is perfectly valid.
+#
+# Colours accept #rgb, #rrggbb and #rrggbbaa, with or without the leading hash.
+
+# Shown nowhere; the file name is what selects the theme.
+name = "petunia-dark"
+# "dark" or "light". Decides how the widget set derives its own shades. Left
+# out, the background's brightness decides.
+appearance = "dark"
+
+# The window itself.
+background = "#16161e"
+# Sidebar and panels.
+surface = "#1a1b26"
+# Popovers, the composer, modals: anything that sits above the surface.
+elevated = "#1f2335"
+# Inputs and code blocks: anything that sits below it.
+sunken = "#101014"
+
+border = "#292e42"
+# The border of whatever holds keyboard focus.
+border_focus = "#3d59a1"
+
+# Body text.
+text = "#c0caf5"
+# Timestamps and secondary labels.
+text_dim = "#9aa0b8"
+# Placeholders and disabled controls.
+text_muted = "#565f89"
+
+# Row and button states.
+hover = "#1f2335"
+active = "#292e42"
+selected = "#283457"
+
+accent = "#7aa2f7"
+# Text drawn on top of the accent colour.
+on_accent = "#16161e"
+success = "#9ece6a"
+warning = "#e0af68"
+danger = "#f7768e"
+
+# Sender colours, picked by a stable hash so one person keeps one colour in
+# every conversation and across restarts. Any number of them.
+accents = [
+  "#7aa2f7",
+  "#9ece6a",
+  "#e0af68",
+  "#ff9e64",
+  "#bb9af7",
+  "#2ac3de",
+  "#f7768e",
+  "#c0caf5",
+]
+
+[typography]
+# Falls back to the system interface font if the family is not installed.
+family = "Inter"
+# Used for monospace message spans and code blocks.
+mono = "JetBrains Mono"
+# Points. Sidebar, headers, buttons.
+ui_size = 13.0
+# Points. Message bodies.
+message_size = 14.0
+# A multiple of the font size.
+line_height = 1.55

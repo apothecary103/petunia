@@ -4,11 +4,11 @@
 # leave out keeps its default. A typo is reported in the app rather than being
 # silently ignored, so an unknown key is an error, not a no-op.
 #
-# The file is watched: saving it applies the change immediately. The one
-# exception is the font family, which iced fixes before the window opens.
+# The file is watched: saving it applies the change immediately.
 
 # "mocha" (dark, default) or "latte" (light). Any other name is read from
-# ~/.config/petunia/themes/<name>.toml.
+# ~/.config/petunia/themes/<name>.toml, which is also where fonts and sizes
+# live. See themes.example.toml for the full set of keys.
 theme = "mocha"
 
 # Multiplies every length in the interface, on top of whatever scaling your
@@ -17,9 +17,6 @@ theme = "mocha"
 scale = 1.0
 
 [messages]
-# "grouped" gives each run of messages an avatar and a header, like Discord.
-# "irc" packs one message per line. Toggle per pane with cmd+t.
-layout = "grouped"
 # "comfortable" or "compact".
 density = "comfortable"
 # "always", "hover" or "never".
@@ -61,15 +58,10 @@ groups = "all"
 # remove it. Press cmd+/ in the app for the current list.
 [keys]
 # quick-switcher = "cmd+k"
+# search = "cmd+f"
 # focus-composer = "cmd+l"
-# next-pane = "cmd+]"
-# previous-pane = "cmd+["
-# split-vertical = "cmd+d"
-# split-horizontal = "cmd+shift+d"
-# close-pane = "cmd+w"
-# maximize-pane = "cmd+m"
-# toggle-layout = "cmd+t"
 # toggle-sidebar = "cmd+b"
+# toggle-details = "cmd+i"
 # scroll-up = "pageup"
 # scroll-down = "pagedown"
 # scroll-to-top = "cmd+home"
