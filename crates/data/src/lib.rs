@@ -7,7 +7,7 @@ mod state;
 pub mod stickers;
 mod thread;
 
-pub use contact::{Contact, Group, Member};
+pub use contact::{Contact, Group, Member, Role};
 pub use history::History;
 pub use index::{Index, Section};
 pub use message::{

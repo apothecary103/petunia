@@ -1,6 +1,7 @@
 mod actions;
 mod assets;
 mod bridge;
+mod demo;
 mod menus;
 mod session;
 mod store;
@@ -45,7 +46,11 @@ fn main() {
         let config = Arc::new(loaded.config);
         let store = cx.new(|_| Store::new(config.clone()));
         let player = audio::Player::start();
-        bridge::spawn(store.clone(), cx);
+        if demo::enabled() {
+            demo::install(store.clone(), cx);
+        } else {
+            bridge::spawn(store.clone(), cx);
+        }
         watch_config(store.clone(), cx);
 
         let blurred = config.sidebar.blurred();
