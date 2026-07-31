@@ -2,9 +2,10 @@ use gpui::prelude::*;
 use gpui::{App, Context, Entity, Focusable as _, SharedString, Subscription, Window, div, px};
 use gpui_component::{ActiveTheme, IconName};
 
-use super::conversation::{Conversation, Raise, Viewing};
+use super::conversation::{Conversation, Forwarding, Inspecting, Raise, Viewing};
 use super::details::{self, Details};
 use super::editor::{self, Editor};
+use super::forward::{self, Forward};
 use super::help::{self, Help};
 use super::kit;
 use super::linking::Linking;
@@ -13,6 +14,7 @@ use super::notice::Notices;
 use super::palette::{Dismissed, Switcher};
 use super::confirm::{self, Confirm};
 use super::prompt::{self, Prompt};
+use super::raw::{self, Raw};
 use super::search::{self, Scope, Search};
 use super::settings::{self, Settings};
 use super::themes::{self, Themes};
@@ -35,6 +37,22 @@ const TRAFFIC_LIGHTS: f32 = 84.0;
 /// column, and the window minimum is narrower than the two panels put together
 /// -- so without this, dragging the window small leaves nothing between them.
 const MIN_CONVERSATION: f32 = 420.0;
+
+/// The collapsed list: avatars, and nothing that needs a line of text. Wide
+/// enough to clear the traffic lights, which float over its own top padding at a
+/// size macOS picks -- their right edge lands at about 66 -- and would otherwise
+/// spill onto the conversation column.
+pub const RAIL: f32 = 80.0;
+
+/// What the divider may be dragged to. Below the snap point the list collapses
+/// to the rail rather than becoming a column too narrow to read.
+const MIN_SIDEBAR: f32 = 180.0;
+const MAX_SIDEBAR: f32 = 480.0;
+const SNAP_TO_RAIL: f32 = 150.0;
+
+/// How wide a grab is. Drawn as a hairline, so this is the invisible margin
+/// either side of it -- a one-pixel target is not one.
+const HANDLE: f32 = 6.0;
 
 /// The root view. Shows the linking screen until an account exists, then the
 /// conversation shell.
@@ -59,11 +77,28 @@ pub struct Workspace {
     confirm: Option<Entity<Confirm>>,
     themes: Option<Entity<Themes>>,
     editor: Option<Entity<Editor>>,
+    /// Where a message is being sent on to, and what the wire said about one.
+    forward: Option<Entity<Forward>>,
+    raw: Option<Entity<Raw>>,
     /// Always present, and draws nothing until something has gone wrong.
     notices: Entity<Notices>,
+    /// The divider being dragged, while it is being dragged. The preference is
+    /// only written on release: a drag reports every frame and `config.toml` is
+    /// not a log.
+    dragging: Option<Drag>,
     /// What the window is called, so the platform is only told when it changes.
     titled: String,
     _subscriptions: Vec<Subscription>,
+}
+
+/// A divider being dragged. `grab` is how far the pointer was from the edge when
+/// it took hold, so the edge follows the pointer rather than jumping to it —
+/// without it, the handle being a few pixels wide would make every click on it a
+/// few pixels of resize.
+#[derive(Debug, Clone, Copy)]
+struct Drag {
+    grab: f32,
+    asked: f32,
 }
 
 /// Which side panels this frame draws. Not the same as what the session asks
@@ -121,7 +156,10 @@ impl Workspace {
             confirm: None,
             themes: None,
             editor: None,
+            forward: None,
+            raw: None,
             notices,
+            dragging: None,
             titled: String::new(),
             _subscriptions: subscriptions,
         };
@@ -135,7 +173,8 @@ impl Workspace {
     }
 
     fn enter_main(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let sidebar = cx.new(|cx| Sidebar::new(self.store.clone(), cx));
+        let rail = self.session.sidebar.rail;
+        let sidebar = cx.new(|cx| Sidebar::new(self.store.clone(), rail, cx));
         let conversation = cx.new(|cx| {
             Conversation::new(self.store.clone(), self.player.clone(), window, cx)
         });
@@ -154,6 +193,22 @@ impl Workspace {
         cx.subscribe_in(&conversation, window, |this, _, raise: &Raise, window, cx| {
             this.raise_menu(raise.take(), raise.at, window, cx);
         })
+        .detach();
+        cx.subscribe_in(
+            &conversation,
+            window,
+            |this, _, forwarding: &Forwarding, window, cx| {
+                this.open_forward(forwarding.0, window, cx)
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            &conversation,
+            window,
+            |this, _, inspecting: &Inspecting, window, cx| {
+                this.open_raw(inspecting.0, window, cx)
+            },
+        )
         .detach();
 
         if let Some(thread) = self.session.active.clone() {
@@ -446,6 +501,72 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Asks where a message is to be sent on to, and sends it there.
+    fn open_forward(
+        &mut self,
+        target: petunia_data::MessageId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let summary = self
+            .store
+            .read(cx)
+            .find(&target)
+            .map(petunia_data::Message::summary)
+            .unwrap_or_default();
+
+        let picker = cx.new(|cx| Forward::new(self.store.clone(), target, summary, cx));
+
+        cx.subscribe(&picker, |this, _, _: &forward::Dismissed, cx| {
+            this.forward = None;
+            cx.notify();
+        })
+        .detach();
+        cx.subscribe(&picker, |this, _, picked: &forward::Picked, cx| {
+            let (target, thread) = (picked.target, picked.thread.clone());
+            this.store
+                .update(cx, |store, cx| store.forward(target, thread.clone(), cx));
+            // Taken to where it went, because a forward with no visible result
+            // reads as one that did not happen.
+            this.store.update(cx, |store, cx| store.activate(thread, cx));
+        })
+        .detach();
+
+        picker.update(cx, |picker, cx| picker.take_focus(window, cx));
+        self.forward = Some(picker);
+        cx.notify();
+    }
+
+    /// What the wire said about one message, for the questions the drawing of it
+    /// cannot answer.
+    fn open_raw(
+        &mut self,
+        target: petunia_data::MessageId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let store = self.store.read(cx);
+        let Some(message) = store.find(&target).cloned() else {
+            return;
+        };
+        let sender = store
+            .state()
+            .map(|state| state.sender_name(message.sender()))
+            .unwrap_or_default();
+
+        let sheet = cx.new(|cx| Raw::new(&message, &sender, cx));
+
+        cx.subscribe(&sheet, |this, _, _: &raw::Dismissed, cx| {
+            this.raw = None;
+            cx.notify();
+        })
+        .detach();
+
+        sheet.update(cx, |sheet, cx| sheet.take_focus(window, cx));
+        self.raw = Some(sheet);
+        cx.notify();
+    }
+
     /// cmd+f searches everywhere; cmd+shift+f searches what is on screen. One
     /// surface either way, because they differ only in what they ask.
     fn open_search(&mut self, scope: Scope, window: &mut Window, cx: &mut Context<Self>) {
@@ -465,17 +586,30 @@ impl Workspace {
             cx.subscribe_in(
                 &search,
                 window,
-                |this, _, chosen: &search::Chosen, _, cx| {
-                    let thread = chosen.0.thread.clone();
-                    this.store.update(cx, |store, cx| store.activate(thread, cx));
+                |this, _, chosen: &search::Chosen, window, cx| {
+                    let hit = chosen.0.clone();
+                    let target = petunia_data::MessageId {
+                        timestamp: hit.timestamp,
+                        sender: hit.sender,
+                    };
+                    this.store
+                        .update(cx, |store, cx| store.activate(hit.thread, cx));
+                    // Opening the conversation is only half of it: the answer is
+                    // some way back up the thread, and finding it again by hand
+                    // is what the search was for.
+                    this.with_conversation(window, cx, move |conversation, _, cx| {
+                        conversation.reveal(target, cx)
+                    });
                 },
             )
             .detach();
             search
         });
 
+        // The query field takes the focus, not the sheet around it. Focusing the
+        // sheet leaves the field looking active and swallowing nothing, which is
+        // what made cmd+f open a search box that could not be typed into.
         search.update(cx, |search, cx| search.reset(scope, window, cx));
-        window.focus(&search.read(cx).focus_handle(cx), cx);
         cx.notify();
     }
 
@@ -563,6 +697,16 @@ impl Workspace {
     /// the composer is carrying.
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.editor.take().is_some() {
+            window.focus(&self.focus, cx);
+            cx.notify();
+            return;
+        }
+        if self.raw.take().is_some() {
+            window.focus(&self.focus, cx);
+            cx.notify();
+            return;
+        }
+        if self.forward.take().is_some() {
             window.focus(&self.focus, cx);
             cx.notify();
             return;
@@ -659,14 +803,14 @@ impl Workspace {
     /// The details panel gives way first, and only then the sidebar: the list is
     /// how you get anywhere, and details without a list to leave by is worse
     /// than no details.
-    fn panels(&self, window: &Window) -> Panels {
+    fn panels(&self, window: &Window, cx: &App) -> Panels {
         let width = f32::from(window.viewport_size().width);
         let mut shown = Panels {
             sidebar: self.session.sidebar.open,
             details: self.session.details.open,
         };
         let sidebar = match shown.sidebar {
-            true => self.session.sidebar.width,
+            true => self.sidebar_width(cx).1,
             false => 0.0,
         };
 
@@ -683,6 +827,83 @@ impl Workspace {
         self.session.sidebar.open = !self.session.sidebar.open;
         self.session.save();
         cx.notify();
+    }
+
+    /// Whether the list is a rail this frame, and how wide it is drawn. While a
+    /// drag is live that is whatever the pointer is asking for; otherwise it is
+    /// the preference, or the rail when it is collapsed.
+    fn sidebar_width(&self, cx: &App) -> (bool, f32) {
+        match self.dragging {
+            Some(drag) => resolve(drag.asked),
+            None => (self.session.sidebar.rail, self.settled_width(cx)),
+        }
+    }
+
+    /// The width the list rests at, which is the rail when it is collapsed and
+    /// the preference otherwise.
+    fn settled_width(&self, cx: &App) -> f32 {
+        match self.session.sidebar.rail {
+            true => RAIL,
+            false => self
+                .store
+                .read(cx)
+                .config
+                .sidebar
+                .width
+                .clamp(MIN_SIDEBAR, MAX_SIDEBAR),
+        }
+    }
+
+    fn grab_sidebar(&mut self, at: f32, cx: &mut Context<Self>) {
+        let width = self.settled_width(cx);
+        self.dragging = Some(Drag {
+            grab: width - at,
+            asked: width,
+        });
+        cx.notify();
+    }
+
+    /// Follows the pointer. Nothing is written yet, so a drag abandoned by
+    /// letting go outside the window leaves the preference alone.
+    fn drag_sidebar(&mut self, at: f32, cx: &mut Context<Self>) {
+        let Some(drag) = &mut self.dragging else {
+            return;
+        };
+        drag.asked = at + drag.grab;
+        cx.notify();
+    }
+
+    /// Keeps where the drag ended. A rail is session state and a width is a
+    /// preference, so the two land in different files -- which is also why the
+    /// rail is not simply a width of its own.
+    fn drop_sidebar(&mut self, cx: &mut Context<Self>) {
+        let Some(drag) = self.dragging.take() else {
+            return;
+        };
+        let (rail, width) = resolve(drag.asked);
+
+        if self.session.sidebar.rail != rail {
+            self.session.sidebar.rail = rail;
+            self.session.save();
+            self.set_rail(rail, cx);
+        }
+        if !rail {
+            self.store.update(cx, |store, cx| {
+                let mut config = (*store.config).clone();
+                config.sidebar.width = width;
+                if let Err(error) = petunia_config::write::save(&config) {
+                    tracing::warn!(%error, "could not save the sidebar width");
+                }
+                store.config_changed(std::sync::Arc::new(config), cx);
+            });
+        }
+        cx.notify();
+    }
+
+    fn set_rail(&self, rail: bool, cx: &mut Context<Self>) {
+        if let Screen::Main { sidebar, .. } = &self.screen {
+            sidebar.update(cx, |sidebar, cx| sidebar.collapse(rail, cx));
+        }
     }
 
     fn toggle_details(&mut self, cx: &mut Context<Self>) {
@@ -712,6 +933,14 @@ impl Workspace {
     }
 }
 
+/// A width the pointer asked for, as what is actually drawn.
+fn resolve(asked: f32) -> (bool, f32) {
+    match asked < SNAP_TO_RAIL {
+        true => (true, RAIL),
+        false => (false, asked.clamp(MIN_SIDEBAR, MAX_SIDEBAR)),
+    }
+}
+
 impl gpui::Focusable for Workspace {
     fn focus_handle(&self, _cx: &App) -> gpui::FocusHandle {
         self.focus.clone()
@@ -722,7 +951,8 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = cx.palette().clone();
         let border = cx.theme().border;
-        let panels = self.panels(window);
+        let panels = self.panels(window, cx);
+        let (_, sidebar_width) = self.sidebar_width(cx);
 
         let title = self.title(cx);
         if title != self.titled {
@@ -760,11 +990,13 @@ impl Render for Workspace {
                     .when(panels.sidebar, |this| {
                         this.child(
                             div()
-                                .w(px(self.session.sidebar.width))
+                                .relative()
+                                .w(px(sidebar_width))
                                 .flex_none()
                                 .border_r_1()
                                 .border_color(border)
-                                .child(sidebar.clone()),
+                                .child(sidebar.clone())
+                                .child(self.handle(&palette, cx)),
                         )
                     })
                     .child(
@@ -795,12 +1027,13 @@ impl Render for Workspace {
         let translucent = self.store.read(cx).config.sidebar.blurred();
         if translucent {
             let showing = panels.sidebar && matches!(self.screen, Screen::Main { .. });
-            super::vibrancy::sidebar(self.session.sidebar.width, showing, palette.is_light());
+            super::vibrancy::sidebar(sidebar_width, showing, palette.is_light());
         }
 
         div()
             .track_focus(&self.focus)
             .size_full()
+            .when(self.dragging.is_some(), |this| this.child(self.follow(cx)))
             // Left unpainted when the list is translucent: a background here
             // would cover the vibrancy layer the whole effect depends on.
             .when(!translucent, |this| this.bg(palette.background))
@@ -885,11 +1118,88 @@ impl Render for Workspace {
             .children(self.confirm.clone())
             .children(self.themes.clone())
             .children(self.editor.clone())
+            .children(self.forward.clone())
+            .children(self.raw.clone())
             .child(self.notices.clone())
     }
 }
 
 impl Workspace {
+    /// What the columns are separated by, once it can be dragged. The rule is
+    /// the sidebar's own right border; this is the target just inside it, laid
+    /// over the list rather than between the columns -- a strip of its own would
+    /// move everything sideways the moment it appeared.
+    fn handle(&self, palette: &petunia_config::Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let held = self.dragging.is_some();
+
+        div()
+            .id("resize-sidebar")
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .right_0()
+            .w(px(HANDLE))
+            .flex()
+            .justify_end()
+            .cursor_col_resize()
+            // Lit while it is being dragged, so the pointer is not the only thing
+            // saying the gesture has started.
+            .child(
+                div()
+                    .w_px()
+                    .h_full()
+                    .when(held, |this| this.bg(palette.border_focus)),
+            )
+            .when(!held, |this| {
+                this.hover(|this| this.bg(kit::tinted(palette.border_focus)))
+            })
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
+                    // The handle lies over the list's right edge, so without this
+                    // grabbing it would also open whichever conversation is
+                    // behind it.
+                    cx.stop_propagation();
+                    this.grab_sidebar(f32::from(event.position.x), cx)
+                }),
+            )
+    }
+
+    /// Follows the pointer for the length of a drag.
+    ///
+    /// At the window level rather than through an element's own listeners: a div
+    /// only hears a mouse move while it is the thing under the pointer, and a
+    /// drag is precisely the gesture that leaves the handle behind — which is why
+    /// the column moved only on release when this was an `on_mouse_move` on the
+    /// root. A `canvas` is the way to reach `Window::on_mouse_event` without
+    /// writing a whole element; it draws nothing and takes no space.
+    fn follow(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let moved = cx.listener(|this: &mut Self, event: &gpui::MouseMoveEvent, _, cx| {
+            this.drag_sidebar(f32::from(event.position.x), cx)
+        });
+        let released = cx.listener(|this: &mut Self, _: &gpui::MouseUpEvent, _, cx| {
+            this.drop_sidebar(cx)
+        });
+
+        gpui::canvas(
+            |_, _, _| {},
+            move |_, _, window, _| {
+                window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, window, cx| {
+                    if phase.bubble() {
+                        moved(event, window, cx);
+                    }
+                });
+                window.on_mouse_event(move |event: &gpui::MouseUpEvent, phase, window, cx| {
+                    if phase.bubble() {
+                        released(event, window, cx);
+                    }
+                });
+            },
+        )
+        .absolute()
+        .size_0()
+    }
+
     /// A thin strip carrying the conversation's name and the panel toggles, in
     /// place of the reference's tab bar.
     fn header(
@@ -939,6 +1249,26 @@ impl Workspace {
                 palette,
                 cx.listener(|this, _, _, cx| this.toggle_details(cx)),
             ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Dragging the divider in towards the window edge collapses the list rather
+    /// than leaving a column too narrow to read a name in.
+    #[test]
+    fn a_narrow_drag_snaps_to_the_rail() {
+        assert_eq!(resolve(40.0), (true, RAIL));
+        assert_eq!(resolve(SNAP_TO_RAIL - 1.0), (true, RAIL));
+    }
+
+    #[test]
+    fn a_wide_drag_is_a_width_within_the_bounds() {
+        assert_eq!(resolve(SNAP_TO_RAIL), (false, MIN_SIDEBAR));
+        assert_eq!(resolve(300.0), (false, 300.0));
+        assert_eq!(resolve(2000.0), (false, MAX_SIDEBAR));
     }
 }
 

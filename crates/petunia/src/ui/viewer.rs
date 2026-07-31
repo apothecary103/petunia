@@ -164,6 +164,7 @@ impl Render for Viewer {
             .track_focus(&self.focus)
             .absolute()
             .inset_0()
+            .occlude()
             .flex()
             .flex_col()
             .bg(gpui::Hsla {

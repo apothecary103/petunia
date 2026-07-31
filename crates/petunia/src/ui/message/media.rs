@@ -7,7 +7,10 @@ use gpui::{AnyElement, Div, MouseButton, SharedString, div, px};
 use gpui_component::progress::Progress;
 use gpui_component::{IconName, Sizable};
 
+use gpui_component::highlighter::HighlightTheme;
+
 use super::act::{Act, Dispatch};
+use super::{content, text};
 use petunia_media::audio::{self, Playback};
 use petunia_config::Theme;
 use petunia_config::messages::Spacing;
@@ -17,6 +20,9 @@ use crate::ui::{image, kit};
 /// Everything the renderer needs that is not the attachment itself.
 pub struct Frame<'a> {
     pub theme: &'a Theme,
+    /// The colours a previewed text file is highlighted in. Derived once when
+    /// the theme is installed, because this is rendered per frame.
+    pub highlights: &'a HighlightTheme,
     pub spacing: Spacing,
     /// The box inline media is scaled to fit inside.
     pub max_image: (f32, f32),
@@ -66,7 +72,10 @@ impl Frame<'_> {
             (Kind::Audio { waveform, .. }, Blob::Cached(path)) => {
                 self.audio(attached, waveform.as_deref(), path)
             }
-            (_, Blob::Cached(path)) => self.file(attached, path),
+            (_, Blob::Cached(path)) => match text::language(path).zip(text::head(path)) {
+                Some((language, head)) => self.text(attached, path, language, &head),
+                None => self.file(attached, path),
+            },
             (_, Blob::Downloading) => self.downloading(attached),
             (_, Blob::Failed(error)) => self.failed(attached, error),
             (_, Blob::Missing) => self.missing(attached),
@@ -219,6 +228,88 @@ impl Frame<'_> {
                         .child(SharedString::from(audio::clock(elapsed))),
                 )
             })
+            .into_any_element()
+    }
+
+    /// A text file as its own first lines, the way it would read if it had been
+    /// pasted into the message instead of attached to it. The name and the way in
+    /// stay on top, because it is still a file.
+    fn text(
+        &self,
+        attached: &Attachment,
+        path: &Path,
+        language: &str,
+        head: &text::Head,
+    ) -> AnyElement {
+        let theme = self.theme;
+        let act = self.act.clone();
+        let target = path.to_path_buf();
+        let save = self.act.clone();
+        let saved = path.to_path_buf();
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_1p5()
+            // Wider than a picture, because a line of code is longer than it is
+            // tall and wrapping one is what makes a preview unreadable.
+            .w_full()
+            .max_w(px(self.max_image.0.max(520.0)))
+            .child(
+                div()
+                    .id(SharedString::from(format!("open-{}", attached.id.as_str())))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .cursor_pointer()
+                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                        act(Act::Open(target.clone()), window, cx)
+                    })
+                    .child(kit::icon(IconName::File, 14.0, theme.text_muted))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(theme.typography.ui_size))
+                            .text_color(theme.text)
+                            .child(SharedString::from(label(attached))),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(self.spacing.small))
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from(size(attached.size))),
+                    )
+                    .child(kit::icon_button(
+                        SharedString::from(format!("save-{}", attached.id.as_str())),
+                        IconName::ArrowDown,
+                        theme,
+                        move |_, window, cx| save(Act::Save(saved.clone()), window, cx),
+                    )),
+            )
+            .child(
+                content::box_of_code(theme)
+                    .child(content::lines(
+                        &head.code,
+                        language,
+                        theme,
+                        self.highlights,
+                        self.spacing.body,
+                    ))
+                    .when(head.remaining > 0, |this| {
+                        this.child(
+                            div()
+                                .text_size(px(self.spacing.small))
+                                .text_color(theme.text_muted)
+                                .child(SharedString::from(match head.remaining {
+                                    1 => "1 more line".to_owned(),
+                                    more => format!("{more} more lines"),
+                                })),
+                        )
+                    }),
+            )
             .into_any_element()
     }
 

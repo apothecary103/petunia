@@ -26,6 +26,9 @@ pub struct Themes {
     focus: FocusHandle,
     query: String,
     selected: usize,
+    /// So the arrow keys can bring the selection back into view -- which matters
+    /// most here, since moving it is what installs a theme.
+    scroll: gpui::ScrollHandle,
     /// What was in force when this opened, to go back to if nothing is chosen.
     /// Previewing without a way back would make browsing destructive.
     restore: String,
@@ -40,6 +43,7 @@ impl Themes {
             focus: cx.focus_handle(),
             query: String::new(),
             selected: 0,
+            scroll: gpui::ScrollHandle::new(),
             restore,
             chosen: false,
         }
@@ -61,6 +65,7 @@ impl Themes {
     fn step(&mut self, delta: isize, cx: &mut Context<Self>) {
         let hits = self.hits();
         self.selected = switcher::step(self.selected, delta, hits.len());
+        self.scroll.scroll_to_item(self.selected);
         if let Some(name) = hits.get(self.selected) {
             self.preview(name.clone(), cx);
         }
@@ -174,6 +179,7 @@ impl Render for Themes {
             .on_key_down(cx.listener(Self::on_key))
             .absolute()
             .inset_0()
+            .occlude()
             .flex()
             .flex_col()
             .items_center()
@@ -223,6 +229,7 @@ impl Render for Themes {
                             .flex_1()
                             .min_h_0()
                             .overflow_y_scroll()
+                            .track_scroll(&self.scroll)
                             .p_1p5()
                             .children(hits.into_iter().enumerate().map(|(index, name)| {
                                 kit::row(

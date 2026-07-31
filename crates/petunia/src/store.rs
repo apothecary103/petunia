@@ -313,6 +313,42 @@ impl Store {
         cx.notify();
     }
 
+    /// Sends a message on to another conversation.
+    ///
+    /// A new message rather than anything marked as a forward: Signal's own
+    /// forward carries a flag that presage does not expose, so this is the honest
+    /// version of it -- the words and the files, sent again. Attachments have to
+    /// be on disk, because sending one means reading it.
+    pub fn forward(&mut self, target: MessageId, thread: Thread, cx: &mut Context<Self>) {
+        use petunia_data::attachment::Blob;
+
+        let Some(message) = self.original(&target) else {
+            return;
+        };
+        let body = message.text().unwrap_or_default().to_owned();
+        let ranges = message.ranges().to_vec();
+        let attachments: Vec<PathBuf> = message
+            .attachments
+            .iter()
+            .filter_map(|attached| match &attached.blob {
+                Blob::Cached(path) => Some(path.clone()),
+                _ => None,
+            })
+            .collect();
+
+        // Said rather than silently dropped: a message carrying only a picture
+        // that was never downloaded has nothing to send on, and a forward that
+        // does nothing looks like a broken menu item.
+        if body.trim().is_empty() && attachments.is_empty() {
+            cx.emit(StoreEvent::Failed(
+                "nothing to forward: download the attachment first".into(),
+            ));
+            return;
+        }
+
+        self.compose(thread, body, ranges, attachments, None, cx);
+    }
+
     /// Sends a sticker. It goes on its own rather than alongside whatever is
     /// typed, because Signal has no way to carry both.
     pub fn send_sticker(
@@ -357,6 +393,12 @@ impl Store {
             state.history_mut(&thread).insert(echo);
         }
         cx.notify();
+    }
+
+    /// The message an id names, for the views that are shown one rather than
+    /// drawing the thread it is in.
+    pub fn find(&self, target: &MessageId) -> Option<&data::Message> {
+        self.original(target)
     }
 
     /// The message an id names. Every thread, because a reply is composed against

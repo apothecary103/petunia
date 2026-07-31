@@ -7,13 +7,12 @@
 //! settings.
 
 use gpui::prelude::*;
-use gpui::{Context, Entity, MouseButton, SharedString, Window, div, px};
-use gpui_component::IconName;
+use gpui::{App, Context, Entity, MouseButton, MouseDownEvent, SharedString, Window, div, px};
 
 use super::kit;
 use petunia_config::keys::Preset;
-use petunia_config::messages::{Density, Timestamps};
-use petunia_config::{Config, GroupNotifications, Sort, theme, write};
+use petunia_config::messages::{Density, Layout, Timestamps};
+use petunia_config::{Config, GroupNotifications, Sort, Theme, theme, write};
 use crate::store::Store;
 use crate::theme::ActivePalette;
 
@@ -26,11 +25,21 @@ pub struct EditFile;
 impl gpui::EventEmitter<Dismissed> for Settings {}
 impl gpui::EventEmitter<EditFile> for Settings {}
 
+/// What clicking something does. Boxed rather than generic because a select is
+/// built from a list of them and they are all different closures.
+type Click = Box<dyn Fn(&MouseDownEvent, &mut Window, &mut App)>;
+
+/// What one row of a select offers, and what picking it does.
+type Option_ = (SharedString, bool, Click);
+
 pub struct Settings {
     store: Entity<Store>,
     /// What the file will say. Edited here and written on every change, so the
     /// window never holds an opinion the file does not.
     draft: Config,
+    /// Which select is open, if any. One at a time, because two lists of options
+    /// covering each other is not a choice anybody is making.
+    open: Option<&'static str>,
     /// Reported rather than swallowed: a settings window that silently fails to
     /// save is worse than one that will not open.
     failed: Option<String>,
@@ -39,10 +48,24 @@ pub struct Settings {
 
 impl Settings {
     pub fn new(store: Entity<Store>, cx: &mut Context<Self>) -> Self {
+        // The file is the truth, and it can change from under this window --
+        // through the theme picker, through a hand edit, through the watcher. A
+        // draft that did not follow would put whatever it was holding back the
+        // next time anything here was touched.
+        cx.observe(&store, |this: &mut Self, store, cx| {
+            let config = store.read(cx).config.clone();
+            if *config != this.draft {
+                this.draft = (*config).clone();
+                cx.notify();
+            }
+        })
+        .detach();
+
         let draft = (*store.read(cx).config).clone();
         Self {
             store,
             draft,
+            open: None,
             failed: None,
             focus: cx.focus_handle(),
         }
@@ -64,6 +87,24 @@ impl Settings {
             .update(cx, |store, cx| store.config_changed(config, cx));
         cx.notify();
     }
+
+    /// Opens or closes one of the selects.
+    fn toggle(&mut self, which: &'static str, cx: &mut Context<Self>) {
+        self.open = match self.open {
+            Some(open) if open == which => None,
+            _ => Some(which),
+        };
+        cx.notify();
+    }
+
+    /// Picking a theme takes effect at once rather than waiting for the watcher,
+    /// because the whole point of choosing one is looking at it.
+    fn pick_theme(&mut self, name: String, cx: &mut Context<Self>) {
+        self.open = None;
+        let wanted = name.clone();
+        self.change(|config| config.theme = wanted, cx);
+        crate::theme::install(theme::load(&name).0, cx);
+    }
 }
 
 impl gpui::Focusable for Settings {
@@ -82,6 +123,7 @@ impl Render for Settings {
             .track_focus(&self.focus)
             .absolute()
             .inset_0()
+            .occlude()
             .flex()
             .items_center()
             .justify_center()
@@ -106,7 +148,17 @@ impl Render for Settings {
                     .border_1()
                     .border_color(palette.border)
                     .overflow_hidden()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    // A click in the sheet neither dismisses it nor leaves a
+                    // select hanging open behind whatever was clicked.
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this: &mut Self, _, _, cx| {
+                            cx.stop_propagation();
+                            if this.open.take().is_some() {
+                                cx.notify();
+                            }
+                        }),
+                    )
                     .child(self.header(&palette, cx))
                     .child(
                         div()
@@ -140,7 +192,7 @@ impl Render for Settings {
 }
 
 impl Settings {
-    fn header(&self, palette: &petunia_config::Theme, cx: &mut Context<Self>) -> impl IntoElement {
+    fn header(&self, palette: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
             .flex_none()
@@ -157,30 +209,29 @@ impl Settings {
                     .text_color(palette.text)
                     .child("Settings"),
             )
+            // No icon. The one that was here was a document glyph on a control
+            // whose label already says which document, and it read as a file
+            // picker.
             .child(
                 div()
                     .id("edit-file")
                     .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap_1p5()
                     .px_2()
                     .py_1()
                     .rounded(px(6.0))
                     .cursor_pointer()
                     .hover(|this| this.bg(palette.hover))
-                    .text_size(px(palette.typography.ui_size - 2.0))
-                    .text_color(palette.text_muted)
+                    .text_size(px(palette.typography.ui_size - 1.0))
+                    .text_color(palette.text_dim)
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|_, _, _, cx| cx.emit(EditFile)),
                     )
-                    .child(kit::icon(IconName::File, 13.0, palette.text_muted))
                     .child("Edit config.toml"),
             )
             .child(kit::icon_button(
                 "close-settings",
-                IconName::Close,
+                gpui_component::IconName::Close,
                 palette,
                 cx.listener(|_, _, _, cx| cx.emit(Dismissed)),
             ))
@@ -189,161 +240,196 @@ impl Settings {
     fn appearance(
         &self,
         draft: &Config,
-        palette: &petunia_config::Theme,
+        palette: &Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let themes = theme::available();
-        let chosen = draft.theme.clone();
+        let chosen = match draft.theme.is_empty() {
+            true => "dark".to_owned(),
+            false => draft.theme.clone(),
+        };
+        let options: Vec<Option_> = theme::available()
+            .into_iter()
+            .map(|name| {
+                let selected = name == chosen;
+                let wanted = name.clone();
+                let pick: Click = Box::new(cx.listener(move |this: &mut Self, _, _, cx| {
+                    this.pick_theme(wanted.clone(), cx)
+                }));
+                (SharedString::from(name), selected, pick)
+            })
+            .collect();
 
-        section("Appearance", palette).child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_3()
-                .child(
-                    field("Theme", palette).child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .gap_1p5()
-                            .justify_end()
-                            .children(themes.into_iter().map(|name| {
-                                let selected = name == chosen;
-                                let wanted = name.clone();
-                                chip(
-                                    name,
-                                    selected,
-                                    palette,
-                                    cx.listener(move |this: &mut Self, _, _, cx| {
-                                        let wanted = wanted.clone();
-                                        this.change(|config| config.theme = wanted, cx);
-                                    }),
-                                )
-                            })),
-                    ),
-                )
-                .child(
-                    field("Scale", palette).child(stepper(
+        group(
+            "Appearance",
+            palette,
+            vec![
+                field("Theme", palette)
+                    .child(select(
+                        "theme",
+                        SharedString::from(chosen),
+                        self.open == Some("theme"),
+                        options,
+                        palette,
+                        cx.listener(|this: &mut Self, _, _, cx| this.toggle("theme", cx)),
+                    ))
+                    .into_any_element(),
+                field("Scale", palette)
+                    .child(stepper(
                         format!("{:.2}", draft.scale),
                         palette,
                         cx.listener(|this: &mut Self, _, _, cx| {
-                            this.change(
-                                |config| config.scale = (config.scale - 0.05).max(0.5),
-                                cx,
-                            )
+                            this.change(|config| config.scale = (config.scale - 0.05).max(0.5), cx)
                         }),
                         cx.listener(|this: &mut Self, _, _, cx| {
-                            this.change(
-                                |config| config.scale = (config.scale + 0.05).min(3.0),
-                                cx,
-                            )
+                            this.change(|config| config.scale = (config.scale + 0.05).min(3.0), cx)
                         }),
-                    )),
-                ),
+                    ))
+                    .into_any_element(),
+            ],
+            None,
         )
     }
 
     fn messages(
         &self,
         draft: &Config,
-        palette: &petunia_config::Theme,
+        palette: &Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        section("Messages", palette)
-            .child(field("Density", palette).child(choices(
-                [("Comfortable", Density::Comfortable), ("Compact", Density::Compact)],
-                draft.messages.density,
-                palette,
-                cx,
-                |config, density| config.messages.density = density,
-            )))
-            .child(field("Timestamps", palette).child(choices(
-                [
-                    ("Always", Timestamps::Always),
-                    ("On hover", Timestamps::Hover),
-                    ("Never", Timestamps::Never),
-                ],
-                draft.messages.timestamps,
-                palette,
-                cx,
-                |config, timestamps| config.messages.timestamps = timestamps,
-            )))
-            .child(field("Attribute your messages by name", palette).child(toggle(
-                draft.messages.show_own_name,
-                palette,
-                cx.listener(|this: &mut Self, _, _, cx| {
-                    this.change(
-                        |config| {
-                            config.messages.show_own_name = !config.messages.show_own_name
-                        },
+        let layouts = Layout::every().map(|layout| (layout.label(), layout));
+
+        group(
+            "Messages",
+            palette,
+            vec![
+                described("Layout", draft.messages.layout.describe(), palette)
+                    .child(choices(
+                        layouts,
+                        draft.messages.layout,
+                        palette,
                         cx,
-                    )
-                }),
-            )))
-            .child(field("Day separators", palette).child(toggle(
-                draft.messages.date_separators,
-                palette,
-                cx.listener(|this: &mut Self, _, _, cx| {
-                    this.change(
-                        |config| {
-                            config.messages.date_separators = !config.messages.date_separators
-                        },
+                        |config, layout| config.messages.layout = layout,
+                    ))
+                    .into_any_element(),
+                field("Density", palette)
+                    .child(choices(
+                        [
+                            ("Comfortable", Density::Comfortable),
+                            ("Compact", Density::Compact),
+                        ],
+                        draft.messages.density,
+                        palette,
                         cx,
-                    )
-                }),
-            )))
-            .child(
-                field("Group messages sent within", palette).child(stepper(
-                    format!("{}s", draft.messages.group_within),
+                        |config, density| config.messages.density = density,
+                    ))
+                    .into_any_element(),
+                field("Timestamps", palette)
+                    .child(choices(
+                        [
+                            ("Always", Timestamps::Always),
+                            ("On hover", Timestamps::Hover),
+                            ("Never", Timestamps::Never),
+                        ],
+                        draft.messages.timestamps,
+                        palette,
+                        cx,
+                        |config, timestamps| config.messages.timestamps = timestamps,
+                    ))
+                    .into_any_element(),
+                field("Group messages sent within", palette)
+                    .child(stepper(
+                        format!("{}s", draft.messages.group_within),
+                        palette,
+                        cx.listener(|this: &mut Self, _, _, cx| {
+                            this.change(
+                                |config| {
+                                    config.messages.group_within =
+                                        config.messages.group_within.saturating_sub(60).max(30)
+                                },
+                                cx,
+                            )
+                        }),
+                        cx.listener(|this: &mut Self, _, _, cx| {
+                            this.change(
+                                |config| {
+                                    config.messages.group_within =
+                                        (config.messages.group_within + 60).min(3_600)
+                                },
+                                cx,
+                            )
+                        }),
+                    ))
+                    .into_any_element(),
+                field("Day separators", palette)
+                    .child(toggle(
+                        draft.messages.date_separators,
+                        palette,
+                        cx.listener(|this: &mut Self, _, _, cx| {
+                            this.change(
+                                |config| {
+                                    config.messages.date_separators =
+                                        !config.messages.date_separators
+                                },
+                                cx,
+                            )
+                        }),
+                    ))
+                    .into_any_element(),
+                field("Attribute your messages by name", palette)
+                    .child(toggle(
+                        draft.messages.show_own_name,
+                        palette,
+                        cx.listener(|this: &mut Self, _, _, cx| {
+                            this.change(
+                                |config| {
+                                    config.messages.show_own_name = !config.messages.show_own_name
+                                },
+                                cx,
+                            )
+                        }),
+                    ))
+                    .into_any_element(),
+            ],
+            None,
+        )
+    }
+
+    fn list(&self, draft: &Config, palette: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut rows = vec![
+            field("Sort by", palette)
+                .child(choices(
+                    [("Recent", Sort::Recent), ("Name", Sort::Name)],
+                    draft.sidebar.sort,
+                    palette,
+                    cx,
+                    |config, sort| config.sidebar.sort = sort,
+                ))
+                .into_any_element(),
+            field("Show a preview", palette)
+                .child(toggle(
+                    draft.sidebar.show_preview,
                     palette,
                     cx.listener(|this: &mut Self, _, _, cx| {
                         this.change(
-                            |config| {
-                                config.messages.group_within =
-                                    config.messages.group_within.saturating_sub(60).max(30)
-                            },
+                            |config| config.sidebar.show_preview = !config.sidebar.show_preview,
                             cx,
                         )
                     }),
-                    cx.listener(|this: &mut Self, _, _, cx| {
-                        this.change(
-                            |config| {
-                                config.messages.group_within =
-                                    (config.messages.group_within + 60).min(3_600)
-                            },
-                            cx,
-                        )
-                    }),
-                )),
-            )
-    }
+                ))
+                .into_any_element(),
+        ];
+        // No width here. It is what dragging the list's right edge sets, and a
+        // stepper for the same number is a second control for one preference --
+        // which is a promise that they cannot disagree.
 
-    fn list(
-        &self,
-        draft: &Config,
-        palette: &petunia_config::Theme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        section("Conversation list", palette)
-            .child(field("Sort by", palette).child(choices(
-                [("Recent", Sort::Recent), ("Name", Sort::Name)],
-                draft.sidebar.sort,
-                palette,
-                cx,
-                |config, sort| config.sidebar.sort = sort,
-            )))
-            .child(field("Show a preview", palette).child(toggle(
-                draft.sidebar.show_preview,
-                palette,
-                cx.listener(|this: &mut Self, _, _, cx| {
-                    this.change(
-                        |config| config.sidebar.show_preview = !config.sidebar.show_preview,
-                        cx,
-                    )
-                }),
-            )))
-            .when(cfg!(target_os = "macos"), |this| {
-                this.child(field("Blur the desktop behind it", palette).child(toggle(
+        if cfg!(target_os = "macos") {
+            rows.push(
+                described(
+                    "Blur the desktop behind it",
+                    "Takes effect on restart: the blur is a property of the window.",
+                    palette,
+                )
+                .child(toggle(
                     draft.sidebar.translucent,
                     palette,
                     cx.listener(|this: &mut Self, _, _, cx| {
@@ -352,249 +438,263 @@ impl Settings {
                             cx,
                         )
                     }),
-                )))
-            })
-            .child(
-                div()
-                    .pb_2()
-                    .text_size(px(palette.typography.ui_size - 2.0))
-                    .text_color(palette.text_muted)
-                    .child(match cfg!(target_os = "macos") {
-                        true => "Takes effect on restart: the blur is a property of the window.",
-                        false => "",
-                    }),
-            )
-            .child(field("Width", palette).child(stepper(
-                format!("{:.0}", draft.sidebar.width),
-                palette,
-                cx.listener(|this: &mut Self, _, _, cx| {
-                    this.change(
-                        |config| config.sidebar.width = (config.sidebar.width - 20.0).max(180.0),
-                        cx,
-                    )
-                }),
-                cx.listener(|this: &mut Self, _, _, cx| {
-                    this.change(
-                        |config| config.sidebar.width = (config.sidebar.width + 20.0).min(480.0),
-                        cx,
-                    )
-                }),
-            )))
+                ))
+                .into_any_element(),
+            );
+        }
+
+        group("Conversation list", palette, rows, None)
     }
 
-    fn media(
-        &self,
-        draft: &Config,
-        palette: &petunia_config::Theme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        section("Media", palette)
-            .child(
-                div()
-                    .pb_2()
-                    .text_size(px(palette.typography.ui_size - 2.0))
-                    .text_color(palette.text_muted)
-                    .child(
-                        "Signal's servers drop attachments after a few weeks. Anything \
-                         not fetched while it is fresh is gone for good.",
-                    ),
-            )
-            .child(field("Download pictures", palette).child(toggle(
-                draft.media.auto_download_images,
-                palette,
-                cx.listener(|this: &mut Self, _, _, cx| {
-                    this.change(
-                        |config| {
-                            config.media.auto_download_images = !config.media.auto_download_images
-                        },
-                        cx,
-                    )
-                }),
-            )))
-            .child(field("Download audio", palette).child(toggle(
-                draft.media.auto_download_audio,
-                palette,
-                cx.listener(|this: &mut Self, _, _, cx| {
-                    this.change(
-                        |config| {
-                            config.media.auto_download_audio = !config.media.auto_download_audio
-                        },
-                        cx,
-                    )
-                }),
-            )))
-            .child(field("Download video", palette).child(toggle(
-                draft.media.auto_download_video,
-                palette,
-                cx.listener(|this: &mut Self, _, _, cx| {
-                    this.change(
-                        |config| {
-                            config.media.auto_download_video = !config.media.auto_download_video
-                        },
-                        cx,
-                    )
-                }),
-            )))
-            .child(field("Only below", palette).child(stepper(
-                format!("{} MB", draft.media.auto_download_limit),
-                palette,
-                cx.listener(|this: &mut Self, _, _, cx| {
-                    this.change(
-                        |config| {
-                            config.media.auto_download_limit =
-                                config.media.auto_download_limit.saturating_sub(2).max(1)
-                        },
-                        cx,
-                    )
-                }),
-                cx.listener(|this: &mut Self, _, _, cx| {
-                    this.change(
-                        |config| {
-                            config.media.auto_download_limit =
-                                (config.media.auto_download_limit + 2).min(256)
-                        },
-                        cx,
-                    )
-                }),
-            )))
-            .child(field("Keep cached", palette).child(stepper(
-                format!("{} MB", draft.media.cache_limit),
-                palette,
-                cx.listener(|this: &mut Self, _, _, cx| {
-                    this.change(
-                        |config| {
-                            config.media.cache_limit =
-                                config.media.cache_limit.saturating_sub(256).max(256)
-                        },
-                        cx,
-                    )
-                }),
-                cx.listener(|this: &mut Self, _, _, cx| {
-                    this.change(
-                        |config| {
-                            config.media.cache_limit = (config.media.cache_limit + 256).min(65_536)
-                        },
-                        cx,
-                    )
-                }),
-            )))
+    fn media(&self, draft: &Config, palette: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        group(
+            "Media",
+            palette,
+            vec![
+                field("Download pictures", palette)
+                    .child(toggle(
+                        draft.media.auto_download_images,
+                        palette,
+                        cx.listener(|this: &mut Self, _, _, cx| {
+                            this.change(
+                                |config| {
+                                    config.media.auto_download_images =
+                                        !config.media.auto_download_images
+                                },
+                                cx,
+                            )
+                        }),
+                    ))
+                    .into_any_element(),
+                field("Download audio", palette)
+                    .child(toggle(
+                        draft.media.auto_download_audio,
+                        palette,
+                        cx.listener(|this: &mut Self, _, _, cx| {
+                            this.change(
+                                |config| {
+                                    config.media.auto_download_audio =
+                                        !config.media.auto_download_audio
+                                },
+                                cx,
+                            )
+                        }),
+                    ))
+                    .into_any_element(),
+                field("Download video", palette)
+                    .child(toggle(
+                        draft.media.auto_download_video,
+                        palette,
+                        cx.listener(|this: &mut Self, _, _, cx| {
+                            this.change(
+                                |config| {
+                                    config.media.auto_download_video =
+                                        !config.media.auto_download_video
+                                },
+                                cx,
+                            )
+                        }),
+                    ))
+                    .into_any_element(),
+                field("Only below", palette)
+                    .child(stepper(
+                        format!("{} MB", draft.media.auto_download_limit),
+                        palette,
+                        cx.listener(|this: &mut Self, _, _, cx| {
+                            this.change(
+                                |config| {
+                                    config.media.auto_download_limit =
+                                        config.media.auto_download_limit.saturating_sub(2).max(1)
+                                },
+                                cx,
+                            )
+                        }),
+                        cx.listener(|this: &mut Self, _, _, cx| {
+                            this.change(
+                                |config| {
+                                    config.media.auto_download_limit =
+                                        (config.media.auto_download_limit + 2).min(256)
+                                },
+                                cx,
+                            )
+                        }),
+                    ))
+                    .into_any_element(),
+                field("Keep cached", palette)
+                    .child(stepper(
+                        format!("{} MB", draft.media.cache_limit),
+                        palette,
+                        cx.listener(|this: &mut Self, _, _, cx| {
+                            this.change(
+                                |config| {
+                                    config.media.cache_limit =
+                                        config.media.cache_limit.saturating_sub(256).max(256)
+                                },
+                                cx,
+                            )
+                        }),
+                        cx.listener(|this: &mut Self, _, _, cx| {
+                            this.change(
+                                |config| {
+                                    config.media.cache_limit =
+                                        (config.media.cache_limit + 256).min(65_536)
+                                },
+                                cx,
+                            )
+                        }),
+                    ))
+                    .into_any_element(),
+            ],
+            Some(
+                "Signal's servers drop attachments after a few weeks. Anything not \
+                 fetched while it is fresh is gone for good.",
+            ),
+        )
     }
 
     fn notifications(
         &self,
         draft: &Config,
-        palette: &petunia_config::Theme,
+        palette: &Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        section("Notifications", palette)
-            .child(
-                div()
-                    .pb_2()
-                    .text_size(px(palette.typography.ui_size - 2.0))
-                    .text_color(palette.text_muted)
-                    .child("Not built yet; these are recorded and nothing reads them."),
-            )
-            .child(field("Enabled", palette).child(toggle(
-                draft.notifications.enabled,
-                palette,
-                cx.listener(|this: &mut Self, _, _, cx| {
-                    this.change(
-                        |config| config.notifications.enabled = !config.notifications.enabled,
-                        cx,
-                    )
-                }),
-            )))
-            .child(field("Show what was said", palette).child(toggle(
-                draft.notifications.show_content,
-                palette,
-                cx.listener(|this: &mut Self, _, _, cx| {
-                    this.change(
-                        |config| {
-                            config.notifications.show_content =
-                                !config.notifications.show_content
-                        },
-                        cx,
-                    )
-                }),
-            )))
-            .child(field("For groups", palette).child(choices(
-                [
-                    ("Everything", GroupNotifications::All),
-                    ("Mentions", GroupNotifications::Mentions),
-                    ("Nothing", GroupNotifications::None),
-                ],
-                draft.notifications.groups,
-                palette,
-                cx,
-                |config, groups| config.notifications.groups = groups,
-            )))
-    }
-
-    fn keys(
-        &self,
-        draft: &Config,
-        palette: &petunia_config::Theme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let current = draft.keys.matches();
-
-        section("Keyboard", palette)
-            .child(field("Preset", palette).child(
-                div().flex().gap_1p5().children(Preset::every().map(|preset| {
-                    chip(
-                        preset.label(),
-                        current == Some(preset),
+        group(
+            "Notifications",
+            palette,
+            vec![
+                field("Enabled", palette)
+                    .child(toggle(
+                        draft.notifications.enabled,
                         palette,
-                        cx.listener(move |this: &mut Self, _, _, cx| {
+                        cx.listener(|this: &mut Self, _, _, cx| {
                             this.change(
                                 |config| {
-                                    config.keys = petunia_config::Keys::preset(preset);
+                                    config.notifications.enabled = !config.notifications.enabled
                                 },
                                 cx,
                             )
                         }),
-                    )
-                })),
-            ))
-            .child(
-                div()
-                    .pt_1()
-                    .text_size(px(palette.typography.ui_size - 2.0))
-                    .text_color(palette.text_muted)
-                    .child(match current {
-                        Some(_) => "Press cmd+/ to see the bindings. Individual keys can be \
-                                    rebound by editing config.toml.",
-                        None => "These bindings have been edited, so no preset matches. Press \
-                                 cmd+/ to see them.",
-                    }),
-            )
+                    ))
+                    .into_any_element(),
+                field("Show what was said", palette)
+                    .child(toggle(
+                        draft.notifications.show_content,
+                        palette,
+                        cx.listener(|this: &mut Self, _, _, cx| {
+                            this.change(
+                                |config| {
+                                    config.notifications.show_content =
+                                        !config.notifications.show_content
+                                },
+                                cx,
+                            )
+                        }),
+                    ))
+                    .into_any_element(),
+                field("For groups", palette)
+                    .child(choices(
+                        [
+                            ("Everything", GroupNotifications::All),
+                            ("Mentions", GroupNotifications::Mentions),
+                            ("Nothing", GroupNotifications::None),
+                        ],
+                        draft.notifications.groups,
+                        palette,
+                        cx,
+                        |config, groups| config.notifications.groups = groups,
+                    ))
+                    .into_any_element(),
+            ],
+            Some("Not built yet; these are recorded and nothing reads them."),
+        )
+    }
+
+    fn keys(&self, draft: &Config, palette: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let current = draft.keys.matches();
+
+        group(
+            "Keyboard",
+            palette,
+            vec![
+                field("Preset", palette)
+                    .child(div().flex().gap_1p5().children(Preset::every().map(
+                        |preset| {
+                            chip(
+                                preset.label(),
+                                current == Some(preset),
+                                palette,
+                                cx.listener(move |this: &mut Self, _, _, cx| {
+                                    this.change(
+                                        |config| config.keys = petunia_config::Keys::preset(preset),
+                                        cx,
+                                    )
+                                }),
+                            )
+                        },
+                    )))
+                    .into_any_element(),
+            ],
+            Some(match current {
+                Some(_) => "Press cmd+/ to see the bindings. Individual keys can be rebound \
+                            by editing config.toml.",
+                None => "These bindings have been edited, so no preset matches. Press cmd+/ \
+                         to see them.",
+            }),
+        )
     }
 }
 
-fn section(title: &'static str, palette: &petunia_config::Theme) -> gpui::Div {
+/// One section: a quiet heading, a card of rows, and an optional footnote.
+///
+/// A card rather than a run of rows each with a rule under it. The old shape left
+/// every section's last rule floating between it and the next heading, which is
+/// what made the window read as one undifferentiated list.
+fn group(
+    title: &'static str,
+    palette: &Theme,
+    rows: Vec<gpui::AnyElement>,
+    footnote: Option<&'static str>,
+) -> gpui::Div {
     div()
         .flex()
         .flex_col()
         .pt_5()
+        .child(kit::section(title, palette))
         .child(
             div()
-                .pb_2()
-                .text_size(px(palette.typography.ui_size - 2.0))
-                .text_color(palette.text_muted)
-                .child(title),
+                .flex()
+                .flex_col()
+                .rounded(px(kit::RADIUS))
+                .border_1()
+                .border_color(palette.border)
+                .children(rows.into_iter().enumerate().map(|(at, row)| {
+                    div()
+                        .px_3()
+                        .py_2p5()
+                        .when(at > 0, |this| {
+                            this.border_t_1().border_color(palette.border)
+                        })
+                        .child(row)
+                })),
         )
+        .when_some(footnote, |this, footnote| {
+            this.child(
+                div()
+                    .pt_2()
+                    .text_size(px(palette.typography.ui_size - 2.0))
+                    .text_color(palette.text_muted)
+                    .child(footnote),
+            )
+        })
 }
 
 /// One preference: what it is on the left, what it is set to on the right.
-fn field(label: &'static str, palette: &petunia_config::Theme) -> gpui::Div {
+fn field(label: &'static str, palette: &Theme) -> gpui::Div {
     div()
         .flex()
         .items_center()
         .justify_between()
         .gap_4()
-        .py_2()
-        .border_b_1()
-        .border_color(palette.border)
         .child(
             div()
                 .flex_none()
@@ -604,16 +704,46 @@ fn field(label: &'static str, palette: &petunia_config::Theme) -> gpui::Div {
         )
 }
 
-/// A row of mutually exclusive choices, which is every enum in the config.
+/// A preference that needs a line of explanation. The explanation goes under the
+/// label rather than under the row, so it stays attached to what it explains.
+fn described(label: &'static str, note: &'static str, palette: &Theme) -> gpui::Div {
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_4()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .min_w_0()
+                .gap_0p5()
+                .child(
+                    div()
+                        .text_size(px(palette.typography.ui_size))
+                        .text_color(palette.text_dim)
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .text_size(px(palette.typography.ui_size - 2.0))
+                        .text_color(palette.text_muted)
+                        .child(note),
+                ),
+        )
+}
+
+/// A row of mutually exclusive choices, which is every small enum in the config.
 fn choices<T: PartialEq + Copy + 'static, const N: usize>(
     options: [(&'static str, T); N],
     chosen: T,
-    palette: &petunia_config::Theme,
+    palette: &Theme,
     cx: &mut Context<Settings>,
     set: impl Fn(&mut Config, T) + Copy + 'static,
 ) -> gpui::Div {
     div()
         .flex()
+        .flex_none()
         .gap_1p5()
         .children(options.map(|(label, value)| {
             chip(
@@ -627,11 +757,116 @@ fn choices<T: PartialEq + Copy + 'static, const N: usize>(
         }))
 }
 
+/// One of many, shown as what is chosen rather than as all of them. Thirteen
+/// themes as a wrapped row of chips was most of the window and read as a colour
+/// swatch grid.
+fn select(
+    id: &'static str,
+    chosen: SharedString,
+    open: bool,
+    options: Vec<Option_>,
+    palette: &Theme,
+    toggle: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> gpui::Div {
+    let rows = options.into_iter().enumerate().map(|(at, (label, selected, pick))| {
+        div()
+            .id(SharedString::from(format!("{id}-option-{at}")))
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .rounded(px(5.0))
+            .cursor_pointer()
+            .hover(|this| this.bg(palette.hover))
+            .text_size(px(palette.typography.ui_size))
+            .text_color(match selected {
+                true => palette.text,
+                false => palette.text_dim,
+            })
+            .child(div().flex_1().min_w_0().truncate().child(label))
+            .when(selected, |this| {
+                this.child(kit::icon(
+                    gpui_component::IconName::Check,
+                    13.0,
+                    palette.accent,
+                ))
+            })
+            .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                pick(event, window, cx);
+                cx.stop_propagation();
+            })
+    });
+
+    div()
+        .flex_none()
+        .relative()
+        .child(
+            div()
+                .id(SharedString::from(format!("{id}-select")))
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .w(px(190.0))
+                .px_2p5()
+                .py_1()
+                .rounded(px(6.0))
+                .cursor_pointer()
+                .bg(palette.sunken)
+                .border_1()
+                .border_color(match open {
+                    true => palette.border_focus,
+                    false => palette.border,
+                })
+                .text_size(px(palette.typography.ui_size))
+                .text_color(palette.text)
+                .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                    toggle(event, window, cx);
+                    // Otherwise the sheet's own handler, which closes whatever is
+                    // open, would close this in the same click that opened it.
+                    cx.stop_propagation();
+                })
+                .child(div().flex_1().min_w_0().truncate().child(chosen))
+                .child(kit::icon(
+                    gpui_component::IconName::ChevronDown,
+                    13.0,
+                    palette.text_muted,
+                )),
+        )
+        .when(open, |this| {
+            // Deferred, so it paints after every one of its ancestors and
+            // outside their content masks. Drawn in place it was both painted
+            // over by the rows below it -- which is what made it look
+            // transparent -- and clipped by the scroll area it sits in.
+            this.child(gpui::deferred(
+                div()
+                    .id(SharedString::from(format!("{id}-options")))
+                    .absolute()
+                    .top(px(30.0))
+                    .right_0()
+                    .w(px(190.0))
+                    .max_h(px(240.0))
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .p_1()
+                    .rounded(px(kit::RADIUS))
+                    .bg(palette.elevated)
+                    .border_1()
+                    .border_color(palette.border)
+                    .shadow_lg()
+                    .children(rows),
+            ))
+        })
+}
+
 fn chip(
     label: impl Into<SharedString>,
     selected: bool,
-    palette: &petunia_config::Theme,
-    on_click: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut gpui::App) + 'static,
+    palette: &Theme,
+    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
     let label = label.into();
 
@@ -643,18 +878,16 @@ fn chip(
         .rounded(px(6.0))
         .cursor_pointer()
         .border_1()
-        .border_color(if selected {
-            palette.accent
-        } else {
-            palette.border
+        .border_color(match selected {
+            true => palette.accent,
+            false => palette.border,
         })
         .when(selected, |this| this.bg(kit::tinted(palette.accent)))
         .when(!selected, |this| this.hover(|this| this.bg(palette.hover)))
         .text_size(px(palette.typography.ui_size - 1.0))
-        .text_color(if selected {
-            palette.text
-        } else {
-            palette.text_dim
+        .text_color(match selected {
+            true => palette.text,
+            false => palette.text_dim,
         })
         .on_mouse_down(MouseButton::Left, on_click)
         .child(label)
@@ -662,8 +895,8 @@ fn chip(
 
 fn toggle(
     on: bool,
-    palette: &petunia_config::Theme,
-    on_click: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut gpui::App) + 'static,
+    palette: &Theme,
+    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
     div()
         .id("toggle")
@@ -677,6 +910,7 @@ fn toggle(
         .border_1()
         .border_color(if on { palette.accent } else { palette.border })
         .flex()
+        .items_center()
         .when(on, |this| this.justify_end())
         .on_mouse_down(MouseButton::Left, on_click)
         .child(
@@ -689,32 +923,36 @@ fn toggle(
 
 fn stepper(
     value: impl Into<SharedString>,
-    palette: &petunia_config::Theme,
-    less: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut gpui::App) + 'static,
-    more: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut gpui::App) + 'static,
+    palette: &Theme,
+    less: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+    more: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> gpui::Div {
     let value = value.into();
 
     div()
         .flex()
+        .flex_none()
         .items_center()
         .gap_1()
         .child(kit::icon_button(
             SharedString::from(format!("less-{value}")),
-            IconName::Minus,
+            gpui_component::IconName::Minus,
             palette,
             less,
         ))
         .child(
+            // Fixed and centred, so stepping from "9 MB" to "10 MB" does not move
+            // the buttons either side of it.
             div()
-                .min_w(px(64.0))
+                .w(px(72.0))
+                .text_center()
                 .text_size(px(palette.typography.ui_size))
                 .text_color(palette.text)
                 .child(value.clone()),
         )
         .child(kit::icon_button(
             SharedString::from(format!("more-{value}")),
-            IconName::Plus,
+            gpui_component::IconName::Plus,
             palette,
             more,
         ))

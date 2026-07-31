@@ -120,7 +120,12 @@ fn person(
                     .flex()
                     .justify_center()
                     .pb_3()
-                    .child(kit::chip(badge, palette.accent_for(uuid.as_bytes()), palette)),
+                    .child(kit::badge(
+                        badge,
+                        palette.accent_for(uuid.as_bytes()),
+                        palette.typography.ui_size - 1.0,
+                        palette.typography.ui_size * 1.6,
+                    )),
             )
         })
         .child(fields(
@@ -307,8 +312,15 @@ fn members(
                             )
                         }),
                 )
+                // The same badge the message list draws, so the group's word for
+                // somebody looks like one thing wherever it appears.
                 .when_some(role, |this, role| {
-                    this.child(kit::chip(role, palette.text_dim, palette))
+                    this.child(kit::badge(
+                        role,
+                        palette.text_dim,
+                        palette.typography.ui_size - 2.0,
+                        palette.typography.ui_size * 1.5,
+                    ))
                 })
         }))
 }

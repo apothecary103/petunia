@@ -14,17 +14,10 @@ pub struct Session {
     pub window: WindowSize,
     /// The conversation to reopen on launch.
     pub active: Option<Thread>,
-    #[serde(default = "sidebar")]
-    pub sidebar: PanelState,
+    #[serde(default)]
+    pub sidebar: SidebarState,
     #[serde(default = "details")]
     pub details: PanelState,
-}
-
-fn sidebar() -> PanelState {
-    PanelState {
-        open: true,
-        width: 260.0,
-    }
 }
 
 /// Closed until asked for: an empty panel taking a fifth of the window is worse
@@ -49,6 +42,17 @@ pub struct PanelState {
     pub width: f32,
 }
 
+/// The conversation list. Its width is a preference in `config.toml` rather than
+/// session state, because the settings window offers it too and two places
+/// holding the same number is one of them being wrong.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SidebarState {
+    pub open: bool,
+    /// Collapsed to a rail of avatars rather than closed.
+    pub rail: bool,
+}
+
 impl Default for Session {
     fn default() -> Self {
         Self {
@@ -57,7 +61,7 @@ impl Default for Session {
                 height: 720.0,
             },
             active: None,
-            sidebar: sidebar(),
+            sidebar: SidebarState::default(),
             details: details(),
         }
     }
@@ -65,7 +69,16 @@ impl Default for Session {
 
 impl Default for PanelState {
     fn default() -> Self {
-        sidebar()
+        details()
+    }
+}
+
+impl Default for SidebarState {
+    fn default() -> Self {
+        Self {
+            open: true,
+            rail: false,
+        }
     }
 }
 
@@ -130,6 +143,10 @@ mod tests {
                 open: true,
                 width: 320.0,
             },
+            sidebar: SidebarState {
+                rail: true,
+                ..SidebarState::default()
+            },
             ..Session::default()
         };
 
@@ -139,5 +156,18 @@ mod tests {
         assert!(matches!(restored.active, Some(Thread::Group(_))));
         assert!(restored.details.open);
         assert_eq!(restored.details.width, 320.0);
+        assert!(restored.sidebar.rail);
+    }
+
+    /// A session written before the rail existed carried the list's width here.
+    /// It is a preference now, so the old key is ignored rather than refused.
+    #[test]
+    fn a_session_from_before_the_rail_still_loads() {
+        let stored = r#"{ "sidebar": { "open": false, "width": 300.0 } }"#;
+
+        let session: Session = serde_json::from_str(stored).unwrap();
+
+        assert!(!session.sidebar.open);
+        assert!(!session.sidebar.rail);
     }
 }

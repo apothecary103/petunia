@@ -130,6 +130,7 @@ impl Render for Editor {
             .track_focus(&self.focus)
             .absolute()
             .inset_0()
+            .occlude()
             .flex()
             .items_center()
             .justify_center()

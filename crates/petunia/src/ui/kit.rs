@@ -13,6 +13,12 @@ pub fn icon(name: IconName, size: f32, tint: Hsla) -> Icon {
     Icon::new(name).size(px(size)).text_color(tint)
 }
 
+/// One of petunia's own icons, which the library's set does not ship. Named by
+/// the path `crate::assets` serves it at.
+pub fn glyph(path: &'static str, size: f32, tint: Hsla) -> Icon {
+    Icon::empty().path(path).size(px(size)).text_color(tint)
+}
+
 /// The rounding used everywhere. One value, so nothing drifts.
 pub const RADIUS: f32 = 8.0;
 pub const RADIUS_LG: f32 = 12.0;
@@ -128,10 +134,8 @@ pub fn chip(label: impl Into<SharedString>, tint: Hsla, theme: &Theme) -> Div {
     chip_sized(label, tint, theme.typography.ui_size - 4.0)
 }
 
-/// The same chip at a size the caller picks, for the message list -- which is
-/// scaled by density and by `scale`, so a chip drawn there at the interface size
-/// would be the one thing in the run that does not follow.
-pub fn chip_sized(label: impl Into<SharedString>, tint: Hsla, size: f32) -> Div {
+/// The same chip at a size the caller picks.
+fn chip_sized(label: impl Into<SharedString>, tint: Hsla, size: f32) -> Div {
     div()
         .flex_none()
         .px_1p5()
@@ -142,17 +146,76 @@ pub fn chip_sized(label: impl Into<SharedString>, tint: Hsla, size: f32) -> Div 
         .child(label.into())
 }
 
+/// A badge: what a group says about somebody, beside their name.
+///
+/// Not `chip`. A chip is pill-shaped for a count, where the shape is the point;
+/// a badge sits in a line of text, so it is squared off to the same corner radius
+/// as everything else and given real vertical padding. Its line height is set to
+/// the text beside it so a row of `items_center` puts them on the same line --
+/// left to the font, a chip's box is taller than the name it annotates and the
+/// two never look aligned.
+pub fn badge(label: impl Into<SharedString>, tint: Hsla, size: f32, line: f32) -> Div {
+    div()
+        .flex_none()
+        .px(px(size * 0.45))
+        .rounded(px(4.0))
+        .bg(tinted(tint))
+        .text_size(px(size))
+        .line_height(px(line))
+        .font_weight(EMPHASIS)
+        .text_color(tint)
+        .child(label.into())
+}
+
 /// A filled dot, for "something happened here" with nothing worth counting.
 pub fn dot(tint: Hsla) -> Div {
     div().flex_none().size(px(6.0)).rounded_full().bg(tint)
 }
 
+/// Three dots rising in turn: somebody is typing.
+///
+/// One animation for all three, with each dot reading the cycle a third of a turn
+/// behind the last — three animations would drift apart, since each is timed from
+/// the frame it first appeared on.
+pub fn typing(size: f32, tint: Hsla, id: impl Into<SharedString>) -> gpui::AnimationElement<Div> {
+    use gpui::AnimationExt as _;
+
+    const DOTS: usize = 3;
+    let id = id.into();
+
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(px(size * 0.5))
+        .with_animation(
+            gpui::ElementId::Name(id),
+            gpui::Animation::new(std::time::Duration::from_millis(1_200)).repeat(),
+            move |this, delta| {
+                this.children((0..DOTS).map(|at| {
+                    let phase = (delta + 1.0 - at as f32 / DOTS as f32) % 1.0;
+                    // A rise and a rest, so the three read as a wave rather than
+                    // as three things blinking.
+                    let lifted = (phase * std::f32::consts::TAU).sin().max(0.0);
+                    div()
+                        .size(px(size))
+                        .rounded_full()
+                        .bg(tint)
+                        .opacity(0.35 + 0.65 * lifted)
+                }))
+            },
+        )
+}
+
 /// The reading column. Prose that runs the full width of a wide window is
-/// unreadable, so the conversation is capped and centred like the reference.
+/// unreadable, so the conversation is capped.
 pub const MEASURE: f32 = 760.0;
 
+/// Capped and pinned to the left edge of its column rather than centred.
+/// Centring means every message moves sideways as the window is resized or a
+/// panel opens, and a conversation you are reading should stay where it is.
 pub fn measured() -> Div {
-    div().w_full().max_w(px(MEASURE)).mx_auto()
+    div().w_full().max_w(px(MEASURE))
 }
 
 /// A colour at the strength a fill wants rather than the strength text wants.
@@ -177,10 +240,18 @@ pub fn dialog(width: f32, theme: &Theme) -> Div {
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
 }
 
+/// What covers the window while a dialog is up.
+///
+/// `occlude` is what makes it cover: gpui deliberately lets a scroll wheel
+/// through to whatever scrollable is beneath, so that an overlay does not stop
+/// the page under it from scrolling. Here that is exactly wrong -- the
+/// conversation behind a sheet is out of reach, and scrolling it while reading
+/// the sheet is not something anybody asked for.
 pub fn scrim(theme: &Theme) -> Div {
     div()
         .absolute()
         .inset_0()
+        .occlude()
         .flex()
         .items_center()
         .justify_center()

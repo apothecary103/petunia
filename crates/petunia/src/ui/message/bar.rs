@@ -71,14 +71,24 @@ fn bar(message: &Message, own: bool, theme: &Theme, act: &Dispatch) -> Div {
         bar = bar.child(emoji_button(emoji, id, theme, act));
     }
 
-    bar = bar.child(divider(theme)).child(button(
-        format!("reply-{}", id.timestamp),
-        IconName::Undo,
-        "Reply",
-        theme,
-        act.clone(),
-        Act::Reply(id),
-    ));
+    bar = bar
+        .child(divider(theme))
+        .child(button(
+            format!("reply-{}", id.timestamp),
+            IconName::Undo,
+            "Reply",
+            theme,
+            act.clone(),
+            Act::Reply(id),
+        ))
+        .child(button(
+            format!("forward-{}", id.timestamp),
+            IconName::Redo,
+            "Forward",
+            theme,
+            act.clone(),
+            Act::Forward(id),
+        ));
 
     if has_text {
         bar = bar.child(button(

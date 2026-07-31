@@ -9,7 +9,7 @@ use gpui::{
     ClipboardEntry, Context, Div, Entity, ImageFormat, MouseButton, SharedString, Subscription,
     Window, div, px,
 };
-use gpui_component::IconName;
+use gpui_component::{IconName, Sizable as _};
 use gpui_component::input;
 use gpui_component::input::{Input, InputEvent, InputState};
 
@@ -345,9 +345,9 @@ impl Render for Composer {
         let field = div()
             .flex()
             .items_end()
-            .gap_2()
-            .px_3p5()
-            .py_2p5()
+            .gap_1p5()
+            .px_2()
+            .py_1p5()
             .rounded(px(kit::RADIUS_LG))
             .bg(palette.elevated)
             .border_1()
@@ -356,13 +356,21 @@ impl Render for Composer {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .child(Input::new(&self.input).appearance(false).bordered(false)),
+                    // Sized down for its padding, not its text: the field's own
+                    // vertical padding is most of what made the card tall, and
+                    // small and medium draw the same size of type.
+                    .child(
+                        Input::new(&self.input)
+                            .appearance(false)
+                            .bordered(false)
+                            .small(),
+                    ),
             )
             .child(
                 div()
                     .id("formatting")
                     .flex_none()
-                    .size(px(26.0))
+                    .size(px(24.0))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -389,7 +397,7 @@ impl Render for Composer {
                 div()
                     .id("stickers")
                     .flex_none()
-                    .size(px(26.0))
+                    .size(px(24.0))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -397,7 +405,6 @@ impl Render for Composer {
                     .cursor_pointer()
                     .when(self.stickers.is_some(), |this| this.bg(palette.active))
                     .hover(|this| this.bg(palette.hover))
-                    .text_size(px(14.0))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, _, cx| {
@@ -408,7 +415,18 @@ impl Render for Composer {
                             cx.notify();
                         }),
                     )
-                    .child("☺"),
+                    // The set ships no sticker glyph, and the smiley this drew
+                    // instead read as an emoji picker -- which is a different
+                    // control that this one is not.
+                    .child(kit::glyph(
+                        "icons/sticker.svg",
+                        15.0,
+                        if self.stickers.is_some() {
+                            palette.text_dim
+                        } else {
+                            palette.text_muted
+                        },
+                    )),
             )
             .child(kit::icon_button(
                 "attach",
@@ -424,10 +442,10 @@ impl Render for Composer {
         kit::measured()
             .flex()
             .flex_col()
-            .gap_1p5()
+            .gap_1()
             .px(px(padding_x))
-            .pb_4()
-            .pt_2()
+            .pb_2p5()
+            .pt_1p5()
             .on_action(
                 cx.listener(|this, _: &actions::AttachFile, window, cx| {
                     this.pick_files(window, cx)
@@ -739,7 +757,7 @@ fn send(
     div()
         .id("send")
         .flex_none()
-        .size(px(28.0))
+        .size(px(26.0))
         .flex()
         .items_center()
         .justify_center()

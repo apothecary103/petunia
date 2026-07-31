@@ -147,6 +147,7 @@ impl Render for Menu {
             .track_focus(&self.focus)
             .absolute()
             .inset_0()
+            .occlude()
             .on_action(cx.listener(|_, _: &crate::actions::Cancel, _, cx| cx.emit(Dismissed)))
             // Any click anywhere else closes it, including a right-click meant
             // to open another one.

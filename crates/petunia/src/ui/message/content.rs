@@ -99,6 +99,7 @@ impl Body<'_> {
 
         let frame = media::Frame {
             theme,
+            highlights: self.highlights,
             spacing,
             max_image: self.max_image,
             timestamp: self.message.timestamp(),
@@ -328,6 +329,22 @@ fn code_block(
     };
     let language = language.unwrap_or("text");
 
+    box_of_code(theme)
+        .when(language != "text", |this| {
+            this.child(
+                div()
+                    .text_size(px(size - 3.0))
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(language.to_owned())),
+            )
+        })
+        .child(lines(code, language, theme, highlights, size))
+        .into_any_element()
+}
+
+/// The box a block of code sits in. Shared with the attachment preview, which is
+/// the same thing arriving as a file rather than as words.
+pub fn box_of_code(theme: &Theme) -> Div {
     div()
         .w_full()
         .flex()
@@ -339,23 +356,23 @@ fn code_block(
         .bg(theme.sunken)
         .border_1()
         .border_color(theme.border)
-        .when(language != "text", |this| {
-            this.child(
-                div()
-                    .text_size(px(size - 3.0))
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from(language.to_owned())),
-            )
-        })
-        .child(
-            div()
-                .font_family(theme.typography.mono.clone())
-                .text_size(px(size - 1.0))
-                .line_height(px((size - 1.0) * 1.45))
-                .text_color(theme.text)
-                .child(highlighted(code, language, highlights)),
-        )
-        .into_any_element()
+}
+
+/// Code as it is drawn: monospace, at the message's own size, coloured by what
+/// the highlighter made of it.
+pub fn lines(
+    code: &str,
+    language: &str,
+    theme: &Theme,
+    highlights: &HighlightTheme,
+    size: f32,
+) -> Div {
+    div()
+        .font_family(theme.typography.mono.clone())
+        .text_size(px(size - 1.0))
+        .line_height(px((size - 1.0) * 1.45))
+        .text_color(theme.text)
+        .child(highlighted(code, language, highlights))
 }
 
 /// Runs the code through the widget library's tree-sitter highlighter. It has a
@@ -442,6 +459,10 @@ fn parse(
 /// Renders the body with Signal's formatting applied. Mentions carry a
 /// placeholder in the body, so the name is substituted before highlighting and
 /// the offsets are recomputed against the text actually drawn.
+/// A thin space, which is what inline code is padded with. A normal space would
+/// look like a space in the sentence.
+const PAD: char = '\u{2009}';
+
 fn styled(body: &str, ranges: &[Range], state: &State, theme: &Theme) -> StyledText {
     let segments = format::segments(body, ranges);
     let mut text = String::new();
@@ -462,6 +483,16 @@ fn styled(body: &str, ranges: &[Range], state: &State, theme: &Theme) -> StyledT
             (false, Some(uuid)) => {
                 text.push('@');
                 text.push_str(&state.sender_name(uuid));
+            }
+            // Inline code gets a thin space either side, inside the run that is
+            // washed: a highlight is a colour over a range of text and has no
+            // padding to set, so the only way to keep the wash off the letters is
+            // to give it something else to sit on. `bat` then reads as a chip
+            // rather than as a word somebody spilled grey on.
+            (false, None) if styles.monospace => {
+                text.push(PAD);
+                text.push_str(&body[segment.start..segment.end]);
+                text.push(PAD);
             }
             (false, None) => text.push_str(&body[segment.start..segment.end]),
         }
@@ -504,7 +535,10 @@ fn highlight(styles: format::Styles, theme: &Theme) -> Option<HighlightStyle> {
         touched = true;
     }
     if styles.monospace {
-        highlight.background_color = Some(theme.sunken);
+        // `active`, not `sunken`: sunken is a shade *below* the background, which
+        // on a dark theme is five values off black and reads as nothing at all.
+        // A wash has to be visible against both the conversation and a bubble.
+        highlight.background_color = Some(theme.active);
         touched = true;
     }
     if styles.spoiler {

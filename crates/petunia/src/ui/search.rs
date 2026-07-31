@@ -45,6 +45,8 @@ pub struct Search {
     /// faster one would otherwise replace newer results with older ones.
     answered: String,
     selected: usize,
+    /// So the arrow keys can bring the selection back into view.
+    scroll: gpui::ScrollHandle,
     focus: gpui::FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -79,6 +81,7 @@ impl Search {
             hits: Vec::new(),
             answered: String::new(),
             selected: 0,
+            scroll: gpui::ScrollHandle::new(),
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
         }
@@ -147,6 +150,7 @@ impl Search {
         }
         let count = self.hits.len() as isize;
         self.selected = (((self.selected as isize + by) % count + count) % count) as usize;
+        self.scroll.scroll_to_item(self.selected);
         cx.notify();
     }
 
@@ -191,6 +195,7 @@ impl Render for Search {
                         thread_name: &name,
                         sender: &who,
                         picture,
+                        query: &self.answered,
                         scoped,
                         selected: index == self.selected,
                         palette: &palette,
@@ -208,6 +213,7 @@ impl Render for Search {
             .track_focus(&self.focus)
             .absolute()
             .inset_0()
+            .occlude()
             .flex()
             .flex_col()
             .items_center()
@@ -244,11 +250,35 @@ impl Render for Search {
                     .child(
                         div()
                             .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap_2p5()
                             .px_3p5()
                             .py_3()
                             .border_b_1()
                             .border_color(palette.border)
-                            .child(Input::new(&self.query).appearance(false).bordered(false)),
+                            .child(kit::icon(
+                                gpui_component::IconName::Search,
+                                15.0,
+                                palette.text_muted,
+                            ))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(Input::new(&self.query).appearance(false).bordered(false)),
+                            )
+                            // What was found, beside what was asked. A result list
+                            // that is exactly as long as the limit needs to say so.
+                            .when(searching && !self.hits.is_empty(), |this| {
+                                this.child(
+                                    div()
+                                        .flex_none()
+                                        .text_size(px(palette.typography.ui_size - 2.0))
+                                        .text_color(palette.text_muted)
+                                        .child(SharedString::from(counted(self.hits.len()))),
+                                )
+                            }),
                     )
                     .child(
                         div()
@@ -256,6 +286,7 @@ impl Render for Search {
                             .flex_1()
                             .min_h_0()
                             .overflow_y_scroll()
+                            .track_scroll(&self.scroll)
                             .p_1p5()
                             .children(rows),
                     )
@@ -275,6 +306,18 @@ impl Render for Search {
     }
 }
 
+/// How many were found, and whether that is all of them. The query returns the
+/// newest `LIMIT`, so a full page means "at least this many" rather than "this
+/// many" -- and saying the wrong one of those is how a search convinces somebody
+/// a message is not there.
+fn counted(hits: usize) -> String {
+    match hits >= petunia_signal::db::search::LIMIT as usize {
+        true => format!("{hits}+ matches"),
+        false if hits == 1 => "1 match".to_owned(),
+        false => format!("{hits} matches"),
+    }
+}
+
 fn note(text: &'static str, palette: &Theme) -> gpui::Div {
     div()
         .px_4()
@@ -290,6 +333,8 @@ struct Result_<'a> {
     thread_name: &'a str,
     sender: &'a str,
     picture: Option<&'a std::path::Path>,
+    /// What was searched for, so the row can show where it matched.
+    query: &'a str,
     /// A scoped search already knows which conversation this is.
     scoped: bool,
     selected: bool,
@@ -357,7 +402,96 @@ fn row(
                     .truncate()
                     .text_size(px(palette.typography.ui_size))
                     .text_color(palette.text)
-                    .child(SharedString::from(result.hit.body.replace('\n', " "))),
+                    .child(matched(
+                        &result.hit.body.replace('\n', " "),
+                        result.query,
+                        palette,
+                    )),
             ),
     )
+}
+
+/// The line a hit matched on, with the words that matched picked out. A list of
+/// twenty results all reading "…and then I said…" is a list you have to read;
+/// marking the match is what makes it a list you can scan.
+fn matched(body: &str, query: &str, palette: &Theme) -> gpui::StyledText {
+    let highlight = gpui::HighlightStyle {
+        color: Some(palette.accent),
+        font_weight: Some(kit::EMPHASIS),
+        ..Default::default()
+    };
+
+    gpui::StyledText::new(body.to_owned())
+        .with_highlights(occurrences(body, query).into_iter().map(|range| (range, highlight)))
+}
+
+/// Every place `query` occurs in `body`, ignoring case. The same match the
+/// database made -- a `LIKE '%query%'` -- so a row cannot claim a match the
+/// search did not make.
+fn occurrences(body: &str, query: &str) -> Vec<std::ops::Range<usize>> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let (haystack, needle) = (body.to_lowercase(), query.to_lowercase());
+    // Lowercasing can change a string's length, so a position in the lowered
+    // copy is not a position in the original. Only ranges that still land on a
+    // character boundary of the original are used, which leaves the rare
+    // multi-byte-folding case unmarked rather than panicking in the renderer.
+    if haystack.len() != body.len() {
+        return Vec::new();
+    }
+
+    let mut found = Vec::new();
+    let mut at = 0;
+    while let Some(offset) = haystack[at..].find(&needle) {
+        let start = at + offset;
+        let end = start + needle.len();
+        if !body.is_char_boundary(start) || !body.is_char_boundary(end) {
+            break;
+        }
+        found.push(start..end);
+        at = end;
+    }
+    found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_occurrence_is_marked_and_matching_ignores_case() {
+        assert_eq!(
+            occurrences("Deploy, then deploy again", "DEPLOY"),
+            [0..6, 13..19]
+        );
+    }
+
+    #[test]
+    fn an_empty_query_marks_nothing() {
+        assert!(occurrences("anything", "   ").is_empty());
+        assert!(occurrences("anything", "").is_empty());
+    }
+
+    /// Every range is handed to the renderer, which panics rather than truncates
+    /// if one lands inside a character.
+    #[test]
+    fn a_range_never_lands_inside_a_character() {
+        for range in occurrences("héllo wörld, héllo", "héllo") {
+            assert!("héllo wörld, héllo".is_char_boundary(range.start), "{range:?}");
+            assert!("héllo wörld, héllo".is_char_boundary(range.end), "{range:?}");
+        }
+    }
+
+    /// A full page is "at least this many": the query returns the newest few, and
+    /// reporting that as the total is how a search talks somebody out of looking.
+    #[test]
+    fn a_full_page_of_results_says_there_may_be_more() {
+        let limit = petunia_signal::db::search::LIMIT as usize;
+
+        assert_eq!(counted(1), "1 match");
+        assert_eq!(counted(3), "3 matches");
+        assert_eq!(counted(limit), format!("{limit}+ matches"));
+    }
 }

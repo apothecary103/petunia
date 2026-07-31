@@ -25,6 +25,19 @@ pub enum Row {
     Update(usize),
 }
 
+impl Row {
+    /// Whether this row draws the message at `index`. What a search jumping to a
+    /// message needs: the list scrolls by row, and a message is somewhere inside
+    /// one.
+    pub fn covers(&self, index: usize) -> bool {
+        match self {
+            Self::Run { messages, .. } => messages.contains(&index),
+            Self::Update(at) => *at == index,
+            Self::Day(_) | Self::UnreadMarker => false,
+        }
+    }
+}
+
 /// Splits a thread into day separators, runs and update lines. Pure so the
 /// boundary conditions can be tested without a renderer.
 pub fn rows(messages: &[Message], first_unread: Option<u64>, group_within_ms: u64) -> Vec<Row> {
@@ -313,6 +326,26 @@ mod tests {
                 Row::Update(index) => assert!(index < messages.len()),
                 Row::Day(_) | Row::UnreadMarker => {}
             }
+        }
+    }
+
+    /// Every message has to be findable in exactly one row, or a search that
+    /// jumps to one scrolls to the wrong place -- or to nothing.
+    #[test]
+    fn every_message_is_covered_by_exactly_one_row() {
+        let (alice, bob) = (Uuid::new_v4(), Uuid::new_v4());
+        let messages = [
+            message(alice, NOON),
+            update(alice, NOON + 1000),
+            message(bob, NOON + 2000),
+            message(bob, NOON + 3000),
+        ];
+
+        let rows = rows(&messages, Some(NOON + 2000), GROUP_WITHIN);
+
+        for index in 0..messages.len() {
+            let covering = rows.iter().filter(|row| row.covers(index)).count();
+            assert_eq!(covering, 1, "message {index}");
         }
     }
 

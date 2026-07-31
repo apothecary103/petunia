@@ -1,22 +1,18 @@
 use chrono::{Local, NaiveDate};
 use gpui::prelude::*;
 use gpui::{
-    Context, Entity, Hsla, ListAlignment, ListState, MouseButton, SharedString, Window, div, list,
-    px,
+    Context, Entity, ListAlignment, ListState, MouseButton, SharedString, Window, div, list, px,
 };
-use uuid::Uuid;
 
-use super::avatar::avatar;
 use super::composer::Composer;
 use super::kit;
 use super::message::act::{Act, Dispatch};
-use super::message::content;
 use super::message::group;
-use super::relative;
+use super::message::run::Run;
 use petunia_media::audio::{Playback, Player};
 use petunia_config::Theme;
-use petunia_config::messages::{Spacing, Timestamps};
-use petunia_data::{Member, Message, MessageId, State, Thread};
+use petunia_config::messages::{Layout, Spacing, Timestamps};
+use petunia_data::{Message, MessageId, State, Thread};
 use petunia_signal::Command;
 use crate::store::{Focus, Store};
 use crate::theme::ActivePalette;
@@ -56,11 +52,40 @@ impl Raise {
 
 impl gpui::EventEmitter<Raise> for Conversation {}
 
+/// A message is to be sent on to another conversation. The workspace owns the
+/// picker, because choosing where means looking at the whole list.
+#[derive(Debug, Clone)]
+pub struct Forwarding(pub MessageId);
+
+/// What the wire actually said, asked for. The workspace owns the sheet for the
+/// same reason it owns every other one.
+#[derive(Debug, Clone)]
+pub struct Inspecting(pub MessageId);
+
+impl gpui::EventEmitter<Forwarding> for Conversation {}
+impl gpui::EventEmitter<Inspecting> for Conversation {}
+
 /// How far beyond the window the list measures. A run is tall and its height is
 /// only known once it is built, so a scroll that outruns the measured region
 /// stutters while it catches up; a window's worth of slack is enough that a
 /// flick never does.
 const OVERDRAW: f32 = 800.0;
+
+/// How long a message a search jumped to stays lit. Long enough to find it on
+/// the page, short enough that it is not still lit when you come back.
+const REVEAL_FOR: std::time::Duration = std::time::Duration::from_millis(2500);
+
+/// How many pages back a search hit is worth looking for. One click must not
+/// turn into an unbounded download of a conversation with years behind it.
+const REVEAL_PAGES: u32 = 20;
+
+/// A message a search asked to be taken to.
+#[derive(Clone, Copy)]
+struct Reveal {
+    target: MessageId,
+    /// Pages still worth fetching before giving up on finding it.
+    budget: u32,
+}
 
 /// Hands a file to whatever the system opens it with.
 fn open(path: &std::path::Path) {
@@ -97,6 +122,14 @@ pub struct Conversation {
     /// time, but nothing would ask it again, so an indicator whose "stopped" was
     /// lost would sit there until the next unrelated repaint.
     aging: Option<gpui::Task<()>>,
+    /// What a search asked to be shown, while it is still being looked for or
+    /// still lit.
+    revealed: Option<Reveal>,
+    /// Where to put the list once it has been told how many rows there are.
+    /// Applied after `reconcile` rather than when the row is worked out, because
+    /// scrolling to a row the list has not heard of yet clamps to the end.
+    pending_scroll: Option<usize>,
+    fading: Option<gpui::Task<()>>,
 }
 
 impl Conversation {
@@ -120,8 +153,13 @@ impl Conversation {
                 // Which end the next rows arrive at. The list keeps the reader
                 // where they are either way, but only if it is told where they
                 // went in.
-                if let crate::store::StoreEvent::History { older: true } = event {
-                    this.prepending = true;
+                if let crate::store::StoreEvent::History { older } = event {
+                    this.prepending |= *older;
+                    // A page arriving is when a search hit further back than the
+                    // page it was looking in becomes findable.
+                    if this.revealed.is_some() {
+                        this.seek(cx);
+                    }
                     cx.notify();
                 }
             },
@@ -140,7 +178,83 @@ impl Conversation {
             prepending: false,
             ticking: None,
             aging: None,
+            revealed: None,
+            pending_scroll: None,
+            fading: None,
         }
+    }
+
+    /// Takes the reader to a message, loading older pages until it turns up.
+    /// Called when a search result is chosen, which is the only way to arrive
+    /// somewhere that is not the bottom of the thread.
+    pub fn reveal(&mut self, target: MessageId, cx: &mut Context<Self>) {
+        self.revealed = Some(Reveal {
+            target,
+            budget: REVEAL_PAGES,
+        });
+        self.seek(cx);
+    }
+
+    /// Scrolls to whatever `revealed` names, or asks for the page behind the one
+    /// loaded and waits to be called again.
+    fn seek(&mut self, cx: &mut Context<Self>) {
+        let Some(&Reveal { target, budget }) = self.revealed.as_ref() else {
+            return;
+        };
+        let store = self.store.read(cx);
+        let Some(thread) = store.active().cloned() else {
+            return;
+        };
+        let group_within_ms = store.config.messages.group_within * 1000;
+        // No page yet: the thread was only just opened, and the load that is
+        // already on its way will call this again.
+        let Some(history) = store.state().and_then(|state| state.history(&thread)) else {
+            return;
+        };
+
+        let found = history
+            .messages()
+            .iter()
+            .position(|message| message.id == target);
+
+        match found {
+            Some(at) => {
+                let rows = group::rows(
+                    history.messages(),
+                    history.first_unread(),
+                    group_within_ms,
+                );
+                // One past the row it is in: row zero is the load-older button.
+                self.pending_scroll = rows
+                    .iter()
+                    .position(|row| row.covers(at))
+                    .map(|row| row + 1);
+                self.fade(cx);
+            }
+            None if budget > 0 && history.has_more() => {
+                if let Some(reveal) = self.revealed.as_mut() {
+                    reveal.budget = budget - 1;
+                }
+                self.load_older(thread, cx);
+            }
+            // Nowhere left to look, so nothing is lit rather than something
+            // being lit forever.
+            None => self.revealed = None,
+        }
+        cx.notify();
+    }
+
+    /// Puts the highlight out again. The scroll stays where it was put.
+    fn fade(&mut self, cx: &mut Context<Self>) {
+        self.fading = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(REVEAL_FOR).await;
+            this.update(cx, |this, cx| {
+                this.revealed = None;
+                this.fading = None;
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     /// One tick a second while anyone is typing, and none otherwise.
@@ -228,6 +342,8 @@ impl Conversation {
                 store.send(Command::InstallStickerPack { pack_id, key })
             }),
             Act::Inspect(who) => self.inspect(who, cx),
+            Act::Forward(target) => cx.emit(Forwarding(target)),
+            Act::Raw(target) => cx.emit(Inspecting(target)),
             Act::Menu(target, at) => self.open_menu(target, at, cx),
             Act::MenuFor(who, at) => {
                 let items = crate::ui::menu::message::person(who, &self.dispatch(cx));
@@ -489,6 +605,7 @@ impl Render for Conversation {
             return empty(&palette, "Still connecting…").into_any_element();
         };
 
+        let layout = store.config.messages.layout;
         let spacing = store.config.messages.spacing();
         let timestamps = store.config.messages.timestamps;
         // The config counts seconds; message timestamps are milliseconds.
@@ -518,16 +635,25 @@ impl Render for Conversation {
         let loading = history.is_loading();
 
         self.reconcile(&thread, rows.len() + 1);
+        // After reconcile, so the list has heard of the row being asked for.
+        if let Some(row) = self.pending_scroll.take() {
+            self.list.scroll_to(gpui::ListOffset {
+                item_ix: row,
+                offset_in_item: px(0.0),
+            });
+        }
 
         let rows = std::rc::Rc::new(rows);
         let frame = std::rc::Rc::new(Frame {
             thread: thread.clone(),
             palette: palette.clone(),
             highlights: cx.highlights().clone(),
+            layout,
             spacing,
             timestamps,
             max_image,
             playback,
+            revealed: self.revealed.as_ref().map(|reveal| reveal.target.timestamp),
             act,
         });
         let store = self.store.clone();
@@ -622,10 +748,13 @@ struct Frame {
     thread: Thread,
     palette: Theme,
     highlights: std::sync::Arc<gpui_component::highlighter::HighlightTheme>,
+    layout: Layout,
     spacing: Spacing,
     timestamps: Timestamps,
     max_image: (f32, f32),
     playback: Playback,
+    /// The message a search jumped to, lit until the next one is asked for.
+    revealed: Option<u64>,
     act: Dispatch,
 }
 
@@ -650,7 +779,23 @@ impl Frame {
                 if run.is_empty() {
                     return None;
                 }
-                run_block(*sender, run, state, self).into_any_element()
+                Run {
+                    sender: *sender,
+                    messages: run,
+                    state,
+                    thread: &self.thread,
+                    theme: &self.palette,
+                    highlights: &self.highlights,
+                    layout: self.layout,
+                    spacing: self.spacing,
+                    timestamps: self.timestamps,
+                    max_image: self.max_image,
+                    playback: &self.playback,
+                    revealed: self.revealed,
+                    act: &self.act,
+                }
+                .render()
+                .into_any_element()
             }
         })
     }
@@ -682,139 +827,6 @@ fn load_older(
             "Load older messages"
         })
         .into_any_element()
-}
-
-fn run_block(
-    sender: Uuid,
-    run: &[Message],
-    state: &State,
-    frame: &Frame,
-) -> gpui::Div {
-    let Frame {
-        thread,
-        palette,
-        highlights,
-        spacing,
-        timestamps,
-        max_image,
-        playback,
-        act,
-    } = frame;
-    let (spacing, timestamps, max_image) = (*spacing, *timestamps, *max_image);
-    let name = state.sender_name(sender);
-    let member = state.member(thread, sender);
-    let tint = palette.accent_for(sender.as_bytes());
-    let first = run.first();
-    let inspect = {
-        let act = act.clone();
-        move |_: &gpui::MouseDownEvent, window: &mut Window, cx: &mut gpui::App| {
-            act(Act::Inspect(sender), window, cx)
-        }
-    };
-    let menu = {
-        let act = act.clone();
-        move |event: &gpui::MouseDownEvent, window: &mut Window, cx: &mut gpui::App| {
-            act(Act::MenuFor(sender, event.position), window, cx)
-        }
-    };
-
-    let header = div()
-        .flex()
-        .items_baseline()
-        .gap_2()
-        .child(
-            div()
-                .id("sender")
-                .cursor_pointer()
-                .text_size(px(spacing.body))
-                .font_weight(kit::EMPHASIS)
-                .text_color(tint)
-                .hover(|this| this.underline())
-                .on_mouse_down(MouseButton::Left, inspect.clone())
-                .on_mouse_down(MouseButton::Right, menu.clone())
-                .child(SharedString::from(name.clone())),
-        )
-        .children(labels(member, tint, palette, spacing))
-        .when_some(
-            first.filter(|_| timestamps != Timestamps::Never),
-            |this, message| {
-                this.child(
-                    div()
-                        .text_size(px(spacing.small))
-                        .text_color(palette.text_muted)
-                        .child(SharedString::from(clock(message.timestamp()))),
-                )
-            },
-        );
-
-    let bodies = run.iter().map(|message| {
-        content::Body {
-            message,
-            state,
-            theme: palette,
-            highlights,
-            spacing,
-            max_image,
-            playback,
-            act,
-        }
-        .render()
-    });
-
-    div()
-        .flex()
-        .items_start()
-        .gap(px(spacing.gutter - spacing.avatar))
-        .child(
-            div()
-                .id("sender-avatar")
-                .flex_none()
-                .cursor_pointer()
-                .on_mouse_down(MouseButton::Left, inspect)
-                .on_mouse_down(MouseButton::Right, menu)
-                .child(avatar(
-                    state.avatar_for(sender),
-                    &name,
-                    sender.as_bytes(),
-                    spacing.avatar,
-                    palette,
-                )),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_w_0()
-                .gap(px(spacing.within_run))
-                .child(header)
-                .children(bodies),
-        )
-}
-
-/// What the group says about whoever is talking: the label they picked for
-/// themselves, then the role the group gave them. Empty outside a group, and
-/// empty for the ordinary members of one, so a chip here always means something.
-/// The chips beside a run's header. `tint` is the sender's own colour, because a
-/// label someone picked for themselves belongs to them the way their name does;
-/// the role is the group's word rather than theirs, and stays neutral.
-fn labels(member: Option<&Member>, tint: Hsla, palette: &Theme, spacing: Spacing) -> Vec<gpui::Div> {
-    let Some(member) = member else {
-        return Vec::new();
-    };
-    let size = spacing.small - 1.0;
-
-    member
-        .badge()
-        .map(|badge| kit::chip_sized(badge, tint, size))
-        .into_iter()
-        .chain(
-            member
-                .role
-                .label()
-                .map(|role| kit::chip_sized(role, palette.text_dim, size)),
-        )
-        .collect()
 }
 
 fn day_separator(date: NaiveDate, palette: &Theme, spacing: Spacing) -> gpui::AnyElement {
@@ -862,12 +874,6 @@ fn update_line(message: &Message, palette: &Theme, spacing: Spacing) -> gpui::An
 
 fn rule(palette: &Theme) -> gpui::Div {
     div().h_px().flex_1().bg(palette.border)
-}
-
-fn clock(timestamp: u64) -> String {
-    relative::local(timestamp)
-        .map(|at| at.format("%H:%M").to_string())
-        .unwrap_or_default()
 }
 
 fn day_label(date: NaiveDate) -> String {

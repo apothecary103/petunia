@@ -19,6 +19,9 @@ pub struct Switcher {
     focus: FocusHandle,
     query: String,
     selected: usize,
+    /// So the arrow keys can bring the selection back into view. A list walked by
+    /// keyboard that scrolls only under the pointer selects rows you cannot see.
+    scroll: gpui::ScrollHandle,
 }
 
 impl Switcher {
@@ -29,6 +32,7 @@ impl Switcher {
             focus: cx.focus_handle(),
             query: String::new(),
             selected: 0,
+            scroll: gpui::ScrollHandle::new(),
         }
     }
 
@@ -94,6 +98,7 @@ impl Switcher {
 
     fn move_by(&mut self, delta: isize, len: usize, cx: &mut Context<Self>) {
         self.selected = switcher::step(self.selected, delta, len);
+        self.scroll.scroll_to_item(self.selected);
         cx.notify();
     }
 
@@ -168,6 +173,7 @@ impl Render for Switcher {
             .id("switcher-scrim")
             .absolute()
             .inset_0()
+            .occlude()
             .flex()
             .flex_col()
             .items_center()
@@ -192,6 +198,14 @@ impl Render for Switcher {
                     .child(query_line(&self.query, &palette))
                     .child(
                         div()
+                            .id("matches")
+                            // Bounded and scrolling: a query that matches
+                            // everything grew the sheet past the bottom of the
+                            // window, which put the rows nobody could see in the
+                            // one place the keyboard was walking to.
+                            .max_h(px(420.0))
+                            .overflow_y_scroll()
+                            .track_scroll(&self.scroll)
                             .flex()
                             .flex_col()
                             .gap_0p5()

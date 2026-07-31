@@ -1,4 +1,5 @@
 mod actions;
+mod assets;
 mod bridge;
 mod session;
 mod store;
@@ -28,7 +29,7 @@ fn main() {
         .init();
 
     // Carries the icon set; without it every icon renders as nothing.
-    let app = gpui_platform::application().with_assets(gpui_component_assets::Assets);
+    let app = gpui_platform::application().with_assets(assets::Assets);
 
     app.run(|cx: &mut App| {
         let loaded = config::load();

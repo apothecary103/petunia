@@ -20,6 +20,7 @@ pub fn items(message: &Message, own: bool, act: &Dispatch) -> Vec<Item> {
 
     if message.is_addressable() {
         items.push(entry(act, "Reply", IconName::Undo, Act::Reply(id)));
+        items.push(entry(act, "Forward…", IconName::Redo, Act::Forward(id)));
     }
     if message.text().is_some_and(|text| !text.is_empty()) {
         items.push(entry(act, "Copy text", IconName::Copy, Act::Copy(id)));
@@ -33,6 +34,9 @@ pub fn items(message: &Message, own: bool, act: &Dispatch) -> Vec<Item> {
         items.push(Item::Separator);
         items.extend(media);
     }
+
+    items.push(Item::Separator);
+    items.push(entry(act, "Message details", IconName::Info, Act::Raw(id)));
 
     if own && message.is_addressable() {
         items.push(Item::Separator);
@@ -155,7 +159,30 @@ mod tests {
         let offered = labels(&items(&deleted, true, &dispatch()));
 
         assert!(!offered.contains(&"Reply".to_string()));
+        assert!(!offered.contains(&"Forward…".to_string()));
         assert!(!offered.contains(&"Delete".to_string()));
+    }
+
+    /// Forwarding is not editing, so it is offered on anyone's message.
+    #[test]
+    fn anything_still_standing_can_be_forwarded() {
+        for own in [true, false] {
+            assert!(
+                labels(&items(&message("hi"), own, &dispatch())).contains(&"Forward…".to_string())
+            );
+        }
+    }
+
+    /// What the wire said is always askable, including about a tombstone -- that
+    /// is exactly when you want to know.
+    #[test]
+    fn every_message_offers_its_details() {
+        let mut deleted = message("");
+        deleted.content = Content::Deleted;
+
+        assert!(
+            labels(&items(&deleted, false, &dispatch())).contains(&"Message details".to_string())
+        );
     }
 
     #[test]

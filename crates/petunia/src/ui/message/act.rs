@@ -27,6 +27,10 @@ pub enum Act {
     Delete(MessageId),
     /// Copies the message's text to the clipboard.
     Copy(MessageId),
+    /// Sends this message on to another conversation.
+    Forward(MessageId),
+    /// Shows what the wire actually said about this message.
+    Raw(MessageId),
     /// Opens a picture full size, with everything else in the thread beside it.
     View(PathBuf),
     /// Writes a copy somewhere the user picks.
