@@ -3,6 +3,7 @@ pub mod blobs;
 pub mod messages;
 pub mod read;
 pub mod receipts;
+pub mod search;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool};
 use sqlx::Row;
@@ -23,6 +24,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/002_blobs.sql"),
     include_str!("migrations/003_read.sql"),
     include_str!("migrations/004_avatars.sql"),
+    include_str!("migrations/005_search.sql"),
 ];
 
 #[cfg(test)]

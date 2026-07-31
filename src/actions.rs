@@ -7,6 +7,7 @@ actions!(
     [
         QuickSwitcher,
         Search,
+        SearchThread,
         FocusComposer,
         ToggleSidebar,
         ToggleDetails,
@@ -53,6 +54,7 @@ fn binding(keystroke: &str, action: Action) -> KeyBinding {
     match action {
         Action::QuickSwitcher => KeyBinding::new(keystroke, QuickSwitcher, None),
         Action::Search => KeyBinding::new(keystroke, Search, None),
+        Action::SearchThread => KeyBinding::new(keystroke, SearchThread, None),
         Action::FocusComposer => KeyBinding::new(keystroke, FocusComposer, None),
         Action::ToggleSidebar => KeyBinding::new(keystroke, ToggleSidebar, None),
         Action::ToggleDetails => KeyBinding::new(keystroke, ToggleDetails, None),

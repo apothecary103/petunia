@@ -212,6 +212,12 @@ async fn serve(mut commands: UnboundedReceiver<Command>, mut events: Events) -> 
                         }
                     }
                 }
+                Some(Command::Search { query, within }) => {
+                    match db.search(&query, within.as_ref()).await {
+                        Ok(hits) => emit(&mut events, Event::Found { query, hits }).await,
+                        Err(error) => warn!(%error, "search failed"),
+                    }
+                }
                 Some(Command::MarkRead { thread, messages }) => {
                     mark_read(&mut manager, &db, &mut events, &thread, &messages).await;
                 }
@@ -425,6 +431,7 @@ async fn receive_once(
                         &mut fragment
                     {
                         hydrate(cache, std::slice::from_mut(message)).await;
+                        index_bodies(db, &thread, std::slice::from_ref(message)).await;
                     }
                     let pointers = data::pointers(&content);
                     if !pointers.is_empty() {
@@ -556,11 +563,31 @@ async fn load_history(
                 .unwrap_or(data::Status::Sent),
         );
     }
+    index_bodies(db, thread, &messages).await;
+
     Ok(Loaded {
         messages,
         more,
         pointers,
     })
+}
+
+/// Records what a page of messages said, so a search can find them. Free at this
+/// point: the rows are decoded and in hand.
+async fn index_bodies(db: &Db, thread: &Thread, messages: &[data::Message]) {
+    let bodies: Vec<_> = messages
+        .iter()
+        .filter_map(|message| {
+            message
+                .text()
+                .filter(|text| !text.trim().is_empty())
+                .map(|text| (message.timestamp(), message.sender(), text.to_owned()))
+        })
+        .collect();
+
+    if let Err(error) = db.index_bodies(thread, &bodies).await {
+        warn!(%error, "failed to index message bodies");
+    }
 }
 
 /// Marks anything already on disk as cached, so media that has been fetched

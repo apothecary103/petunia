@@ -49,6 +49,12 @@ pub enum StoreEvent {
     History { older: bool },
     /// Something was clicked that wants the details panel open.
     Inspecting,
+    /// What a search turned up, carrying the query it answers so a late result
+    /// cannot replace a newer one.
+    Found {
+        query: String,
+        hits: Vec<crate::signal::db::search::Hit>,
+    },
     Failed(String),
 }
 
@@ -420,6 +426,7 @@ impl Store {
         match event {
             Event::Contacts { contacts, groups } => state.contacts_updated(contacts, groups),
             Event::StickerPacks(packs) => state.sticker_packs = packs,
+            Event::Found { query, hits } => cx.emit(StoreEvent::Found { query, hits }),
             Event::Poster { thread, id, path } => {
                 state.history_mut(&thread).set_poster(&id, path);
             }

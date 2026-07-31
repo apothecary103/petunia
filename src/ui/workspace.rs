@@ -9,6 +9,7 @@ use super::kit;
 use super::linking::Linking;
 use super::notice::Notices;
 use super::palette::{Dismissed, Switcher};
+use super::search::{self, Scope, Search};
 use super::sidebar::Sidebar;
 use super::viewer::{self, Viewer};
 use crate::actions;
@@ -35,6 +36,7 @@ pub struct Workspace {
     /// never has to choose.
     viewer: Option<Entity<Viewer>>,
     help: Option<Entity<Help>>,
+    search: Option<Entity<Search>>,
     /// Always present, and draws nothing until something has gone wrong.
     notices: Entity<Notices>,
     /// What the window is called, so the platform is only told when it changes.
@@ -75,6 +77,7 @@ impl Workspace {
             switcher: None,
             viewer: None,
             help: None,
+            search: None,
             notices,
             titled: String::new(),
             _subscriptions: subscriptions,
@@ -171,6 +174,47 @@ impl Workspace {
         cx.notify();
     }
 
+    /// cmd+f searches everywhere; cmd+shift+f searches what is on screen. One
+    /// surface either way, because they differ only in what they ask.
+    fn open_search(&mut self, scope: Scope, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(self.screen, Screen::Main { .. }) {
+            return;
+        }
+
+        let search = self.search.get_or_insert_with(|| {
+            let store = self.store.clone();
+            let search = cx.new(|cx| Search::new(store, scope.clone(), window, cx));
+
+            cx.subscribe(&search, |this, _, _: &search::Dismissed, cx| {
+                this.search = None;
+                cx.notify();
+            })
+            .detach();
+            cx.subscribe_in(
+                &search,
+                window,
+                |this, _, chosen: &search::Chosen, _, cx| {
+                    let thread = chosen.0.thread.clone();
+                    this.store.update(cx, |store, cx| store.activate(thread, cx));
+                },
+            )
+            .detach();
+            search
+        });
+
+        search.update(cx, |search, cx| search.reset(scope, window, cx));
+        window.focus(&search.read(cx).focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    /// What a scoped search is scoped to, or everywhere when nothing is open.
+    fn thread_scope(&self, cx: &App) -> Scope {
+        match self.store.read(cx).active() {
+            Some(thread) => Scope::Thread(thread.clone()),
+            None => Scope::Everywhere,
+        }
+    }
+
     /// Opens a picture full size, with everything else in the thread beside it.
     fn view_media(&mut self, path: std::path::PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let reel = self.thread_media(cx);
@@ -246,6 +290,11 @@ impl Workspace {
     /// Escape, in the order a person means it: the overlay first, then whatever
     /// the composer is carrying.
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search.take().is_some() {
+            window.focus(&self.focus, cx);
+            cx.notify();
+            return;
+        }
         if self.help.take().is_some() {
             window.focus(&self.focus, cx);
             cx.notify();
@@ -408,6 +457,13 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &actions::Help, window, cx| {
                 this.open_help(window, cx)
             }))
+            .on_action(cx.listener(|this, _: &actions::Search, window, cx| {
+                this.open_search(Scope::Everywhere, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &actions::SearchThread, window, cx| {
+                let scope = this.thread_scope(cx);
+                this.open_search(scope, window, cx)
+            }))
             .on_action(cx.listener(|this, _: &actions::Cancel, window, cx| {
                 this.cancel(window, cx)
             }))
@@ -455,6 +511,7 @@ impl Render for Workspace {
             .children(self.switcher.clone())
             .children(self.viewer.clone())
             .children(self.help.clone())
+            .children(self.search.clone())
             .child(self.notices.clone())
     }
 }

@@ -1,7 +1,7 @@
 pub mod bridge;
 mod cache;
 pub mod command;
-mod db;
+pub mod db;
 mod event;
 mod outgoing;
 mod store;

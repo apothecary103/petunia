@@ -10,6 +10,7 @@ pub mod message;
 pub mod notice;
 pub mod palette;
 pub mod relative;
+pub mod search;
 pub mod sidebar;
 pub mod switcher;
 pub mod viewer;

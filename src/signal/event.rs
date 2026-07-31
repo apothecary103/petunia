@@ -51,6 +51,12 @@ pub enum Event {
         thread: Thread,
         count: u32,
     },
+    /// What a search turned up. Carries the query it answers, so a result that
+    /// arrives after the box has moved on can be dropped rather than shown.
+    Found {
+        query: String,
+        hits: Vec<crate::signal::db::search::Hit>,
+    },
     /// A still generated for a downloaded video.
     Poster {
         thread: Thread,

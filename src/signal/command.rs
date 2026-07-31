@@ -85,6 +85,11 @@ pub enum Command {
         path: PathBuf,
         timestamp: u64,
     },
+    /// Looks for a phrase, in one conversation or in all of them.
+    Search {
+        query: String,
+        within: Option<Thread>,
+    },
     /// Installs the pack a received sticker came from, and tells our other
     /// devices. The key only ever travels alongside the sticker itself.
     InstallStickerPack {
