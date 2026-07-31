@@ -1,3 +1,4 @@
+pub mod messages;
 pub mod receipts;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool};
@@ -75,8 +76,16 @@ impl Db {
                 recipient_id TEXT UNIQUE
             );
             CREATE TABLE thread_messages (
-                ts INTEGER NOT NULL,
-                thread_id INTEGER NOT NULL,
+                ts                     INTEGER NOT NULL,
+                thread_id              INTEGER NOT NULL,
+                sender_service_id      TEXT    NOT NULL,
+                sender_device_id       INTEGER NOT NULL,
+                destination_service_id TEXT    NOT NULL,
+                needs_receipt          BOOLEAN NOT NULL,
+                unidentified_sender    BOOLEAN NOT NULL,
+                content_body           BLOB    NOT NULL,
+                was_plaintext          BOOLEAN NOT NULL,
+                server_ts              INTEGER,
                 PRIMARY KEY (ts, thread_id)
             );
             CREATE TABLE petunia_message_status (

@@ -26,6 +26,11 @@ pub enum Event {
     History {
         thread: Thread,
         messages: Vec<Message>,
+        /// Whether older messages remain behind this page.
+        more: bool,
+        /// Set when this page was requested by scrolling back rather than by
+        /// opening the thread.
+        older: bool,
     },
     Message {
         thread: Thread,

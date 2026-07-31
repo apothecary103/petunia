@@ -68,7 +68,7 @@ async fn serve(mut commands: UnboundedReceiver<Command>, mut events: Events) -> 
         warn!(%error, "failed to load contacts");
     }
     tokio::task::spawn_local(fetch_avatars(manager.clone(), events.clone()));
-    tokio::task::spawn_local(fetch_previews(manager.clone(), events.clone()));
+    tokio::task::spawn_local(fetch_previews(db.clone(), events.clone()));
     if freshly_linked
         && let Err(error) = manager.request_contacts().await
     {
@@ -103,10 +103,16 @@ async fn serve(mut commands: UnboundedReceiver<Command>, mut events: Events) -> 
                         pending.push((thread, body, timestamp));
                     }
                 }
-                Some(Command::LoadThread(thread)) => {
-                    match load_history(&manager, &db, &thread, aci).await {
-                        Ok(messages) => {
-                            emit(&mut events, Event::History { thread, messages }).await;
+                Some(Command::LoadThread { thread, before }) => {
+                    match load_history(&manager, &db, &thread, aci, before).await {
+                        Ok((messages, more)) => {
+                            emit(&mut events, Event::History {
+                                thread,
+                                messages,
+                                more,
+                                older: before.is_some(),
+                            })
+                            .await;
                         }
                         Err(error) => {
                             error!(%error, "failed to load message history");
@@ -191,7 +197,7 @@ async fn receive_once(
                     warn!(%error, "failed to load synced contacts");
                 }
                 tokio::task::spawn_local(fetch_avatars(manager.clone(), events.clone()));
-                tokio::task::spawn_local(fetch_previews(manager.clone(), events.clone()));
+                tokio::task::spawn_local(fetch_previews(db.clone(), events.clone()));
             }
             Received::Content(content) => {
                 debug!(timestamp = content.timestamp(), "received content");
@@ -319,9 +325,11 @@ async fn load_history(
     db: &Db,
     thread: &Thread,
     aci: Uuid,
-) -> Result<Vec<data::Message>, Error> {
-    let rows = manager.store().messages(&thread.into(), ..).await?;
-    let mut messages = data::project(rows.filter_map(Result::ok));
+    before: Option<u64>,
+) -> Result<(Vec<data::Message>, bool), Error> {
+    let page = db.page(thread, before, super::command::PAGE).await?;
+    let more = page.more;
+    let mut messages = data::project(page.rows);
 
     let own: Vec<u64> = messages
         .iter()
@@ -340,7 +348,7 @@ async fn load_history(
                 .unwrap_or(data::Status::Sent),
         );
     }
-    Ok(messages)
+    Ok((messages, more))
 }
 
 /// How many receipts a message needs before it counts as delivered or read.
@@ -409,47 +417,19 @@ async fn fetch_avatars(mut manager: RegisteredManager, mut events: Events) {
     }
 }
 
-async fn fetch_previews(manager: RegisteredManager, mut events: Events) {
-    let threads = match sidebar_threads(&manager).await {
+async fn fetch_previews(db: Db, mut events: Events) {
+    let threads = match db.previews().await {
         Ok(threads) => threads,
         Err(error) => {
-            warn!(%error, "failed to list threads for previews");
+            warn!(%error, "failed to load thread previews");
             return;
         }
     };
-    for thread in threads {
-        match last_message(&manager, &thread).await {
-            Ok(Some(message)) => emit(&mut events, Event::Preview { thread, message }).await,
-            Ok(None) => {}
-            Err(error) => warn!(%error, "failed to load last message"),
+    for (thread, rows) in threads {
+        if let Some(message) = data::project(rows).pop() {
+            emit(&mut events, Event::Preview { thread, message }).await;
         }
     }
-}
-
-async fn sidebar_threads(manager: &RegisteredManager) -> Result<Vec<Thread>, Error> {
-    let store = manager.store();
-    let mut threads: Vec<Thread> = store
-        .contacts()
-        .await?
-        .filter_map(Result::ok)
-        .map(|contact| Thread::Contact(ContactId::Aci(contact.uuid)))
-        .collect();
-    threads.extend(
-        store
-            .groups()
-            .await?
-            .filter_map(Result::ok)
-            .map(|(master_key, _)| Thread::Group(master_key)),
-    );
-    Ok(threads)
-}
-
-async fn last_message(
-    manager: &RegisteredManager,
-    thread: &Thread,
-) -> Result<Option<data::Message>, Error> {
-    let rows = manager.store().messages(&thread.into(), ..).await?;
-    Ok(data::project(rows.filter_map(Result::ok)).pop())
 }
 
 async fn fetch_profile_avatar(
