@@ -14,6 +14,7 @@ use std::sync::Arc;
 use gpui::prelude::*;
 use gpui::Focusable;
 use gpui::{App, Bounds, TitlebarOptions, WindowBounds, WindowOptions, point, px, size};
+use gpui::Styled as _;
 use gpui_component::Root;
 
 use session::Session;
@@ -75,7 +76,18 @@ fn main() {
                 // Nothing else claims focus on launch, and without it the
                 // keymap has no path to dispatch along.
                 window.focus(&workspace.read(cx).focus_handle(cx), cx);
-                cx.new(|cx| Root::new(workspace, window, cx))
+
+                cx.new(|cx| {
+                    let mut root = Root::new(workspace, window, cx);
+                    // The widget library's root paints the theme background
+                    // across the whole window, which would sit on top of the
+                    // vibrancy layer and hide it completely. Nothing else needs
+                    // it: every column paints its own.
+                    if blurred {
+                        root.style().background = Some(gpui::transparent_black().into());
+                    }
+                    root
+                })
             },
         )
         .expect("open the petunia window");
