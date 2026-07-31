@@ -341,18 +341,14 @@ fn code_block(fenced: &str, theme: &Theme, size: f32) -> AnyElement {
 /// text and comes back one flat span, which is the right answer rather than a
 /// guess dressed up in colour.
 fn highlighted(code: &str, language: &str, theme: &Theme) -> StyledText {
-    use gpui_component::highlighter::{HighlightTheme, SyntaxHighlighter};
+    use gpui_component::highlighter::SyntaxHighlighter;
 
     let mut highlighter = SyntaxHighlighter::new(language);
     let rope = gpui_component::input::Rope::from(code);
     highlighter.update(None, &rope, None);
 
-    let palette = match theme.is_light() {
-        true => HighlightTheme::default_light(),
-        false => HighlightTheme::default_dark(),
-    };
     let styles: Vec<_> = highlighter
-        .styles(&(0..code.len()), &palette)
+        .styles(&(0..code.len()), &theme.highlights())
         .into_iter()
         .filter(|(range, _)| range.end <= code.len() && code.is_char_boundary(range.start))
         .collect();

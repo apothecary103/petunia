@@ -22,8 +22,19 @@ const DURATIONS: [(&str, u64); 4] = [
     ("Until I turn it back on", 0),
 ];
 
+/// What a "new folder" entry does: ask for a name, and put this conversation in
+/// it. Separate from `Apply` because naming one needs a text field, which a menu
+/// cannot hold — it closes on the click that would focus it.
+pub type Create = Rc<dyn Fn(&mut Window, &mut gpui::App)>;
+
 /// The menu for a conversation in the list.
-pub fn items(flags: &Flags, folders: &[String], now: u64, apply: Apply) -> Vec<Item> {
+pub fn items(
+    flags: &Flags,
+    folders: &[String],
+    now: u64,
+    apply: Apply,
+    create: Create,
+) -> Vec<Item> {
     let mut items = vec![
         toggle(
             &apply,
@@ -80,6 +91,10 @@ pub fn items(flags: &Flags, folders: &[String], now: u64, apply: Apply) -> Vec<I
 
     items.push(Item::Separator);
     items.push(Item::Label("Folder".into()));
+    items.push(
+        Item::new("New folder…", move |window, cx| create(window, cx))
+            .icon(IconName::FolderOpen),
+    );
     items.push(
         set(&apply, flags, "None", |flags| Flags {
             folder: None,
@@ -144,7 +159,20 @@ mod tests {
 
     /// What is offered, which is all these check -- not what it does.
     fn menu(flags: Flags, folders: &[String], now: u64) -> Vec<Item> {
-        items(&flags, folders, now, Rc::new(|_, _, _| {}))
+        items(
+            &flags,
+            folders,
+            now,
+            Rc::new(|_, _, _| {}),
+            Rc::new(|_, _| {}),
+        )
+    }
+
+    /// Without this there is no way to make the first folder, and the whole
+    /// feature is unreachable.
+    #[test]
+    fn a_folder_can_always_be_made() {
+        assert!(labels(&menu(Flags::default(), &[], 0)).contains(&"New folder…".to_string()));
     }
 
     #[test]

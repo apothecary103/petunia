@@ -59,6 +59,13 @@ pub struct Theme {
     #[serde(deserialize_with = "hex_list")]
     pub accents: Vec<Hsla>,
 
+    /// What a code block is coloured with, by tree-sitter capture name. Zed's
+    /// own palette, carried through: colouring code is the same job in a chat
+    /// window as in an editor, and a second palette would be a second thing to
+    /// keep in step.
+    #[serde(default)]
+    pub syntax: std::collections::BTreeMap<String, String>,
+
     pub typography: Typography,
 }
 
@@ -104,9 +111,12 @@ const fn system_ui() -> &'static str {
     }
 }
 
+/// Menlo rather than SF Mono on macOS: SF Mono ships with the developer tools
+/// and its public family name does not always resolve, and a code block that
+/// silently falls back to the interface font is not a code block.
 const fn system_mono() -> &'static str {
     if cfg!(target_os = "macos") {
-        "SF Mono"
+        "Menlo"
     } else if cfg!(target_os = "windows") {
         "Consolas"
     } else {
@@ -121,6 +131,37 @@ impl Default for Theme {
 }
 
 impl Theme {
+    /// The palette a code block is coloured with, in the shape the widget
+    /// library's highlighter reads -- which is Zed's own theme JSON, so this is
+    /// a translation rather than a mapping.
+    pub fn highlights(&self) -> gpui_component::highlighter::HighlightTheme {
+        let syntax: serde_json::Map<String, serde_json::Value> = self
+            .syntax
+            .iter()
+            .map(|(name, colour)| {
+                (
+                    name.clone(),
+                    serde_json::json!({ "color": colour }),
+                )
+            })
+            .collect();
+
+        let described = serde_json::json!({
+            "name": self.name,
+            "appearance": if self.is_light() { "light" } else { "dark" },
+            "style": {
+                "editor.background": rgb(self.sunken),
+                "editor.foreground": rgb(self.text),
+                "syntax": syntax,
+            },
+        });
+
+        serde_json::from_value(described).unwrap_or_else(|_| match self.is_light() {
+            true => (*gpui_component::highlighter::HighlightTheme::default_light()).clone(),
+            false => (*gpui_component::highlighter::HighlightTheme::default_dark()).clone(),
+        })
+    }
+
     /// A stable per-sender colour, so the same person is the same colour in
     /// every thread and across restarts.
     pub fn accent_for(&self, seed: &[u8]) -> Hsla {
@@ -150,6 +191,13 @@ fn c(hex: u32) -> Hsla {
     gpui::rgb(hex).into()
 }
 
+/// Back to `#rrggbb`, for the one place a colour has to leave as text.
+fn rgb(colour: Hsla) -> String {
+    let Rgba { r, g, b, .. } = colour.into();
+    let byte = |channel: f32| (channel.clamp(0.0, 1.0) * 255.0).round() as u8;
+    format!("#{:02x}{:02x}{:02x}", byte(r), byte(g), byte(b))
+}
+
 pub fn dark() -> Theme {
     Theme {
         name: "dark".into(),
@@ -177,6 +225,7 @@ pub fn dark() -> Theme {
         warning: c(0xd6a545),
         danger: c(0xe5747d),
         accents: ACCENTS_DARK.iter().copied().map(c).collect(),
+        syntax: syntax(ONE_DARK_SYNTAX),
         typography: Typography::default(),
     }
 }
@@ -203,6 +252,7 @@ pub fn light() -> Theme {
         warning: c(0x8a6100),
         danger: c(0xbb3a44),
         accents: ACCENTS_LIGHT.iter().copied().map(c).collect(),
+        syntax: syntax(ONE_LIGHT_SYNTAX),
         typography: Typography::default(),
     }
 }
@@ -219,8 +269,47 @@ const ACCENTS_LIGHT: [u32; 8] = [
     0x35618c, 0x2f6b41, 0x8a6100, 0x99522a, 0x5b4a8a, 0x2a6d69, 0x8a3f68, 0x9b414a,
 ];
 
-/// Two themes compile in so `theme = "light"` works with no files on disk;
-/// anything else is read from `~/.config/petunia/themes/<name>.toml`.
+/// The themes that need no files on disk: petunia's own two, and Zed's, which
+/// are converted by `script/zed-themes.py` and compiled in.
+pub const BUILT_IN: &[(&str, &str)] = &[
+    ("one-dark", include_str!("../../themes/one-dark.toml")),
+    ("one-light", include_str!("../../themes/one-light.toml")),
+    ("ayu-dark", include_str!("../../themes/ayu-dark.toml")),
+    ("ayu-mirage", include_str!("../../themes/ayu-mirage.toml")),
+    ("ayu-light", include_str!("../../themes/ayu-light.toml")),
+    ("gruvbox-dark", include_str!("../../themes/gruvbox-dark.toml")),
+    ("gruvbox-dark-hard", include_str!("../../themes/gruvbox-dark-hard.toml")),
+    ("gruvbox-dark-soft", include_str!("../../themes/gruvbox-dark-soft.toml")),
+    ("gruvbox-light", include_str!("../../themes/gruvbox-light.toml")),
+    ("gruvbox-light-hard", include_str!("../../themes/gruvbox-light-hard.toml")),
+    ("gruvbox-light-soft", include_str!("../../themes/gruvbox-light-soft.toml")),
+];
+
+/// Every theme that can be chosen without writing a file, for the settings
+/// window and for `--help`-style listing.
+pub fn available() -> Vec<String> {
+    let mut names = vec!["dark".to_string(), "light".to_string()];
+    names.extend(BUILT_IN.iter().map(|(name, _)| (*name).to_string()));
+
+    if let Ok(entries) = std::fs::read_dir(super::themes_dir()) {
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.extension().is_some_and(|extension| extension == "toml")
+                && let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
+            {
+                names.push(stem.to_owned());
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Petunia's own two and Zed's compile in, so `theme = "one-dark"` works with
+/// nothing installed; anything else is read from
+/// `~/.config/petunia/themes/<name>.toml`, which also overrides a built-in of
+/// the same name.
 pub fn load(name: &str) -> (Theme, Option<String>) {
     match name {
         "" | "dark" => return (dark(), None),
@@ -229,28 +318,110 @@ pub fn load(name: &str) -> (Theme, Option<String>) {
     }
 
     let path = super::themes_dir().join(format!("{name}.toml"));
-    match std::fs::read_to_string(&path) {
-        Ok(contents) => match toml::from_str::<Theme>(&contents) {
-            Ok(mut theme) => {
-                if theme.accents.is_empty() {
-                    theme.accents = dark().accents;
-                }
-                if theme.name.is_empty() {
-                    theme.name = name.to_owned();
-                }
-                (theme, None)
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) => match BUILT_IN.iter().find(|(built, _)| *built == name) {
+            Some((_, contents)) => (*contents).to_string(),
+            // Only worth reporting when there was nowhere else to look.
+            None => {
+                return (
+                    dark(),
+                    Some(format!("theme {name} ({}): {error}", path.display())),
+                );
             }
-            Err(error) => (
-                dark(),
-                Some(format!("theme {name}: {}", error.message().replace('\n', " "))),
-            ),
         },
+    };
+
+    match toml::from_str::<Theme>(&contents) {
+        Ok(mut theme) => {
+            if theme.accents.is_empty() {
+                theme.accents = dark().accents;
+            }
+            if theme.name.is_empty() {
+                theme.name = name.to_owned();
+            }
+            (theme, None)
+        }
         Err(error) => (
             dark(),
-            Some(format!("theme {name} ({}): {error}", path.display())),
+            Some(format!("theme {name}: {}", error.message().replace('\n', " "))),
         ),
     }
 }
+
+fn syntax(entries: &[(&str, &str)]) -> std::collections::BTreeMap<String, String> {
+    entries
+        .iter()
+        .map(|(name, colour)| ((*name).to_string(), (*colour).to_string()))
+        .collect()
+}
+
+/// Petunia's own dark and light are neutral greys with no syntax palette of
+/// their own, and code with no colour in it is worse than code in someone
+/// else's colours. These are One Dark's and One Light's.
+const ONE_DARK_SYNTAX: &[(&str, &str)] = &[
+    ("attribute", "#74ade8"),
+    ("boolean", "#bf956a"),
+    ("comment", "#5d636f"),
+    ("comment.doc", "#878e98"),
+    ("constant", "#dfc184"),
+    ("constructor", "#73ade9"),
+    ("emphasis", "#74ade8"),
+    ("emphasis.strong", "#bf956a"),
+    ("function", "#73ade9"),
+    ("keyword", "#b477cf"),
+    ("label", "#74ade8"),
+    ("link_text", "#73ade9"),
+    ("link_uri", "#6eb4bf"),
+    ("number", "#bf956a"),
+    ("operator", "#6eb4bf"),
+    ("primary", "#acb2be"),
+    ("property", "#d07277"),
+    ("punctuation", "#acb2be"),
+    ("punctuation.bracket", "#b2b9c6"),
+    ("punctuation.delimiter", "#b2b9c6"),
+    ("string", "#a1c181"),
+    ("string.escape", "#878e98"),
+    ("string.regex", "#bf956a"),
+    ("string.special", "#bf956a"),
+    ("tag", "#74ade8"),
+    ("title", "#d07277"),
+    ("type", "#6eb4bf"),
+    ("variable", "#acb2be"),
+    ("variable.parameter", "#d07277"),
+];
+
+const ONE_LIGHT_SYNTAX: &[(&str, &str)] = &[
+    ("attribute", "#5c78e2"),
+    ("boolean", "#ad6e26"),
+    ("comment", "#a2a3a7"),
+    ("comment.doc", "#646466"),
+    ("constant", "#669f59"),
+    ("constructor", "#5c79e2"),
+    ("emphasis", "#5c78e2"),
+    ("emphasis.strong", "#ad6e26"),
+    ("function", "#5c79e2"),
+    ("keyword", "#a449ab"),
+    ("label", "#5c78e2"),
+    ("link_text", "#5c79e2"),
+    ("link_uri", "#3882b7"),
+    ("number", "#ad6e25"),
+    ("operator", "#3882b7"),
+    ("primary", "#383a41"),
+    ("property", "#d3604f"),
+    ("punctuation", "#383a41"),
+    ("punctuation.bracket", "#4d4f52"),
+    ("punctuation.delimiter", "#4d4f52"),
+    ("string", "#659f58"),
+    ("string.escape", "#646466"),
+    ("string.regex", "#ad6e26"),
+    ("string.special", "#ad6e26"),
+    ("tag", "#5c78e2"),
+    ("title", "#d3604f"),
+    ("type", "#3882b7"),
+    ("variable", "#383a41"),
+    ("variable.parameter", "#d3604f"),
+];
 
 fn hex<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Hsla, D::Error> {
     let raw = String::deserialize(deserializer)?;
@@ -476,5 +647,64 @@ mod tests {
         assert!(!theme.is_light());
         assert_eq!(theme.accents.len(), 8);
         assert_eq!(theme.typography.ui_size, 13.0);
+    }
+
+    /// Every shipped theme has to parse, or `theme = "one-dark"` reports a
+    /// problem and silently falls back.
+    #[test]
+    fn every_built_in_theme_parses() {
+        for (name, contents) in BUILT_IN {
+            let theme: Theme = toml::from_str(contents)
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+
+            assert!(!theme.name.is_empty(), "{name}");
+            assert!(!theme.accents.is_empty(), "{name} has no sender colours");
+            assert!(!theme.syntax.is_empty(), "{name} has no syntax palette");
+        }
+    }
+
+    /// The name in the file is the one shown; the key is what selects it. A
+    /// light theme that claims to be dark would derive every widget shade wrong.
+    #[test]
+    fn the_built_in_themes_know_which_they_are() {
+        for (name, contents) in BUILT_IN {
+            let theme: Theme = toml::from_str(contents).unwrap();
+            assert_eq!(theme.is_light(), name.contains("light"), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_built_in_theme_loads_without_a_file() {
+        let (theme, error) = load("one-dark");
+
+        assert!(error.is_none(), "{error:?}");
+        assert_eq!(theme.name, "One Dark");
+    }
+
+    #[test]
+    fn every_built_in_is_offered() {
+        let names = available();
+
+        assert!(names.contains(&"dark".to_string()));
+        assert!(names.contains(&"one-dark".to_string()));
+        assert!(names.contains(&"gruvbox-light-soft".to_string()));
+    }
+
+    /// The highlighter reads Zed's own JSON shape, so this is the one place a
+    /// translation could silently produce an empty palette.
+    #[test]
+    fn a_theme_translates_into_a_highlight_palette() {
+        let highlights = dark().highlights();
+
+        assert!(highlights.style("keyword").is_some());
+        assert!(highlights.style("string").is_some());
+    }
+
+    /// Petunia's own two are neutral greys with no palette of their own, and
+    /// code with no colour is worse than code in someone else's colours.
+    #[test]
+    fn the_neutral_themes_still_colour_code() {
+        assert!(!dark().syntax.is_empty());
+        assert!(!light().syntax.is_empty());
     }
 }

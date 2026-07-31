@@ -39,19 +39,42 @@ pub fn row(id: impl Into<gpui::ElementId>, selected: bool, theme: &Theme) -> Sta
 }
 
 /// A section label. Small, muted, and never competing with the rows under it.
+/// Upper case, because gpui has no letter-spacing and case is the only other
+/// thing that makes a line this small read as a heading rather than as text.
 pub fn section(label: impl Into<SharedString>, theme: &Theme) -> Div {
+    heading(None, label, theme)
+}
+
+/// A section label with an icon, for the ones that are a kind of thing rather
+/// than simply the rest.
+pub fn heading(icon: Option<IconName>, label: impl Into<SharedString>, theme: &Theme) -> Div {
+    let label = label.into();
+
     div()
         .flex()
         .items_center()
-        .justify_between()
+        .gap_1p5()
         .px_2()
         .pt_3()
         .pb_1p5()
+        .when_some(icon, |this, icon| {
+            this.child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .child(self::icon(icon, 11.0, theme.text_muted)),
+            )
+        })
         .child(
             div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
                 .text_size(px(theme.typography.ui_size - 3.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(theme.text_muted)
-                .child(label.into()),
+                .child(SharedString::from(label.to_uppercase())),
         )
 }
 

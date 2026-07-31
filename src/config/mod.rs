@@ -2,6 +2,7 @@ pub mod keys;
 pub mod messages;
 pub mod theme;
 pub mod watch;
+pub mod write;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,7 +18,7 @@ pub use theme::Theme;
 
 /// Hand-edited preferences. Every section defaults, so an absent or partial file
 /// is as valid as a complete one.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub theme: String,
@@ -32,7 +33,7 @@ pub struct Config {
     pub keys: Keys,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Sidebar {
     pub width: f32,
@@ -40,7 +41,7 @@ pub struct Sidebar {
     pub show_preview: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Media {
     /// Fetched without asking, because CDN entries expire in weeks and a
@@ -59,7 +60,7 @@ pub struct Media {
     pub image_max_height: f32,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Notifications {
     pub enabled: bool,

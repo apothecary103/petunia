@@ -10,7 +10,9 @@ use super::linking::Linking;
 use super::menu::{self, Menu};
 use super::notice::Notices;
 use super::palette::{Dismissed, Switcher};
+use super::prompt::{self, Prompt};
 use super::search::{self, Scope, Search};
+use super::settings::{self, Settings};
 use super::sidebar::Sidebar;
 use super::viewer::{self, Viewer};
 use crate::actions;
@@ -39,6 +41,8 @@ pub struct Workspace {
     help: Option<Entity<Help>>,
     search: Option<Entity<Search>>,
     menu: Option<Entity<Menu>>,
+    settings: Option<Entity<Settings>>,
+    prompt: Option<Entity<Prompt>>,
     /// Always present, and draws nothing until something has gone wrong.
     notices: Entity<Notices>,
     /// What the window is called, so the platform is only told when it changes.
@@ -81,6 +85,8 @@ impl Workspace {
             help: None,
             search: None,
             menu: None,
+            settings: None,
+            prompt: None,
             notices,
             titled: String::new(),
             _subscriptions: subscriptions,
@@ -209,6 +215,26 @@ impl Workspace {
         cx.notify();
     }
 
+    /// cmd+, opens the preferences. It edits `config.toml`, so everything it
+    /// changes arrives through the same reload a hand edit would.
+    fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let settings = self
+            .settings
+            .get_or_insert_with(|| {
+                let settings = cx.new(|cx| Settings::new(self.store.clone(), cx));
+                cx.subscribe(&settings, |this, _, _: &settings::Dismissed, cx| {
+                    this.settings = None;
+                    cx.notify();
+                })
+                .detach();
+                settings
+            })
+            .clone();
+
+        window.focus(&settings.read(cx).focus_handle(cx), cx);
+        cx.notify();
+    }
+
     /// The menu for a conversation, built from what is true about it now.
     fn open_menu(
         &mut self,
@@ -232,8 +258,50 @@ impl Workspace {
                 store.update(cx, |store, cx| store.set_flags(thread.clone(), flags, cx));
             })
         };
-        let items = menu::thread::items(&flags, &folders, now, apply);
+        let create: menu::thread::Create = {
+            let this = cx.entity();
+            let thread = thread.clone();
+            std::rc::Rc::new(move |window, cx| {
+                let thread = thread.clone();
+                this.update(cx, |this, cx| this.name_folder(thread, window, cx));
+            })
+        };
+
+        let items = menu::thread::items(&flags, &folders, now, apply, create);
         self.raise_menu(items, at, window, cx);
+    }
+
+    /// Asks what to call a new folder, and puts the conversation in it.
+    fn name_folder(
+        &mut self,
+        thread: crate::data::Thread,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let prompt = cx.new(|cx| {
+            Prompt::new("New folder", "Work, Family, …", "Create", window, cx)
+        });
+
+        cx.subscribe(&prompt, |this, _, _: &prompt::Dismissed, cx| {
+            this.prompt = None;
+            cx.notify();
+        })
+        .detach();
+        cx.subscribe(&prompt, move |this, _, named: &prompt::Answered, cx| {
+            let flags = crate::data::index::Flags {
+                folder: Some(named.0.clone()),
+                // A conversation you have just filed is one you want to see.
+                archived: false,
+                ..this.store.read(cx).flags(&thread)
+            };
+            this.store
+                .update(cx, |store, cx| store.set_flags(thread.clone(), flags, cx));
+        })
+        .detach();
+
+        prompt.update(cx, |prompt, cx| prompt.take_focus(window, cx));
+        self.prompt = Some(prompt);
+        cx.notify();
     }
 
     /// cmd+f searches everywhere; cmd+shift+f searches what is on screen. One
@@ -352,12 +420,22 @@ impl Workspace {
     /// Escape, in the order a person means it: the overlay first, then whatever
     /// the composer is carrying.
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.prompt.take().is_some() {
+            window.focus(&self.focus, cx);
+            cx.notify();
+            return;
+        }
         if self.menu.take().is_some() {
             window.focus(&self.focus, cx);
             cx.notify();
             return;
         }
         if self.search.take().is_some() {
+            window.focus(&self.focus, cx);
+            cx.notify();
+            return;
+        }
+        if self.settings.take().is_some() {
             window.focus(&self.focus, cx);
             cx.notify();
             return;
@@ -524,6 +602,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &actions::Help, window, cx| {
                 this.open_help(window, cx)
             }))
+            .on_action(cx.listener(|this, _: &actions::Settings, window, cx| {
+                this.open_settings(window, cx)
+            }))
             .on_action(cx.listener(|this, _: &actions::Search, window, cx| {
                 this.open_search(Scope::Everywhere, window, cx)
             }))
@@ -579,7 +660,9 @@ impl Render for Workspace {
             .children(self.viewer.clone())
             .children(self.help.clone())
             .children(self.search.clone())
+            .children(self.settings.clone())
             .children(self.menu.clone())
+            .children(self.prompt.clone())
             .child(self.notices.clone())
     }
 }

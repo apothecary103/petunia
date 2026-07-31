@@ -29,6 +29,7 @@ pub enum Action {
     AttachFile,
     Cancel,
     Help,
+    Settings,
 }
 
 /// A parsed chord. `cmd` is the platform key on macOS and control elsewhere, so
@@ -41,12 +42,24 @@ pub struct KeyBind {
     pub key: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Keys {
     bindings: HashMap<KeyBind, Action>,
 }
 
 impl Keys {
+    /// Every binding as `action = "chord"`, for writing the config back out.
+    /// Sorted, so a rewrite does not reshuffle the file.
+    pub fn written(&self) -> Vec<(String, String)> {
+        let mut written: Vec<_> = self
+            .bindings
+            .iter()
+            .map(|(bind, action)| (bind.to_string(), name(*action).to_string()))
+            .collect();
+        written.sort_by(|a, b| a.1.cmp(&b.1));
+        written
+    }
+
     /// Every binding as a gpui keystroke string, for registering the keymap.
     pub fn bindings(&self) -> Vec<(String, Action)> {
         self.bindings
@@ -113,7 +126,8 @@ impl Preset {
     }
 }
 
-const STANDARD: [(&str, Action); 18] = [
+const STANDARD: [(&str, Action); 19] = [
+    ("cmd+,", Action::Settings),
     ("cmd+f", Action::Search),
     ("cmd+shift+f", Action::SearchThread),
     ("cmd+k", Action::QuickSwitcher),
@@ -137,7 +151,8 @@ const STANDARD: [(&str, Action); 18] = [
 /// emacs by way of a chat window: `C-s` searches, `C-v`/`M-v` page, `C-x b`
 /// switches buffers -- except that gpui binds single chords, so the two-key
 /// sequences become one.
-const EMACS: [(&str, Action); 18] = [
+const EMACS: [(&str, Action); 19] = [
+    ("ctrl+alt+,", Action::Settings),
     ("ctrl+s", Action::Search),
     ("alt+ctrl+s", Action::SearchThread),
     ("ctrl+x", Action::QuickSwitcher),
@@ -161,7 +176,8 @@ const EMACS: [(&str, Action); 18] = [
 /// vim's motions where vim puts them. A composer has no normal mode to leave,
 /// so these are the chords that do not collide with typing: `ctrl+d`/`ctrl+u`
 /// page, `g`/`G` become `cmd+g` and `cmd+shift+g`, and `/` searches.
-const VIM: [(&str, Action); 18] = [
+const VIM: [(&str, Action); 19] = [
+    ("cmd+,", Action::Settings),
     ("cmd+/", Action::Search),
     ("cmd+shift+/", Action::SearchThread),
     ("ctrl+p", Action::QuickSwitcher),
@@ -201,6 +217,33 @@ impl Keys {
         // would leave whichever overlay is up with no way out.
         bindings.insert("escape".parse().expect("escape parses"), Action::Cancel);
         Self { bindings }
+    }
+}
+
+/// The spelling the config file uses, which is what `Action`'s own serde
+/// derive produces -- written out here so that reading and writing cannot drift.
+fn name(action: Action) -> &'static str {
+    match action {
+        Action::QuickSwitcher => "quick-switcher",
+        Action::Search => "search",
+        Action::SearchThread => "search-thread",
+        Action::FocusComposer => "focus-composer",
+        Action::ToggleSidebar => "toggle-sidebar",
+        Action::ToggleDetails => "toggle-details",
+        Action::ScrollUp => "scroll-up",
+        Action::ScrollDown => "scroll-down",
+        Action::ScrollToTop => "scroll-to-top",
+        Action::ScrollToBottom => "scroll-to-bottom",
+        Action::NextUnread => "next-unread",
+        Action::NextConversation => "next-conversation",
+        Action::PreviousConversation => "previous-conversation",
+        Action::MarkRead => "mark-read",
+        Action::ReplyToLast => "reply-to-last",
+        Action::EditLast => "edit-last",
+        Action::AttachFile => "attach-file",
+        Action::Cancel => "cancel",
+        Action::Help => "help",
+        Action::Settings => "settings",
     }
 }
 

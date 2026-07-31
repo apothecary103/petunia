@@ -2,6 +2,7 @@ use std::path::Path;
 
 use gpui::prelude::*;
 use gpui::{Context, Div, Entity, MouseButton, SharedString, Stateful, Window, div, px};
+use gpui_component::IconName;
 
 use super::avatar::avatar;
 use super::kit;
@@ -46,12 +47,12 @@ impl Render for Sidebar {
         let mut list = div().flex().flex_col().gap_4().px_2p5().pb_3();
 
         for section in sections {
-            let label = match &section {
-                Section::Pinned => "Pinned".to_string(),
-                Section::Requests => "Requests".to_string(),
-                Section::Chats => "Chats".to_string(),
-                Section::Archived => "Archived".to_string(),
-                Section::Folder(name) => name.clone(),
+            let (icon, label) = match &section {
+                Section::Pinned => (Some(IconName::StarFill), "Pinned".to_string()),
+                Section::Requests => (Some(IconName::Inbox), "Requests".to_string()),
+                Section::Chats => (None, "Chats".to_string()),
+                Section::Archived => (Some(IconName::FolderClosed), "Archived".to_string()),
+                Section::Folder(name) => (Some(IconName::Folder), name.clone()),
             };
             // A contact sync lists everyone you have ever known; only threads
             // with something in them belong in a conversation list.
@@ -110,7 +111,7 @@ impl Render for Sidebar {
                     .flex()
                     .flex_col()
                     .gap_0p5()
-                    .child(kit::section(label, &palette))
+                    .child(kit::heading(icon, label, &palette))
                     .children(rows),
             );
         }
@@ -140,12 +141,22 @@ impl Render for Sidebar {
                 .flex().flex_col()
                 .size_full()
                 .child(body)
-                .child(identity(state, &palette)),
+                .child(identity(
+                    state,
+                    &palette,
+                    cx.listener(|_, _, window, cx| {
+                        window.dispatch_action(Box::new(crate::actions::Settings), cx)
+                    }),
+                )),
         )
     }
 }
 
-fn identity(state: &crate::data::State, palette: &Theme) -> impl IntoElement {
+fn identity(
+    state: &crate::data::State,
+    palette: &Theme,
+    on_settings: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
     div()
         .flex()
         .items_center()
@@ -178,6 +189,12 @@ fn identity(state: &crate::data::State, palette: &Theme) -> impl IntoElement {
                         .child(state.connection.label()),
                 ),
         )
+        .child(kit::icon_button(
+            "settings",
+            IconName::Settings,
+            palette,
+            on_settings,
+        ))
 }
 
 fn shell(palette: &Theme, body: Div) -> Div {
@@ -226,25 +243,36 @@ fn row(palette: &Theme, line: Line<'_>) -> Stateful<Div> {
                 .min_w_0()
                 .gap_0p5()
                 .child(
+                    // Centred, not baseline-aligned: a glyph has no baseline to
+                    // share with text, and lining one up by it hangs it below.
                     div()
                         .flex()
-                        .items_baseline()
-                        .gap_2()
+                        .items_center()
+                        .gap_1p5()
                         .child(
                             div()
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
                                 .text_size(px(palette.typography.ui_size))
+                                .when(unread && !line.muted, |this| {
+                                    this.font_weight(gpui::FontWeight::MEDIUM)
+                                })
                                 .text_color(title_color)
                                 .child(SharedString::from(line.name.to_owned())),
                         )
                         .when(line.pinned, |this| {
-                            this.child(kit::icon(
-                                gpui_component::IconName::Star,
-                                10.0,
-                                palette.text_muted,
-                            ))
+                            this.child(
+                                div()
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .child(kit::icon(
+                                        IconName::StarFill,
+                                        11.0,
+                                        palette.text_muted,
+                                    )),
+                            )
                         })
                         .child(
                             div()

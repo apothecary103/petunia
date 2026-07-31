@@ -137,6 +137,7 @@ fn describe(action: Action) -> &'static str {
         Action::AttachFile => "Attach a file",
         Action::Cancel => "Close, or drop what the composer is carrying",
         Action::Help => "This sheet",
+        Action::Settings => "Settings",
     }
 }
 
