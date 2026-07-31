@@ -93,7 +93,7 @@ impl Default for Typography {
 
 impl Default for Theme {
     fn default() -> Self {
-        mocha()
+        dark()
     }
 }
 
@@ -127,72 +127,74 @@ fn c(hex: u32) -> Hsla {
     gpui::rgb(hex).into()
 }
 
-pub fn mocha() -> Theme {
+pub fn dark() -> Theme {
     Theme {
-        name: "mocha".into(),
+        name: "dark".into(),
         appearance: Some(Appearance::Dark),
-        background: c(0x181825),
-        surface: c(0x1e1e2e),
-        elevated: c(0x252537),
-        sunken: c(0x11111b),
-        border: c(0x313244),
-        border_focus: c(0x45475a),
-        text: c(0xcdd6f4),
-        text_dim: c(0x9aa0b8),
-        text_muted: c(0x6c7086),
-        hover: c(0x252537),
-        active: c(0x313244),
-        selected: c(0x2a2b45),
-        accent: c(0x89b4fa),
-        on_accent: c(0x181825),
-        success: c(0xa6e3a1),
-        warning: c(0xf9e2af),
-        danger: c(0xf38ba8),
-        accents: ACCENTS_MOCHA.iter().copied().map(c).collect(),
+        background: c(0x0e0e12),
+        surface: c(0x15151b),
+        elevated: c(0x1d1d25),
+        sunken: c(0x0a0a0d),
+        border: c(0x26262f),
+        border_focus: c(0x584a86),
+        text: c(0xe3e3ec),
+        text_dim: c(0x9d9dae),
+        text_muted: c(0x6a6a7b),
+        hover: c(0x1d1d25),
+        active: c(0x26262f),
+        selected: c(0x272040),
+        accent: c(0xa78bfa),
+        on_accent: c(0x120f1c),
+        success: c(0x6ee7a8),
+        warning: c(0xf3c46a),
+        danger: c(0xf87b8a),
+        accents: ACCENTS_DARK.iter().copied().map(c).collect(),
         typography: Typography::default(),
     }
 }
 
-pub fn latte() -> Theme {
+pub fn light() -> Theme {
     Theme {
-        name: "latte".into(),
+        name: "light".into(),
         appearance: Some(Appearance::Light),
-        background: c(0xeff1f5),
-        surface: c(0xe6e9ef),
+        background: c(0xfbfbfd),
+        surface: c(0xf3f3f7),
         elevated: c(0xffffff),
-        sunken: c(0xdce0e8),
-        border: c(0xbcc0cc),
-        border_focus: c(0xacb0be),
-        text: c(0x4c4f69),
-        text_dim: c(0x6c6f85),
-        text_muted: c(0x8c8fa1),
-        hover: c(0xdce0e8),
-        active: c(0xccd0da),
-        selected: c(0xdce4f7),
-        accent: c(0x1e66f5),
-        on_accent: c(0xeff1f5),
-        success: c(0x40a02b),
-        warning: c(0xdf8e1d),
-        danger: c(0xd20f39),
-        accents: ACCENTS_LATTE.iter().copied().map(c).collect(),
+        sunken: c(0xeaeaf0),
+        border: c(0xdcdce4),
+        border_focus: c(0xa08cf0),
+        text: c(0x1a1a21),
+        text_dim: c(0x55555f),
+        text_muted: c(0x82828f),
+        hover: c(0xeeeef3),
+        active: c(0xe3e3eb),
+        selected: c(0xeae2fd),
+        accent: c(0x7c5cf0),
+        on_accent: c(0xffffff),
+        success: c(0x1c9159),
+        warning: c(0xa9700c),
+        danger: c(0xd0384a),
+        accents: ACCENTS_LIGHT.iter().copied().map(c).collect(),
         typography: Typography::default(),
     }
 }
 
-const ACCENTS_MOCHA: [u32; 8] = [
-    0x89b4fa, 0xa6e3a1, 0xf9e2af, 0xfab387, 0xcba6f7, 0x94e2d5, 0xf5c2e7, 0xf38ba8,
+/// Sender colours. Spread around the wheel so adjacent names stay tellable
+/// apart, and held to a similar lightness so none of them shouts.
+const ACCENTS_DARK: [u32; 8] = [
+    0xa78bfa, 0x6ee7a8, 0xf3c46a, 0xf99f6b, 0x7cc4f8, 0x5ed4c4, 0xf58cc8, 0xf87b8a,
 ];
 
-const ACCENTS_LATTE: [u32; 8] = [
-    0x1e66f5, 0x40a02b, 0xdf8e1d, 0xfe640b, 0x8839ef, 0x179299, 0xea76cb, 0xd20f39,
+const ACCENTS_LIGHT: [u32; 8] = [
+    0x7c5cf0, 0x1c9159, 0xa9700c, 0xc2570e, 0x1f6fd0, 0x0f8d84, 0xc0359a, 0xd0384a,
 ];
 
-/// Two themes compile in so `theme = "latte"` works with no files on disk;
+/// Two themes compile in so `theme = "light"` works with no files on disk;
 /// anything else is read from `~/.config/petunia/themes/<name>.toml`.
 pub fn load(name: &str) -> (Theme, Option<String>) {
     match name {
-        "" | "mocha" | "dark" => return (mocha(), None),
-        "latte" | "light" => return (latte(), None),
+        "" | "dark" => return (dark(), None),
+        "light" => return (light(), None),
         _ => {}
     }
 
@@ -201,7 +203,7 @@ pub fn load(name: &str) -> (Theme, Option<String>) {
         Ok(contents) => match toml::from_str::<Theme>(&contents) {
             Ok(mut theme) => {
                 if theme.accents.is_empty() {
-                    theme.accents = mocha().accents;
+                    theme.accents = dark().accents;
                 }
                 if theme.name.is_empty() {
                     theme.name = name.to_owned();
@@ -209,12 +211,12 @@ pub fn load(name: &str) -> (Theme, Option<String>) {
                 (theme, None)
             }
             Err(error) => (
-                mocha(),
+                dark(),
                 Some(format!("theme {name}: {}", error.message().replace('\n', " "))),
             ),
         },
         Err(error) => (
-            mocha(),
+            dark(),
             Some(format!("theme {name} ({}): {error}", path.display())),
         ),
     }
@@ -294,8 +296,8 @@ mod tests {
 
     #[test]
     fn the_built_in_themes_disagree_about_being_light() {
-        assert!(!mocha().is_light());
-        assert!(latte().is_light());
+        assert!(!dark().is_light());
+        assert!(light().is_light());
     }
 
     /// With no `appearance` key the background's luma has to decide, which is
@@ -304,11 +306,11 @@ mod tests {
     fn appearance_falls_back_to_the_background_luma() {
         let dark = Theme {
             appearance: None,
-            ..mocha()
+            ..dark()
         };
         let light = Theme {
             appearance: None,
-            ..latte()
+            ..light()
         };
 
         assert!(!dark.is_light());
@@ -317,13 +319,13 @@ mod tests {
 
     #[test]
     fn both_built_in_themes_have_accents() {
-        assert_eq!(mocha().accents.len(), 8);
-        assert_eq!(latte().accents.len(), 8);
+        assert_eq!(dark().accents.len(), 8);
+        assert_eq!(light().accents.len(), 8);
     }
 
     #[test]
     fn the_named_built_ins_load_without_a_file() {
-        for name in ["", "mocha", "dark", "latte", "light"] {
+        for name in ["", "dark", "light"] {
             let (_, error) = load(name);
             assert!(error.is_none(), "{name} reported {error:?}");
         }
@@ -339,7 +341,7 @@ mod tests {
 
     #[test]
     fn a_sender_colour_is_stable_and_in_range() {
-        let theme = mocha();
+        let theme = dark();
         let seed = [1u8, 2, 3, 4];
 
         assert_eq!(theme.accent_for(&seed), theme.accent_for(&seed));
@@ -352,7 +354,7 @@ mod tests {
     fn no_accents_falls_back_to_the_single_accent() {
         let theme = Theme {
             accents: Vec::new(),
-            ..mocha()
+            ..dark()
         };
 
         assert_eq!(theme.accent_for(&[7]), theme.accent);
@@ -402,7 +404,7 @@ mod tests {
         let theme: Theme = toml::from_str(r##"accent = "#ff0000""##).unwrap();
 
         assert_eq!(theme.accent, c(0xff0000));
-        assert_eq!(theme.background, mocha().background);
+        assert_eq!(theme.background, dark().background);
     }
 
     /// The palette gained `text_dim`/`text_muted` in the gpui rewrite; theme
@@ -439,7 +441,7 @@ mod tests {
 
         let theme: Theme = toml::from_str(example).expect("example theme parses");
 
-        assert_eq!(theme.name, "petunia-dark");
+        assert_eq!(theme.name, "my-theme");
         assert_eq!(theme.appearance, Some(Appearance::Dark));
         assert!(!theme.is_light());
         assert_eq!(theme.accents.len(), 8);

@@ -14,7 +14,26 @@ Petunia is a native Signal client, named after the flower.
   tabs, and no movable pane grid.
 - **Themes:** TOML files in `~/.config/petunia/themes/`, documented by
   `themes.example.toml`. A theme carries a full semantic colour token set plus
-  typography, and is hot-reloaded.
+  typography, and is hot-reloaded. The built-ins are `dark` and `light` —
+  neutral cool greys with a violet accent. Not Catppuccin, and not any other
+  borrowed scheme.
+
+## Layout
+
+Follow the reference design, not the layout the old iced client used. The iced
+version is gone and its arrangement is not a precedent for anything.
+
+- **Sidebar.** Small quiet section headers with their own affordances, and
+  two-line entries carrying real metadata — not a flat list of one-line rows.
+  Identity sits at the very bottom.
+- **Composer.** A rounded card floating over the conversation with its controls
+  *inside* it, right-aligned, and a thin context strip beneath. Not a bordered
+  field with a row of buttons stacked above or below it.
+- **Chrome.** Generous vertical rhythm, hairline borders, rounded chips, muted
+  secondary text. Panels are toggled from icons at the window's edges.
+- **Messages.** Discord-style runs: an avatar gutter, one header per run,
+  hanging indent. This is the one place that deliberately departs from the
+  reference, which is not a chat app.
 
 The first version implements only basic features, but the goal is a fully-featured
 Signal client. Structure the project so that future features can be added without

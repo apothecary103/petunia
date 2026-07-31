@@ -6,10 +6,10 @@
 #
 # The file is watched: saving it applies the change immediately.
 
-# "mocha" (dark, default) or "latte" (light). Any other name is read from
+# "dark" (default) or "light". Any other name is read from
 # ~/.config/petunia/themes/<name>.toml, which is also where fonts and sizes
 # live. See themes.example.toml for the full set of keys.
-theme = "mocha"
+theme = "dark"
 
 # Multiplies every length in the interface, on top of whatever scaling your
 # display already does. Raise it if everything looks too small. Clamped to

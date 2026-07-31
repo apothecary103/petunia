@@ -259,7 +259,7 @@ mod tests {
 
         let config: Config = toml::from_str(example).expect("example config parses");
 
-        assert_eq!(config.theme, "mocha");
+        assert_eq!(config.theme, "dark");
         assert_eq!(config.scale, 1.0);
         assert_eq!(config.messages.density, messages::Density::Comfortable);
         assert_eq!(config.sidebar.width, 240.0);

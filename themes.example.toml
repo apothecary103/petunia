@@ -8,54 +8,54 @@
 # Colours accept #rgb, #rrggbb and #rrggbbaa, with or without the leading hash.
 
 # Shown nowhere; the file name is what selects the theme.
-name = "petunia-dark"
+name = "my-theme"
 # "dark" or "light". Decides how the widget set derives its own shades. Left
 # out, the background's brightness decides.
 appearance = "dark"
 
 # The window itself.
-background = "#16161e"
+background = "#0e0e12"
 # Sidebar and panels.
-surface = "#1a1b26"
+surface = "#15151b"
 # Popovers, the composer, modals: anything that sits above the surface.
-elevated = "#1f2335"
+elevated = "#1d1d25"
 # Inputs and code blocks: anything that sits below it.
-sunken = "#101014"
+sunken = "#0a0a0d"
 
-border = "#292e42"
+border = "#26262f"
 # The border of whatever holds keyboard focus.
-border_focus = "#3d59a1"
+border_focus = "#584a86"
 
 # Body text.
-text = "#c0caf5"
+text = "#e3e3ec"
 # Timestamps and secondary labels.
-text_dim = "#9aa0b8"
+text_dim = "#9d9dae"
 # Placeholders and disabled controls.
-text_muted = "#565f89"
+text_muted = "#6a6a7b"
 
 # Row and button states.
-hover = "#1f2335"
-active = "#292e42"
-selected = "#283457"
+hover = "#1d1d25"
+active = "#26262f"
+selected = "#272040"
 
-accent = "#7aa2f7"
+accent = "#a78bfa"
 # Text drawn on top of the accent colour.
-on_accent = "#16161e"
-success = "#9ece6a"
-warning = "#e0af68"
-danger = "#f7768e"
+on_accent = "#120f1c"
+success = "#6ee7a8"
+warning = "#f3c46a"
+danger = "#f87b8a"
 
 # Sender colours, picked by a stable hash so one person keeps one colour in
 # every conversation and across restarts. Any number of them.
 accents = [
-  "#7aa2f7",
-  "#9ece6a",
-  "#e0af68",
-  "#ff9e64",
-  "#bb9af7",
-  "#2ac3de",
-  "#f7768e",
-  "#c0caf5",
+  "#a78bfa",
+  "#6ee7a8",
+  "#f3c46a",
+  "#f99f6b",
+  "#7cc4f8",
+  "#5ed4c4",
+  "#f58cc8",
+  "#f87b8a",
 ]
 
 [typography]
