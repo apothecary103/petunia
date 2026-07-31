@@ -55,7 +55,10 @@ pub struct Theme {
     #[serde(deserialize_with = "hex")]
     pub danger: Hsla,
 
-    /// A `Vec` so a theme picks its own count; `accent_for` is modular.
+    /// A fixed palette of sender colours, for a theme that wants to name them.
+    /// Left out -- which is what petunia's own themes do -- and a colour is
+    /// generated per person instead, which is the only way to have as many
+    /// distinguishable ones as a group has members.
     #[serde(deserialize_with = "hex_list")]
     pub accents: Vec<Hsla>,
 
@@ -169,12 +172,20 @@ impl Theme {
 
     /// A stable per-sender colour, so the same person is the same colour in
     /// every thread and across restarts.
+    ///
+    /// Generated rather than picked out of a list of eight. A list that short
+    /// puts two people in a group of ten in the same colour more often than not,
+    /// and a list of eight *muted* colours -- which is what a neutral theme
+    /// wants -- is eight shades of the same idea. A hue taken from the whole
+    /// wheel gives everyone their own, and holding saturation and lightness to
+    /// the band below keeps them all legible on the same background.
     pub fn accent_for(&self, seed: &[u8]) -> Hsla {
-        if self.accents.is_empty() {
-            return self.accent;
+        let hash = hash(seed);
+
+        if !self.accents.is_empty() {
+            return self.accents[(hash % self.accents.len() as u64) as usize];
         }
-        let sum: usize = seed.iter().map(|byte| *byte as usize).sum();
-        self.accents[sum % self.accents.len()]
+        generated(hash, self.is_light())
     }
 
     /// Whether this is a light theme, which decides how the widget library
@@ -189,6 +200,52 @@ impl Theme {
                 0.299 * r + 0.587 * g + 0.114 * b > 0.5
             }
         }
+    }
+}
+
+/// FNV-1a. A sum of the bytes -- which is what this used to be -- collides on
+/// every reordering of them, and a uuid is sixteen bytes in an order; worse, a
+/// sum mod eight only ever reads the bottom three bits of it.
+fn hash(seed: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in seed {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// How many places on the wheel a sender colour can land, and how many tones at
+/// each. Quantised rather than continuous: a hue taken straight from a hash puts
+/// two of ten people within a few degrees of each other more often than not,
+/// which is the same complaint as a palette of eight. Snapped to a step, two
+/// colours are either the same or a clear fifteen degrees apart, and the tone
+/// tells the ones that landed together apart.
+const HUES: u64 = 24;
+const TONES: u64 = 4;
+
+/// A sender colour from a hash: a place on the wheel, and one of four tones
+/// there.
+///
+/// The lightness band is tilted rather than flat. Yellows and greens read far
+/// brighter than blues and violets at the same nominal lightness, so a flat band
+/// gives a conversation where half the names shout.
+fn generated(hash: u64, light: bool) -> Hsla {
+    let hue = ((hash >> 40) % HUES) as f32 / HUES as f32;
+    let tone = ((hash >> 12) % TONES) as f32 / (TONES - 1) as f32;
+    // 1.0 at yellow-green, falling to 0 by cyan one way and orange the other.
+    let warm = 1.0 - ((hue - 0.22).abs() * 5.0).min(1.0);
+
+    let (saturation, lightness) = match light {
+        true => (0.60 + 0.12 * tone, 0.40 - 0.08 * warm + 0.05 * tone),
+        false => (0.52 + 0.16 * tone, 0.72 - 0.07 * warm + 0.08 * tone),
+    };
+
+    Hsla {
+        h: hue,
+        s: saturation,
+        l: lightness,
+        a: 1.0,
     }
 }
 
@@ -229,7 +286,8 @@ pub fn dark() -> Theme {
         success: c(0x6fcf97),
         warning: c(0xd6a545),
         danger: c(0xe5747d),
-        accents: ACCENTS_DARK.iter().copied().map(c).collect(),
+        // Empty: sender colours are generated per person. See `accent_for`.
+        accents: Vec::new(),
         syntax: syntax(ONE_DARK_SYNTAX),
         typography: Typography::default(),
     }
@@ -256,23 +314,11 @@ pub fn light() -> Theme {
         success: c(0x1f7a45),
         warning: c(0x8a6100),
         danger: c(0xbb3a44),
-        accents: ACCENTS_LIGHT.iter().copied().map(c).collect(),
+        accents: Vec::new(),
         syntax: syntax(ONE_LIGHT_SYNTAX),
         typography: Typography::default(),
     }
 }
-
-/// Sender colours. Spread around the wheel so adjacent names stay tellable
-/// apart, and held to a similar lightness so none of them shouts.
-/// Sender colours are the one chromatic thing in a neutral theme, so they are
-/// desaturated to sit inside it rather than on top of it.
-const ACCENTS_DARK: [u32; 8] = [
-    0x9ab8d8, 0x9dc9a6, 0xd6bb87, 0xd8a48c, 0xb6a6d4, 0x8cc6c2, 0xd3a3bd, 0xd49399,
-];
-
-const ACCENTS_LIGHT: [u32; 8] = [
-    0x35618c, 0x2f6b41, 0x8a6100, 0x99522a, 0x5b4a8a, 0x2a6d69, 0x8a3f68, 0x9b414a,
-];
 
 /// The themes that need no files on disk: petunia's own two, and Zed's, which
 /// are converted by `script/zed-themes.py` and compiled in.
@@ -339,9 +385,6 @@ pub fn load(name: &str) -> (Theme, Option<String>) {
 
     match toml::from_str::<Theme>(&contents) {
         Ok(mut theme) => {
-            if theme.accents.is_empty() {
-                theme.accents = dark().accents;
-            }
             if theme.name.is_empty() {
                 theme.name = name.to_owned();
             }
@@ -523,10 +566,12 @@ mod tests {
         assert!(light.is_light());
     }
 
+    /// Petunia's own two name no palette, so senders are coloured by generation.
+    /// A fixed list of eight in a neutral theme is eight shades of one idea.
     #[test]
-    fn both_built_in_themes_have_accents() {
-        assert_eq!(dark().accents.len(), 8);
-        assert_eq!(light().accents.len(), 8);
+    fn the_built_in_themes_generate_their_sender_colours() {
+        assert!(dark().accents.is_empty());
+        assert!(light().accents.is_empty());
     }
 
     #[test]
@@ -546,24 +591,92 @@ mod tests {
     }
 
     #[test]
-    fn a_sender_colour_is_stable_and_in_range() {
+    fn a_sender_colour_is_stable() {
         let theme = dark();
         let seed = [1u8, 2, 3, 4];
 
         assert_eq!(theme.accent_for(&seed), theme.accent_for(&seed));
-        assert!(theme.accents.contains(&theme.accent_for(&seed)));
     }
 
-    /// A theme file that lists no accents must still colour senders, so the
-    /// modular index cannot divide by zero.
+    /// A theme that names a palette gets that palette, and the hash rather than
+    /// a byte sum decides which entry -- so two names that happen to share their
+    /// bytes in a different order do not share a colour.
     #[test]
-    fn no_accents_falls_back_to_the_single_accent() {
+    fn a_named_palette_is_used_as_given() {
         let theme = Theme {
-            accents: Vec::new(),
+            accents: vec![c(0x111111), c(0x222222)],
             ..dark()
         };
 
-        assert_eq!(theme.accent_for(&[7]), theme.accent);
+        assert!(theme.accents.contains(&theme.accent_for(&[9, 9, 9])));
+    }
+
+    /// Sixteen bytes differing in one of them, which is the hardest case: a byte
+    /// sum would put ten of these in three buckets.
+    fn seeds(count: u8) -> Vec<[u8; 16]> {
+        (0..count)
+            .map(|index| {
+                let mut seed = [0x5eu8; 16];
+                seed[7] = index;
+                seed
+            })
+            .collect()
+    }
+
+    /// The whole point. A group has to read as a group of individuals, so no two
+    /// colours may be *nearly* the same: either they are the same place on the
+    /// wheel or they are a clear distance apart.
+    #[test]
+    fn two_sender_colours_are_never_almost_the_same() {
+        let theme = dark();
+        let hues: Vec<f32> = seeds(64)
+            .iter()
+            .map(|seed| theme.accent_for(seed).h)
+            .collect();
+
+        for (at, hue) in hues.iter().enumerate() {
+            for other in &hues[at + 1..] {
+                let apart = (hue - other).abs();
+                let apart = apart.min(1.0 - apart) * 360.0;
+                assert!(
+                    apart == 0.0 || apart >= 14.0,
+                    "{hue} and {other} are {apart} degrees apart"
+                );
+            }
+        }
+    }
+
+    /// And there have to be enough of them to go round. A palette of eight ran
+    /// out at the ninth person; this is a hue step times a tone, so a group is
+    /// nearly always all-different and two people sharing is the exception.
+    #[test]
+    fn there_are_far_more_colours_than_a_group_has_members() {
+        let theme = dark();
+        let mut colours: Vec<String> = seeds(255)
+            .iter()
+            .map(|seed| rgb(theme.accent_for(seed)))
+            .collect();
+        colours.sort();
+        colours.dedup();
+
+        assert!(colours.len() > 60, "only {} colours", colours.len());
+    }
+
+    /// Every generated colour has to be legible on the background it is drawn
+    /// on, or the spread is bought with names nobody can read.
+    #[test]
+    fn generated_colours_stay_inside_the_legible_band() {
+        for light in [true, false] {
+            for seed in 0..256u64 {
+                let colour = generated(hash(&seed.to_le_bytes()), light);
+
+                assert!((0.0..=1.0).contains(&colour.h));
+                match light {
+                    true => assert!(colour.l < 0.5, "{colour:?}"),
+                    false => assert!(colour.l > 0.6, "{colour:?}"),
+                }
+            }
+        }
     }
 
     #[test]

@@ -8,6 +8,9 @@ pub struct Messages {
     /// remember to apply it.
     #[serde(skip)]
     pub scale: f32,
+    /// How a message is shaped. Independent of `density`, which is how much room
+    /// it is given: either layout reads at either density.
+    pub layout: Layout,
     pub density: Density,
     pub timestamps: Timestamps,
     /// Seconds. Messages from one sender closer together than this group.
@@ -15,6 +18,47 @@ pub struct Messages {
     pub date_separators: bool,
     /// Attribute our own messages by name rather than as "You".
     pub show_own_name: bool,
+}
+
+/// The three shapes a conversation can take. Not a spectrum: each one is a
+/// different arrangement of the same message, and the one you want is the one
+/// whose habits you already have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Layout {
+    /// An avatar gutter, one header per run, hanging indent.
+    #[default]
+    Standard,
+    /// One line per message: the clock, the name in a column of its own, then
+    /// what was said. No avatars, and no runs -- IRC, as every IRC client has
+    /// drawn it.
+    Compact,
+    /// Signal's own: what you said on the right, what they said on the left,
+    /// each in a rounded bubble.
+    Bubbles,
+}
+
+impl Layout {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Standard => "Standard",
+            Self::Compact => "Compact",
+            Self::Bubbles => "Bubbles",
+        }
+    }
+
+    /// What it looks like, for a settings window that should not need a manual.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Standard => "An avatar gutter and one header per run.",
+            Self::Compact => "One line per message, IRC style.",
+            Self::Bubbles => "Rounded bubbles, yours on the right.",
+        }
+    }
+
+    pub fn every() -> [Self; 3] {
+        [Self::Standard, Self::Compact, Self::Bubbles]
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -38,6 +82,7 @@ impl Default for Messages {
     fn default() -> Self {
         Self {
             scale: 1.0,
+            layout: Layout::default(),
             density: Density::default(),
             timestamps: Timestamps::default(),
             group_within: 300,
@@ -63,6 +108,15 @@ pub struct Spacing {
     pub small: f32,
     /// The edge of a sticker, which has no bubble and no intrinsic layout size.
     pub sticker: f32,
+    /// The columns the compact layout right-aligns the clock and the name in, so
+    /// every line of text starts at the same place however long the names are.
+    /// Fixed widths, because a proportional font gives "11:11" and "20:48"
+    /// different ones.
+    pub clock_column: f32,
+    pub name_column: f32,
+    /// What a bubble keeps clear inside its own edges.
+    pub bubble_x: f32,
+    pub bubble_y: f32,
 }
 
 impl Messages {
@@ -86,6 +140,10 @@ impl Spacing {
             body: self.body * scale,
             small: self.small * scale,
             sticker: self.sticker * scale,
+            clock_column: self.clock_column * scale,
+            name_column: self.name_column * scale,
+            bubble_x: self.bubble_x * scale,
+            bubble_y: self.bubble_y * scale,
         }
     }
 }
@@ -103,6 +161,10 @@ impl Density {
                 body: 14.0,
                 small: 11.0,
                 sticker: 160.0,
+                clock_column: 38.0,
+                name_column: 108.0,
+                bubble_x: 12.0,
+                bubble_y: 8.0,
             },
             Self::Compact => Spacing {
                 between_runs: 8.0,
@@ -114,6 +176,10 @@ impl Density {
                 body: 13.0,
                 small: 10.0,
                 sticker: 120.0,
+                clock_column: 34.0,
+                name_column: 92.0,
+                bubble_x: 10.0,
+                bubble_y: 6.0,
             },
         }
     }
@@ -174,6 +240,34 @@ mod tests {
             assert!(spacing.small < spacing.body);
             assert!(spacing.small >= 10.0);
         }
+    }
+
+    /// The default has to stay the layout everyone already has, or an upgrade
+    /// silently rearranges every conversation.
+    #[test]
+    fn the_default_layout_is_standard() {
+        assert_eq!(Messages::default().layout, Layout::Standard);
+    }
+
+    #[test]
+    fn every_layout_is_offered_once_and_describes_itself() {
+        let every = Layout::every();
+
+        assert_eq!(every.len(), 3);
+        for layout in every {
+            assert!(!layout.label().is_empty());
+            assert!(!layout.describe().is_empty());
+        }
+    }
+
+    /// The name column is what makes the compact layout line up, so it has to
+    /// scale with the text in it.
+    #[test]
+    fn the_name_column_scales_with_the_text() {
+        let doubled = Density::Comfortable.spacing().scaled(2.0);
+
+        assert_eq!(doubled.name_column, Density::Comfortable.spacing().name_column * 2.0);
+        assert_eq!(doubled.bubble_x, Density::Comfortable.spacing().bubble_x * 2.0);
     }
 
     /// The gutter has to clear the avatar, or the run header sits on top of it.
