@@ -1,4 +1,5 @@
 mod actions;
+mod audio;
 mod config;
 mod data;
 mod session;
@@ -35,6 +36,7 @@ fn main() {
 
         let config = Arc::new(loaded.config);
         let store = cx.new(|_| Store::new(config));
+        let player = audio::Player::start();
         signal::bridge::spawn(store.clone(), cx);
         watch_config(store.clone(), cx);
 
@@ -59,7 +61,7 @@ fn main() {
                 ..Default::default()
             },
             |window, cx| {
-                let workspace = cx.new(|cx| Workspace::new(store, window, cx));
+                let workspace = cx.new(|cx| Workspace::new(store, player, window, cx));
                 // Nothing else claims focus on launch, and without it the
                 // keymap has no path to dispatch along.
                 window.focus(&workspace.read(cx).focus_handle(cx), cx);

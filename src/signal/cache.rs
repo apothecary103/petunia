@@ -39,6 +39,29 @@ impl Cache {
         self.root.join("avatars")
     }
 
+    fn stickers(&self, pack_id: &[u8]) -> PathBuf {
+        self.root.join("stickers").join(hex(pack_id))
+    }
+
+    /// A sticker from an installed pack. presage keeps the decrypted bytes in
+    /// its own store, but nothing can draw bytes -- the renderer wants a path.
+    pub async fn put_sticker(
+        &self,
+        pack_id: &[u8],
+        sticker_id: u32,
+        bytes: &[u8],
+    ) -> Result<PathBuf, Error> {
+        let path = self
+            .stickers(pack_id)
+            .join(file(&sticker_id.to_string(), sniff(bytes)));
+        write(&path, bytes).await?;
+        Ok(path)
+    }
+
+    pub async fn sticker(&self, pack_id: &[u8], sticker_id: u32) -> Option<PathBuf> {
+        found(&self.stickers(pack_id), &sticker_id.to_string()).await
+    }
+
     /// The path bytes land on, named for what they actually are rather than for
     /// what the sender claimed they were.
     fn attachment_path(&self, id: &Id, name: Option<&str>) -> PathBuf {
@@ -239,14 +262,16 @@ async fn collect(
 fn avatar_key(thread: &Thread) -> String {
     match thread {
         Thread::Contact(contact) => contact.uuid().to_string(),
-        Thread::Group(master_key) => master_key
-            .iter()
-            .fold(String::new(), |mut out, byte| {
-                use std::fmt::Write;
-                let _ = write!(out, "{byte:02x}");
-                out
-            }),
+        Thread::Group(master_key) => hex(master_key),
     }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().fold(String::new(), |mut out, byte| {
+        use std::fmt::Write;
+        let _ = write!(out, "{byte:02x}");
+        out
+    })
 }
 
 /// What the bytes say they are, falling back to what the sender said. Signal

@@ -39,6 +39,9 @@ pub enum Event {
         /// from the file's header rather than by decoding it.
         measured: Option<attachment::Size>,
     },
+    /// Every installed sticker pack, with each sticker's bytes already written
+    /// into the media cache.
+    StickerPacks(Vec<crate::data::stickers::Pack>),
     Preview {
         thread: Thread,
         message: Message,

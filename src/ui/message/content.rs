@@ -3,17 +3,17 @@ use gpui::{
     AnyElement, Div, FontStyle, FontWeight, HighlightStyle, MouseButton, SharedString, StyledText,
     div, px,
 };
-use gpui_component::progress::Progress;
-use gpui_component::{IconName, Sizable};
+use gpui_component::IconName;
 
+use super::act::{Act, Dispatch};
+use super::{bar, emoji, format, media};
+use crate::audio::Playback;
 use crate::config::Theme;
-use crate::ui::image;
 use crate::config::messages::Spacing;
-use crate::data::attachment::{Attachment, Blob, Kind};
-use crate::data::message::{Content, Quote, Range, Reaction, Status, Update};
+use crate::data::attachment::{Attachment, Blob};
+use crate::data::message::{Content, Quote, Range, Reaction, Status, Sticker, Update};
 use crate::data::{Message, State};
 use crate::ui::kit;
-use super::{emoji, format};
 
 /// Everything one message shows: its body, whatever it carries, and whatever
 /// was done to it afterwards.
@@ -23,14 +23,16 @@ pub struct Body<'a> {
     pub theme: &'a Theme,
     pub spacing: Spacing,
     pub max_image: (f32, f32),
-    /// Asks the worker for an attachment the auto-download policy skipped.
-    pub on_download: crate::ui::conversation::Download,
+    pub playback: &'a Playback,
+    /// The one way anything drawn on a message asks for something to happen.
+    pub act: &'a Dispatch,
 }
 
 impl Body<'_> {
     pub fn render(self) -> Div {
         let theme = self.theme;
         let spacing = self.spacing;
+        let own = self.message.sender() == self.state.aci;
 
         let mut block = div()
             .flex()
@@ -56,7 +58,7 @@ impl Body<'_> {
                         .child(styled(body, ranges, self.state, theme)),
                 )
             }
-            Content::Sticker(sticker) => block.child(self.sticker(sticker.image.as_ref())),
+            Content::Sticker(sticker) => block.child(self.sticker(sticker)),
             Content::Deleted => block.child(
                 div()
                     .text_size(px(spacing.body))
@@ -72,109 +74,129 @@ impl Body<'_> {
             ),
         };
 
-        for attachment in &self.message.attachments {
-            block = block.child(self.attachment(attachment));
+        let frame = media::Frame {
+            theme,
+            spacing,
+            max_image: self.max_image,
+            timestamp: self.message.timestamp(),
+            playback: self.playback,
+            act: self.act,
+        };
+        for attached in &self.message.attachments {
+            block = block.child(frame.render(attached));
         }
 
         if !self.message.reactions.is_empty() {
-            block = block.child(reactions(&self.message.reactions, self.state, theme));
+            block = block.child(reactions(self.message, self.state, theme, self.act));
         }
 
         // Only our own messages have a delivery state, and only ours show one.
-        if self.message.sender() == self.state.aci
-            && let Some(status) = self.message.status
-        {
+        if own && let Some(status) = self.message.status {
             block = block.child(receipt(status, self.message.edited.is_some(), theme));
         }
 
-        block
+        bar::with_actions(block, self.message, own, theme, self.act)
     }
 
-    fn sticker(&self, sticker: Option<&Attachment>) -> AnyElement {
+    /// A sticker has no bubble and no chip: a fixed square, and the pack's own
+    /// emoji holding the space until the bytes arrive. Fixed rather than capped
+    /// because a sticker that will not decode must not collapse to nothing.
+    fn sticker(&self, sticker: &Sticker) -> AnyElement {
         let edge = self.spacing.sticker;
+        let act = self.act.clone();
+        let pack_id = sticker.pack_id.clone();
+        let key = sticker.pack_key.clone();
 
-        match sticker.map(|sticker| &sticker.blob) {
-            Some(Blob::Cached(path)) => image::picture(path, edge, edge).into_any_element(),
-            _ => div()
-                .size(px(edge * 0.5))
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(px(edge * 0.35))
-                .child("🎨")
+        let square = div()
+            .id(SharedString::from(format!("sticker-{}", sticker.sticker_id)))
+            .size(px(edge))
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center();
+
+        // Clicking a sticker offers its pack, which is how you come by one.
+        let square = match key {
+            Some(key) => square
+                .cursor_pointer()
+                .tooltip(|window, cx| {
+                    gpui_component::tooltip::Tooltip::new("Add this sticker pack").build(window, cx)
+                })
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    act(
+                        Act::InstallStickers {
+                            pack_id: pack_id.clone(),
+                            key: key.clone(),
+                        },
+                        window,
+                        cx,
+                    )
+                }),
+            None => square,
+        };
+
+        match sticker.image.as_ref().map(|image| &image.blob) {
+            Some(Blob::Cached(path)) => square
+                .child(crate::ui::image::picture(path, edge, edge))
                 .into_any_element(),
-        }
-    }
-
-    fn attachment(&self, attachment: &Attachment) -> AnyElement {
-        let theme = self.theme;
-
-        match (&attachment.kind, &attachment.blob) {
-            // Sized explicitly rather than capped: an image's natural size is
-            // its pixel size, and a max alone leaves the layout to guess the
-            // other axis.
-            (Kind::Image { size, .. }, Blob::Cached(path)) => {
-                let (width, height) = fit(*size, self.max_image);
-                image::picture(path, width, height)
-                    .rounded(px(kit::RADIUS))
-                    .into_any_element()
-            }
-            (_, Blob::Cached(path)) => {
-                file_chip(attachment, Some(path.to_string_lossy().into_owned()), theme)
-                    .into_any_element()
-            }
-            (_, Blob::Downloading) => downloading_chip(attachment, theme).into_any_element(),
-            (_, Blob::Failed(error)) => status_chip(
-                attachment,
-                format!("Could not download — {error}"),
-                theme.danger,
-                theme,
-            )
-            .into_any_element(),
-            (_, Blob::Missing) => {
-                let id = attachment.id.clone();
-                let timestamp = self.message.timestamp();
-                let ask = self.on_download.clone();
-                file_chip(attachment, None, theme)
-                    .id(SharedString::from(format!("get-{}", id.as_str())))
-                    .cursor_pointer()
-                    .hover(|this| this.border_color(theme.border_focus))
-                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                        ask(timestamp, &id, window, cx)
-                    })
-                    .into_any_element()
-            }
+            _ => square
+                .text_size(px(edge * 0.35))
+                .child(SharedString::from(
+                    sticker.emoji.clone().unwrap_or_else(|| "🎨".into()),
+                ))
+                .into_any_element(),
         }
     }
 }
 
-/// How far a message of ours has got. Small and dim: it matters when you look
-/// for it and never otherwise.
-fn receipt(status: Status, edited: bool, theme: &Theme) -> Div {
-    let (label, tint) = match status {
-        Status::Sending => ("Sending…", theme.text_muted),
-        Status::Failed => ("Failed to send", theme.danger),
-        Status::Sent => ("Sent", theme.text_muted),
-        Status::Delivered => ("Delivered", theme.text_muted),
-        Status::Read => ("Read", theme.text_dim),
-        Status::Viewed => ("Viewed", theme.text_dim),
+/// How far a message of ours has got. Signal's own language: one tick sent, two
+/// delivered, two in the accent colour read. Small and dim, because it matters
+/// when you look for it and never otherwise.
+fn receipt(status: Status, edited: bool, theme: &Theme) -> gpui::Stateful<Div> {
+    let mark: AnyElement = match status {
+        Status::Sending => kit::icon(IconName::Loader, 11.0, theme.text_muted).into_any_element(),
+        Status::Failed => kit::icon(IconName::TriangleAlert, 11.0, theme.danger).into_any_element(),
+        Status::Sent => ticks(1, theme.text_muted).into_any_element(),
+        Status::Delivered => ticks(2, theme.text_muted).into_any_element(),
+        Status::Read | Status::Viewed => ticks(2, theme.accent).into_any_element(),
+    };
+    let words = match status {
+        Status::Sending => "Sending",
+        Status::Failed => "Failed to send",
+        Status::Sent => "Sent",
+        Status::Delivered => "Delivered",
+        Status::Read => "Read",
+        Status::Viewed => "Viewed",
     };
 
     div()
+        .id("receipt")
         .flex()
         .items_center()
         .gap_1p5()
         .text_size(px(theme.typography.ui_size - 3.0))
-        .text_color(tint)
-        .when(edited, |this| {
-            this.child(
-                div()
-                    .text_color(theme.text_muted)
-                    .child("edited")
-                    .into_any_element(),
-            )
+        .text_color(theme.text_muted)
+        .tooltip(move |window, cx| {
+            gpui_component::tooltip::Tooltip::new(words).build(window, cx)
         })
-        .child(label)
+        .when(edited, |this| this.child("edited"))
+        .when(status == Status::Failed, |this| {
+            this.text_color(theme.danger).child(words)
+        })
+        .child(mark)
+}
+
+/// Two ticks are one tick drawn twice, overlapped, because the icon set has no
+/// double-tick and a second glyph beside the first reads as two separate marks.
+fn ticks(count: usize, tint: gpui::Hsla) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .children((0..count).map(|index| {
+            div()
+                .when(index > 0, |this| this.ml(px(-4.0)))
+                .child(kit::icon(IconName::Check, 11.0, tint))
+        }))
 }
 
 /// Renders the body with Signal's formatting applied. Mentions carry a
@@ -257,172 +279,6 @@ fn highlight(styles: format::Styles, theme: &Theme) -> Option<HighlightStyle> {
     touched.then_some(highlight)
 }
 
-/// Scales an image down to fit inside the box, keeping its aspect ratio and
-/// never scaling up. Without the pixel size to work from, the box is all we
-/// can honour.
-fn fit(size: Option<crate::data::attachment::Size>, max: (f32, f32)) -> (f32, f32) {
-    let Some(size) = size.filter(|size| size.width > 0 && size.height > 0) else {
-        return max;
-    };
-
-    let (width, height) = (size.width as f32, size.height as f32);
-    let scale = (max.0 / width).min(max.1 / height).min(1.0);
-
-    (width * scale, height * scale)
-}
-
-fn icon_for(kind: &Kind) -> IconName {
-    match kind {
-        Kind::Image { .. } => IconName::Frame,
-        Kind::Video { .. } => IconName::Play,
-        Kind::Audio { .. } => IconName::Bell,
-        Kind::File => IconName::File,
-    }
-}
-
-fn label(attachment: &Attachment) -> String {
-    attachment
-        .file_name
-        .clone()
-        .unwrap_or_else(|| match attachment.kind {
-            Kind::Image { .. } => "Photo".into(),
-            Kind::Video { .. } => "Video".into(),
-            Kind::Audio { voice_note: true, .. } => "Voice message".into(),
-            Kind::Audio { .. } => "Audio".into(),
-            Kind::File => "File".into(),
-        })
-}
-
-/// Bytes as something a person reads, not as a number of bytes.
-fn size(bytes: u64) -> String {
-    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
-    let mut value = bytes as f64;
-    let mut unit = 0;
-
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{bytes} B")
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
-}
-
-fn chip_shell(theme: &Theme) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .gap_2p5()
-        .px_3()
-        .py_2()
-        .rounded(px(kit::RADIUS))
-        .bg(theme.elevated)
-        .border_1()
-        .border_color(theme.border)
-}
-
-fn file_chip(attachment: &Attachment, cached: Option<String>, theme: &Theme) -> gpui::Stateful<Div> {
-    let detail = match cached {
-        Some(_) => size(attachment.size),
-        None => format!("{} · tap to download", size(attachment.size)),
-    };
-
-    chip_shell(theme)
-        .id("chip")
-        .child(kit::icon(icon_for(&attachment.kind), 16.0, theme.text_dim))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .min_w_0()
-                .child(
-                    div()
-                        .truncate()
-                        .text_size(px(theme.typography.ui_size))
-                        .text_color(theme.text)
-                        .child(SharedString::from(label(attachment))),
-                )
-                .child(
-                    div()
-                        .text_size(px(theme.typography.ui_size - 3.0))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(detail)),
-                ),
-        )
-}
-
-/// An attachment in flight. The bar slides rather than fills: presage hands back
-/// the whole file at once, so the only honest thing to show is that something is
-/// happening and roughly how much of it there is.
-fn downloading_chip(attachment: &Attachment, theme: &Theme) -> Div {
-    chip_shell(theme)
-        .child(kit::icon(icon_for(&attachment.kind), 16.0, theme.text_muted))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_w_0()
-                .gap_1()
-                .child(
-                    div()
-                        .truncate()
-                        .text_size(px(theme.typography.ui_size))
-                        .text_color(theme.text)
-                        .child(SharedString::from(label(attachment))),
-                )
-                .child(
-                    Progress::new(SharedString::from(format!(
-                        "download-{}",
-                        attachment.id.as_str()
-                    )))
-                    .loading(true)
-                    .color(theme.accent)
-                    .with_size(gpui_component::Size::XSmall),
-                )
-                .child(
-                    div()
-                        .text_size(px(theme.typography.ui_size - 3.0))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(format!(
-                            "Downloading… {}",
-                            size(attachment.size)
-                        ))),
-                ),
-        )
-}
-
-fn status_chip(
-    attachment: &Attachment,
-    detail: String,
-    tint: gpui::Hsla,
-    theme: &Theme,
-) -> Div {
-    chip_shell(theme)
-        .child(kit::icon(icon_for(&attachment.kind), 16.0, tint))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .min_w_0()
-                .child(
-                    div()
-                        .truncate()
-                        .text_size(px(theme.typography.ui_size))
-                        .text_color(theme.text)
-                        .child(SharedString::from(label(attachment))),
-                )
-                .child(
-                    div()
-                        .text_size(px(theme.typography.ui_size - 3.0))
-                        .text_color(tint)
-                        .child(SharedString::from(detail)),
-                ),
-        )
-}
-
 /// The message being answered, as a bar rather than a box: it is context, and
 /// context should not outweigh the reply.
 fn quoted(quote: &Quote, state: &State, theme: &Theme, spacing: Spacing) -> Div {
@@ -455,33 +311,48 @@ fn quoted(quote: &Quote, state: &State, theme: &Theme, spacing: Spacing) -> Div 
         )
 }
 
-fn reactions(reactions: &[Reaction], state: &State, theme: &Theme) -> Div {
-    let mut counts: Vec<(String, usize, bool)> = Vec::new();
+/// One chip per distinct emoji, tinted when it includes you. Clicking a chip
+/// adds your own reaction, or takes it back if it is already there.
+fn reactions(message: &Message, state: &State, theme: &Theme, act: &Dispatch) -> Div {
+    let mut counts: Vec<(String, Vec<String>, bool)> = Vec::new();
 
-    for reaction in reactions {
+    for reaction in &message.reactions {
         let mine = reaction.author == state.aci;
-        match counts.iter_mut().find(|(emoji, _, _)| *emoji == reaction.emoji) {
-            Some((_, count, ours)) => {
-                *count += 1;
+        let who = state.sender_name(reaction.author);
+        match counts
+            .iter_mut()
+            .find(|(emoji, _, _)| *emoji == reaction.emoji)
+        {
+            Some((_, names, ours)) => {
+                names.push(who);
                 *ours |= mine;
             }
-            None => counts.push((reaction.emoji.clone(), 1, mine)),
+            None => counts.push((reaction.emoji.clone(), vec![who], mine)),
         }
     }
+
+    let id = message.id;
 
     div()
         .flex()
         .flex_wrap()
         .gap_1p5()
         .pt_0p5()
-        .children(counts.into_iter().map(|(emoji, count, mine)| {
+        .children(counts.into_iter().map(|(emoji, names, mine)| {
+            let count = names.len();
+            let who = SharedString::from(names.join(", "));
+            let act = act.clone();
+            let emoji_for_click = emoji.clone();
+
             div()
+                .id(SharedString::from(format!("reaction-{emoji}-{}", id.timestamp)))
                 .flex()
                 .items_center()
                 .gap_1()
                 .px_2()
                 .py_0p5()
                 .rounded_full()
+                .cursor_pointer()
                 .bg(if mine {
                     kit::tinted(theme.accent)
                 } else {
@@ -491,6 +362,12 @@ fn reactions(reactions: &[Reaction], state: &State, theme: &Theme) -> Div {
                 .border_color(if mine { theme.accent } else { theme.border })
                 .text_size(px(theme.typography.ui_size - 2.0))
                 .text_color(theme.text_dim)
+                .tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(who.clone()).build(window, cx)
+                })
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    act(Act::React(id, emoji_for_click.clone()), window, cx)
+                })
                 .child(SharedString::from(emoji))
                 .when(count > 1, |this| {
                     this.child(SharedString::from(count.to_string()))
@@ -505,12 +382,3 @@ fn describe(update: &Update) -> String {
     }
 }
 
-/// A download is asked for by clicking the chip, so the chip has to know which
-/// attachment it is.
-pub fn wants_download(attachment: &Attachment) -> bool {
-    matches!(attachment.blob, Blob::Missing | Blob::Failed(_))
-}
-
-pub fn clickable(element: Div, on_click: impl Fn() + 'static) -> Div {
-    element.on_mouse_down(MouseButton::Left, move |_, _, _| on_click())
-}

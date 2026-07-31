@@ -5,9 +5,11 @@ use gpui::{Context, Entity, MouseButton, ScrollHandle, SharedString, Window, div
 use super::avatar::avatar;
 use super::composer::Composer;
 use super::kit;
+use super::message::act::{Act, Dispatch};
 use super::message::content;
 use super::message::group::{self, Entry};
 use super::relative;
+use crate::audio::{Playback, Player};
 use crate::config::Theme;
 use crate::config::messages::{Spacing, Timestamps};
 use crate::data::{Message, MessageId, State, Thread};
@@ -15,31 +17,164 @@ use crate::signal::Command;
 use crate::store::{Focus, Store};
 use crate::theme::ActivePalette;
 
-/// Asks the worker for an attachment the auto-download policy skipped.
-pub type Download =
-    std::rc::Rc<dyn Fn(u64, &crate::data::attachment::Id, &mut Window, &mut gpui::App)>;
+/// A picture was asked for full size. The workspace owns the viewer, because it
+/// covers more than the conversation column.
+#[derive(Debug, Clone)]
+pub struct Viewing(pub std::path::PathBuf);
 
-/// The focused conversation: its message list, and in the next phase the
-/// composer beneath it.
+impl gpui::EventEmitter<Viewing> for Conversation {}
+
+/// Hands a file to whatever the system opens it with.
+fn open(path: &std::path::Path) {
+    if let Err(error) = open::that_detached(path) {
+        tracing::warn!(%error, path = %path.display(), "could not open the file");
+    }
+}
+
+/// The focused conversation: the message list, the composer beneath it, and the
+/// one place every control drawn on a message is answered.
 pub struct Conversation {
     store: Entity<Store>,
     composer: Entity<Composer>,
+    player: Player,
     scroll: ScrollHandle,
     /// The thread the scroll position belongs to, so switching conversations
     /// starts at the newest message rather than wherever the last one was.
     anchored: Option<Thread>,
+    /// Runs only while something is playing, because a repaint every tenth of a
+    /// second for an idle window is not free.
+    ticking: Option<gpui::Task<()>>,
 }
 
 impl Conversation {
-    pub fn new(store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        store: Entity<Store>,
+        player: Player,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         cx.observe(&store, |_, _, cx| cx.notify()).detach();
         let composer = cx.new(|cx| Composer::new(store.clone(), window, cx));
         Self {
             store,
             composer,
+            player,
             scroll: ScrollHandle::new(),
             anchored: None,
+            ticking: None,
         }
+    }
+
+    /// Everything a control on a message can ask for, answered in one place.
+    fn dispatch(&self, cx: &mut Context<Self>) -> Dispatch {
+        let this = cx.entity();
+        std::rc::Rc::new(move |act, window, cx| {
+            this.update(cx, |this, cx| this.perform(act, window, cx));
+        })
+    }
+
+    fn perform(&mut self, act: Act, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(thread) = self.store.read(cx).active().cloned() else {
+            return;
+        };
+
+        match act {
+            Act::Download { timestamp, id } => self.store.update(cx, |store, cx| {
+                store.send(Command::DownloadAttachment {
+                    thread,
+                    timestamp,
+                    id,
+                });
+                cx.notify();
+            }),
+            Act::Reply(target) => self.reply_to(target, window, cx),
+            Act::Edit(target) => self.edit(target, window, cx),
+            Act::React(target, emoji) => self
+                .store
+                .update(cx, |store, cx| store.react(thread, target, emoji, cx)),
+            Act::Delete(target) => self
+                .store
+                .update(cx, |store, cx| store.delete(thread, target, cx)),
+            Act::Copy(target) => self.copy(target, cx),
+            Act::View(path) => cx.emit(Viewing(path)),
+            Act::Save(path) => self.save(path, window, cx),
+            Act::Open(path) => open(&path),
+            Act::Play(path) => {
+                self.player.toggle(path);
+                self.follow_playback(cx);
+            }
+            Act::Seek(_, fraction) => self.player.seek(fraction),
+            Act::InstallStickers { pack_id, key } => self.store.update(cx, |store, _| {
+                store.send(Command::InstallStickerPack { pack_id, key })
+            }),
+            Act::Inspect(who) => self.inspect(who, cx),
+        }
+    }
+
+    fn copy(&self, target: MessageId, cx: &mut Context<Self>) {
+        let Some(text) = self
+            .store
+            .read(cx)
+            .state()
+            .and_then(|state| {
+                state
+                    .histories
+                    .values()
+                    .find_map(|history| history.find(&target))
+            })
+            .and_then(|message| message.text())
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+    }
+
+    /// Saving is a copy to somewhere the user picks; the cached file stays where
+    /// it is, because the conversation still needs it.
+    fn save(&self, path: std::path::PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "attachment".into());
+        let directory = dirs::download_dir().unwrap_or_else(std::env::temp_dir);
+        let asked = cx.prompt_for_new_path(&directory, Some(&name));
+
+        cx.spawn_in(window, async move |_, cx| {
+            let Ok(Ok(Some(target))) = asked.await else {
+                return;
+            };
+            let copied = cx
+                .background_spawn(async move { std::fs::copy(&path, &target) })
+                .await;
+            if let Err(error) = copied {
+                tracing::warn!(%error, "could not save the attachment");
+            }
+        })
+        .detach();
+    }
+
+    /// A playing track has to repaint to move; an idle one must not.
+    fn follow_playback(&mut self, cx: &mut Context<Self>) {
+        if self.ticking.is_some() {
+            return;
+        }
+        self.ticking = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
+                let carry_on = this.update(cx, |this, cx| {
+                    cx.notify();
+                    this.player.playback().playing
+                });
+                match carry_on {
+                    Ok(true) => {}
+                    _ => break,
+                }
+            }
+            this.update(cx, |this, _| this.ticking = None).ok();
+        }));
     }
 
     pub fn composer(&self) -> &Entity<Composer> {
@@ -154,6 +289,8 @@ impl Conversation {
 impl Render for Conversation {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = cx.palette().clone();
+        let act = self.dispatch(cx);
+        let playback = self.player.playback();
         let store = self.store.read(cx);
 
         let Some(thread) = store.active().cloned() else {
@@ -181,21 +318,6 @@ impl Render for Conversation {
                 .child(empty(&palette, "No messages here yet.").flex_1())
                 .child(self.composer.clone())
                 .into_any_element();
-        };
-
-        let on_download: Download = {
-            let store = self.store.clone();
-            let thread = thread.clone();
-            std::rc::Rc::new(move |timestamp, id, _window, cx| {
-                store.update(cx, |store, cx| {
-                    store.send(Command::DownloadAttachment {
-                        thread: thread.clone(),
-                        timestamp,
-                        id: id.clone(),
-                    });
-                    cx.notify();
-                });
-            })
         };
 
         let entries = group::entries(history.messages(), history.first_unread(), group_within_ms);
@@ -247,25 +369,19 @@ impl Render for Conversation {
                 Entry::Day(date) => day_separator(date, &palette, spacing),
                 Entry::UnreadMarker => unread_marker(&palette, spacing),
                 Entry::Update(message) => update_line(message, &palette, spacing),
-                Entry::Run(run) => {
-                    let sender = run.sender;
-                    let on_sender = std::rc::Rc::new(cx.listener(
-                        move |this: &mut Self, _, _: &mut Window, cx: &mut Context<Self>| {
-                            this.inspect(sender, cx)
-                        },
-                    ));
-                    run_block(
-                        &run,
+                Entry::Run(run) => run_block(
+                    &run,
+                    Run {
                         state,
-                        &palette,
+                        palette: &palette,
                         spacing,
                         timestamps,
                         max_image,
-                        on_sender,
-                        on_download.clone(),
-                    )
-                    .into_any_element()
-                }
+                        playback: &playback,
+                        act: &act,
+                    },
+                )
+                .into_any_element(),
             });
         }
 
@@ -321,19 +437,38 @@ fn empty(palette: &Theme, message: &'static str) -> gpui::Div {
         .child(message)
 }
 
-fn run_block(
-    run: &group::Run<'_>,
-    state: &State,
-    palette: &Theme,
+/// Everything a run of messages needs that is not the messages themselves.
+struct Run<'a> {
+    state: &'a State,
+    palette: &'a Theme,
     spacing: Spacing,
     timestamps: Timestamps,
     max_image: (f32, f32),
-    on_sender: std::rc::Rc<dyn Fn(&gpui::MouseDownEvent, &mut Window, &mut gpui::App)>,
-    on_download: Download,
-) -> gpui::Div {
-    let name = state.sender_name(run.sender);
-    let tint = palette.accent_for(run.sender.as_bytes());
+    playback: &'a Playback,
+    act: &'a Dispatch,
+}
+
+fn run_block(run: &group::Run<'_>, frame: Run<'_>) -> gpui::Div {
+    let Run {
+        state,
+        palette,
+        spacing,
+        timestamps,
+        max_image,
+        playback,
+        act,
+    } = frame;
+
+    let sender = run.sender;
+    let name = state.sender_name(sender);
+    let tint = palette.accent_for(sender.as_bytes());
     let first = run.messages.first();
+    let inspect = {
+        let act = act.clone();
+        move |_: &gpui::MouseDownEvent, window: &mut Window, cx: &mut gpui::App| {
+            act(Act::Inspect(sender), window, cx)
+        }
+    };
 
     let header = div()
         .flex()
@@ -346,20 +481,20 @@ fn run_block(
                 .text_size(px(spacing.body))
                 .text_color(tint)
                 .hover(|this| this.underline())
-                .on_mouse_down(MouseButton::Left, {
-                    let on_sender = on_sender.clone();
-                    move |event, window, cx| on_sender(event, window, cx)
-                })
+                .on_mouse_down(MouseButton::Left, inspect.clone())
                 .child(SharedString::from(name.clone())),
         )
-        .when_some(first.filter(|_| timestamps != Timestamps::Never), |this, message| {
-            this.child(
-                div()
-                    .text_size(px(spacing.small))
-                    .text_color(palette.text_muted)
-                    .child(SharedString::from(clock(message.timestamp()))),
-            )
-        });
+        .when_some(
+            first.filter(|_| timestamps != Timestamps::Never),
+            |this, message| {
+                this.child(
+                    div()
+                        .text_size(px(spacing.small))
+                        .text_color(palette.text_muted)
+                        .child(SharedString::from(clock(message.timestamp()))),
+                )
+            },
+        );
 
     let bodies = run.messages.iter().map(|message| {
         content::Body {
@@ -368,7 +503,8 @@ fn run_block(
             theme: palette,
             spacing,
             max_image,
-            on_download: on_download.clone(),
+            playback,
+            act,
         }
         .render()
     });
@@ -382,20 +518,19 @@ fn run_block(
                 .id("sender-avatar")
                 .flex_none()
                 .cursor_pointer()
-                .on_mouse_down(MouseButton::Left, move |event, window, cx| {
-                    on_sender(event, window, cx)
-                })
+                .on_mouse_down(MouseButton::Left, inspect)
                 .child(avatar(
-                    state.avatar_for(run.sender),
+                    state.avatar_for(sender),
                     &name,
-                    run.sender.as_bytes(),
+                    sender.as_bytes(),
                     spacing.avatar,
                     palette,
                 )),
         )
         .child(
             div()
-                .flex().flex_col()
+                .flex()
+                .flex_col()
                 .flex_1()
                 .min_w_0()
                 .gap(px(spacing.within_run))

@@ -74,6 +74,12 @@ pub enum Command {
         thread: Thread,
         started: bool,
     },
+    /// Installs the pack a received sticker came from, and tells our other
+    /// devices. The key only ever travels alongside the sticker itself.
+    InstallStickerPack {
+        pack_id: Vec<u8>,
+        key: Vec<u8>,
+    },
     /// Fetches an attachment the auto-download policy skipped. The pointer is
     /// re-read from the stored row rather than carried through the UI.
     DownloadAttachment {

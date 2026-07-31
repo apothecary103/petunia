@@ -95,6 +95,7 @@ async fn serve(mut commands: UnboundedReceiver<Command>, mut events: Events) -> 
     tokio::task::spawn_local(fetch_avatars(manager.clone(), cache.clone(), events.clone()));
     tokio::task::spawn_local(fetch_profiles(manager.clone(), events.clone()));
     tokio::task::spawn_local(fetch_previews(db.clone(), events.clone()));
+    send_sticker_packs(&manager, &cache, &mut events).await;
     if freshly_linked
         && let Err(error) = manager.request_contacts().await
     {
@@ -218,6 +219,21 @@ async fn serve(mut commands: UnboundedReceiver<Command>, mut events: Events) -> 
                         send_message(&mut manager, &thread, typing.into(), timestamp).await
                     {
                         debug!(%error, "failed to send a typing indicator");
+                    }
+                }
+                Some(Command::InstallStickerPack { pack_id, key }) => {
+                    match manager.install_sticker_pack(&pack_id, &key).await {
+                        Ok(()) => {
+                            info!("installed a sticker pack");
+                            send_sticker_packs(&manager, &cache, &mut events).await;
+                        }
+                        Err(error) => {
+                            warn!(%error, "failed to install a sticker pack");
+                            emit(&mut events, Event::Error(format!(
+                                "could not add that sticker pack: {error}"
+                            )))
+                            .await;
+                        }
                     }
                 }
                 Some(Command::DownloadAttachment { thread, timestamp, id }) => {
@@ -1097,11 +1113,58 @@ async fn send_contacts(manager: &RegisteredManager, events: &mut Events) -> Resu
         .groups()
         .await?
         .filter_map(Result::ok)
-        .map(|(master_key, group)| Group {
-            master_key,
-            title: group.title,
-        })
+        .map(|(master_key, group)| Group::from((&master_key, group)))
         .collect();
     emit(events, Event::Contacts { contacts, groups }).await;
     Ok(())
+}
+
+/// Publishes the installed packs, writing each sticker's bytes into the media
+/// cache on the way past. presage keeps them decrypted in its own store, but
+/// nothing can draw bytes -- the renderer needs a path.
+async fn send_sticker_packs(manager: &RegisteredManager, cache: &Cache, events: &mut Events) {
+    let stored = match manager.store().sticker_packs().await {
+        Ok(packs) => packs.filter_map(Result::ok).collect::<Vec<_>>(),
+        Err(error) => {
+            warn!(%error, "failed to list sticker packs");
+            return;
+        }
+    };
+
+    let mut packs = Vec::new();
+    for pack in stored {
+        let mut stickers = Vec::new();
+        for sticker in &pack.manifest.stickers {
+            let path = match cache.sticker(&pack.id, sticker.id).await {
+                Some(path) => Some(path),
+                None => match &sticker.bytes {
+                    Some(bytes) => cache
+                        .put_sticker(&pack.id, sticker.id, bytes)
+                        .await
+                        .inspect_err(|error| warn!(%error, "failed to cache a sticker"))
+                        .ok(),
+                    None => None,
+                },
+            };
+            if let Some(path) = path {
+                stickers.push(data::stickers::Sticker {
+                    id: sticker.id,
+                    emoji: sticker.emoji.clone(),
+                    path,
+                });
+            }
+        }
+        if stickers.is_empty() {
+            continue;
+        }
+        packs.push(data::stickers::Pack {
+            id: pack.id,
+            key: pack.key,
+            title: pack.manifest.title,
+            author: pack.manifest.author,
+            stickers,
+        });
+    }
+
+    emit(events, Event::StickerPacks(packs)).await;
 }

@@ -60,6 +60,8 @@ pub struct LinkPreview {
 #[derive(Debug, Clone)]
 pub struct Sticker {
     pub pack_id: Vec<u8>,
+    /// What installing the pack needs, and the only place it is ever sent.
+    pub pack_key: Option<Vec<u8>>,
     pub sticker_id: u32,
     pub emoji: Option<String>,
     pub image: Option<Attachment>,

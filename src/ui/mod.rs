@@ -10,4 +10,5 @@ pub mod palette;
 pub mod relative;
 pub mod sidebar;
 pub mod switcher;
+pub mod viewer;
 pub mod workspace;

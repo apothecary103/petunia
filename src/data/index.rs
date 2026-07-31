@@ -338,6 +338,11 @@ mod tests {
         Group {
             master_key: [u8::try_from(title.len()).unwrap_or_default(); 32],
             title: title.into(),
+            description: None,
+            members: Vec::new(),
+            invited: 0,
+            requesting: 0,
+            expire_timer: None,
         }
     }
 

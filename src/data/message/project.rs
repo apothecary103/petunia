@@ -270,6 +270,9 @@ fn content(data: &DataMessage) -> Content {
     if let Some(sticker) = &data.sticker {
         return Content::Sticker(Box::new(Sticker {
             pack_id: sticker.pack_id().to_vec(),
+            // Carried so a received sticker can offer its own pack: installing
+            // one needs the key, and it only ever travels with the sticker.
+            pack_key: sticker.pack_key.clone(),
             sticker_id: sticker.sticker_id(),
             emoji: sticker.emoji.clone(),
             image: sticker.data.as_ref().and_then(attachment::from_pointer),

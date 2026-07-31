@@ -28,6 +28,7 @@ pub struct State {
     /// Who is currently typing, per thread. Kept here rather than in `History`
     /// because it is not part of the message stream.
     typing: HashMap<Thread, Vec<(Uuid, Instant)>>,
+    pub sticker_packs: Vec<super::stickers::Pack>,
 }
 
 impl State {
@@ -42,7 +43,27 @@ impl State {
             profiles: HashMap::new(),
             connection: crate::signal::Connection::default(),
             typing: HashMap::new(),
+            sticker_packs: Vec::new(),
         }
+    }
+
+    /// The group behind a thread, for the details panel's member list.
+    pub fn group(&self, thread: &Thread) -> Option<&Group> {
+        let Thread::Group(master_key) = thread else {
+            return None;
+        };
+        self.groups
+            .iter()
+            .find(|group| group.master_key == *master_key)
+    }
+
+    /// What the group calls someone, which is not their profile name: Signal
+    /// lets members pick a short label and an emoji for themselves.
+    pub fn member(&self, thread: &Thread, uuid: Uuid) -> Option<&super::Member> {
+        self.group(thread)?
+            .members
+            .iter()
+            .find(|member| member.uuid == uuid)
     }
 
     pub fn set_typing(&mut self, thread: &Thread, sender: Uuid, started: bool) {
@@ -181,7 +202,10 @@ impl State {
         let name = match thread {
             Thread::Contact(contact) if contact.uuid() == self.aci => "Note to Self".to_string(),
             Thread::Contact(contact) => self.name_of(contact.uuid()),
-            Thread::Group(_) => "Group".into(),
+            Thread::Group(_) => self
+                .group(thread)
+                .map(|group| group.title.clone())
+                .unwrap_or_else(|| "Group".into()),
         };
         self.index.touch(thread, message, || name);
     }

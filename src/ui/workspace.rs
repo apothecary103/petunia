@@ -1,13 +1,14 @@
 use gpui::prelude::*;
-use gpui::{App, Context, Entity, SharedString, Subscription, Window, div, px};
+use gpui::{App, Context, Entity, Focusable as _, SharedString, Subscription, Window, div, px};
 use gpui_component::{ActiveTheme, IconName};
 
-use super::conversation::Conversation;
+use super::conversation::{Conversation, Viewing};
 use super::details::Details;
 use super::kit;
 use super::linking::Linking;
 use super::palette::{Dismissed, Switcher};
 use super::sidebar::Sidebar;
+use super::viewer::{self, Viewer};
 use crate::actions;
 use crate::session::Session;
 use crate::store::{Store, StoreEvent};
@@ -20,6 +21,7 @@ pub const TITLE_BAR: f32 = 40.0;
 /// conversation shell.
 pub struct Workspace {
     store: Entity<Store>,
+    player: crate::audio::Player,
     /// Actions dispatch along the focus path, so the root has to be in it or
     /// nothing bound to a key ever reaches this view.
     focus: gpui::FocusHandle,
@@ -27,6 +29,9 @@ pub struct Workspace {
     session: Session,
     /// Present only while it is up, so nothing renders or listens otherwise.
     switcher: Option<Entity<Switcher>>,
+    /// The full-size picture, over everything else. One at a time, so Escape
+    /// never has to choose.
+    viewer: Option<Entity<Viewer>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -40,7 +45,12 @@ enum Screen {
 }
 
 impl Workspace {
-    pub fn new(store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        store: Entity<Store>,
+        player: crate::audio::Player,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let linking = cx.new(|cx| Linking::new(store.clone(), cx));
 
         let subscriptions = vec![
@@ -50,10 +60,12 @@ impl Workspace {
 
         let mut workspace = Self {
             store: store.clone(),
+            player,
             focus: cx.focus_handle(),
             screen: Screen::Linking(linking),
             session: Session::load(),
             switcher: None,
+            viewer: None,
             _subscriptions: subscriptions,
         };
 
@@ -67,8 +79,17 @@ impl Workspace {
 
     fn enter_main(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let sidebar = cx.new(|cx| Sidebar::new(self.store.clone(), cx));
-        let conversation = cx.new(|cx| Conversation::new(self.store.clone(), window, cx));
+        let conversation = cx.new(|cx| {
+            Conversation::new(self.store.clone(), self.player.clone(), window, cx)
+        });
         let details = cx.new(|cx| Details::new(self.store.clone(), cx));
+
+        // A picture asked for full size opens over everything, so the viewer is
+        // the workspace's rather than the conversation column's.
+        cx.subscribe_in(&conversation, window, |this, _, event: &Viewing, window, cx| {
+            this.view_media(event.0.clone(), window, cx)
+        })
+        .detach();
 
         if let Some(thread) = self.session.active.clone() {
             self.store
@@ -128,6 +149,47 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Opens a picture full size, with everything else in the thread beside it.
+    fn view_media(&mut self, path: std::path::PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let reel = self.thread_media(cx);
+        let viewer = cx.new(|cx| Viewer::new(reel, &path, cx));
+
+        cx.subscribe(&viewer, |this, _, _: &viewer::Dismissed, cx| {
+            this.viewer = None;
+            cx.notify();
+        })
+        .detach();
+        window.focus(&viewer.read(cx).focus_handle(cx), cx);
+
+        self.viewer = Some(viewer);
+        cx.notify();
+    }
+
+    /// Every picture in the loaded page, oldest first, so the rail reads the way
+    /// the conversation does.
+    fn thread_media(&self, cx: &App) -> Vec<std::path::PathBuf> {
+        use crate::data::attachment::{Blob, Kind};
+
+        let store = self.store.read(cx);
+        let Some(history) = store
+            .active()
+            .and_then(|thread| store.state()?.history(thread))
+        else {
+            return Vec::new();
+        };
+
+        history
+            .messages()
+            .iter()
+            .flat_map(|message| message.attachments.iter())
+            .filter(|attached| matches!(attached.kind, Kind::Image { .. } | Kind::Video { .. }))
+            .filter_map(|attached| match &attached.blob {
+                Blob::Cached(path) => Some(path.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn conversation(&self) -> Option<&Entity<Conversation>> {
         match &self.screen {
             Screen::Main { conversation, .. } => Some(conversation),
@@ -138,6 +200,11 @@ impl Workspace {
     /// Escape, in the order a person means it: the overlay first, then whatever
     /// the composer is carrying.
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.viewer.take().is_some() {
+            window.focus(&self.focus, cx);
+            cx.notify();
+            return;
+        }
         if self.switcher.take().is_some() {
             cx.notify();
             return;
@@ -315,6 +382,7 @@ impl Render for Workspace {
             }))
             .child(body)
             .children(self.switcher.clone())
+            .children(self.viewer.clone())
     }
 }
 

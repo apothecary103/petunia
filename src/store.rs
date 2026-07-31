@@ -347,6 +347,7 @@ impl Store {
 
         match event {
             Event::Contacts { contacts, groups } => state.contacts_updated(contacts, groups),
+            Event::StickerPacks(packs) => state.sticker_packs = packs,
             Event::Profile { uuid, name } => state.set_profile(uuid, name),
             Event::Avatar { thread, path } => {
                 state.avatars.insert(thread, path);
