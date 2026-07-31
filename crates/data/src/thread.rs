@@ -50,6 +50,10 @@ impl Thread {
             Self::Group(master_key) => master_key,
         }
     }
+
+    pub fn is_group(&self) -> bool {
+        matches!(self, Self::Group(_))
+    }
 }
 
 impl From<&PresageThread> for Thread {
