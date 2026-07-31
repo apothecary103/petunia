@@ -39,8 +39,6 @@ pub enum Content {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Update {
     ExpireTimer { seconds: u32 },
-    IdentityChanged,
-    Group(String),
 }
 
 #[derive(Debug, Clone)]
@@ -127,8 +125,6 @@ impl Message {
                 "Disappearing messages off".into()
             }
             Content::Update(Update::ExpireTimer { .. }) => "Disappearing messages on".into(),
-            Content::Update(Update::IdentityChanged) => "Safety number changed".into(),
-            Content::Update(Update::Group(change)) => change.clone(),
         }
     }
 
