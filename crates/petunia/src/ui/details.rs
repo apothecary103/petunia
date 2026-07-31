@@ -49,12 +49,9 @@ impl Details {
         let store = self.store.clone();
 
         Hooks {
-            view: {
-                let this = this.clone();
-                std::rc::Rc::new(move |path, _, cx| {
-                    this.update(cx, |_, cx| cx.emit(Viewing(path)));
-                })
-            },
+            view: std::rc::Rc::new(move |path, _, cx| {
+                this.update(cx, |_, cx| cx.emit(Viewing(path)));
+            }),
             inspect: std::rc::Rc::new(move |uuid, _, cx| {
                 store.update(cx, |store, cx| store.inspect(Some(Focus::Person(uuid)), cx));
             }),
@@ -123,7 +120,7 @@ fn person(
                     .flex()
                     .justify_center()
                     .pb_3()
-                    .child(kit::chip(badge, palette.accent, palette)),
+                    .child(kit::chip(badge, palette.accent_for(uuid.as_bytes()), palette)),
             )
         })
         .child(fields(
@@ -305,7 +302,7 @@ fn members(
                                 div()
                                     .truncate()
                                     .text_size(px(palette.typography.ui_size - 3.0))
-                                    .text_color(palette.text_muted)
+                                    .text_color(palette.accent_for(uuid.as_bytes()))
                                     .child(SharedString::from(badge)),
                             )
                         }),

@@ -312,8 +312,13 @@ impl Render for Composer {
         let palette = cx.palette().clone();
         // Read out of the store and let the borrow go: everything below needs
         // the context mutably to build its listeners.
-        let (title, typing, packs) = {
+        let (padding_x, title, typing, packs) = {
             let store = self.store.read(cx);
+            // The same padding the message list uses. Both are capped at the
+            // reading measure and centred, so a card with a padding of its own
+            // sits a few pixels off the column it belongs to -- at any density
+            // or scale other than the default, visibly.
+            let padding_x = store.config.messages.spacing().padding_x;
             let title = store
                 .active()
                 .zip(store.state())
@@ -333,7 +338,7 @@ impl Render for Composer {
                     .unwrap_or_default(),
                 false => Vec::new(),
             };
-            (title, typing, (packs, query))
+            (padding_x, title, typing, (packs, query))
         };
         let (packs, query) = packs;
 
@@ -420,7 +425,7 @@ impl Render for Composer {
             .flex()
             .flex_col()
             .gap_1p5()
-            .px_4()
+            .px(px(padding_x))
             .pb_4()
             .pt_2()
             .on_action(

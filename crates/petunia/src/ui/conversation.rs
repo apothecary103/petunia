@@ -1,7 +1,8 @@
 use chrono::{Local, NaiveDate};
 use gpui::prelude::*;
 use gpui::{
-    Context, Entity, ListAlignment, ListState, MouseButton, SharedString, Window, div, list, px,
+    Context, Entity, Hsla, ListAlignment, ListState, MouseButton, SharedString, Window, div, list,
+    px,
 };
 use uuid::Uuid;
 
@@ -724,7 +725,7 @@ fn run_block(
                 .on_mouse_down(MouseButton::Right, menu.clone())
                 .child(SharedString::from(name.clone())),
         )
-        .children(labels(member, palette, spacing))
+        .children(labels(member, tint, palette, spacing))
         .when_some(
             first.filter(|_| timestamps != Timestamps::Never),
             |this, message| {
@@ -785,7 +786,10 @@ fn run_block(
 /// What the group says about whoever is talking: the label they picked for
 /// themselves, then the role the group gave them. Empty outside a group, and
 /// empty for the ordinary members of one, so a chip here always means something.
-fn labels(member: Option<&Member>, palette: &Theme, spacing: Spacing) -> Vec<gpui::Div> {
+/// The chips beside a run's header. `tint` is the sender's own colour, because a
+/// label someone picked for themselves belongs to them the way their name does;
+/// the role is the group's word rather than theirs, and stays neutral.
+fn labels(member: Option<&Member>, tint: Hsla, palette: &Theme, spacing: Spacing) -> Vec<gpui::Div> {
     let Some(member) = member else {
         return Vec::new();
     };
@@ -793,7 +797,7 @@ fn labels(member: Option<&Member>, palette: &Theme, spacing: Spacing) -> Vec<gpu
 
     member
         .badge()
-        .map(|badge| kit::chip_sized(badge, palette.accent, size))
+        .map(|badge| kit::chip_sized(badge, tint, size))
         .into_iter()
         .chain(
             member

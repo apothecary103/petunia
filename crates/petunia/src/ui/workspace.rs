@@ -26,6 +26,16 @@ use crate::theme::ActivePalette;
 /// Tall enough to clear the traffic lights, which macOS draws at a fixed size.
 pub const TITLE_BAR: f32 = 40.0;
 
+/// Wide enough to clear them too, for whatever is leftmost when the sidebar is
+/// not there to hold them.
+const TRAFFIC_LIGHTS: f32 = 84.0;
+
+/// The narrowest the conversation column may be squeezed to before a side panel
+/// gives way. Below this the avatar gutter and the reading column stop being a
+/// column, and the window minimum is narrower than the two panels put together
+/// -- so without this, dragging the window small leaves nothing between them.
+const MIN_CONVERSATION: f32 = 420.0;
+
 /// The root view. Shows the linking screen until an account exists, then the
 /// conversation shell.
 pub struct Workspace {
@@ -56,6 +66,14 @@ pub struct Workspace {
     _subscriptions: Vec<Subscription>,
 }
 
+/// Which side panels this frame draws. Not the same as what the session asks
+/// for: a window too narrow to hold them lends their width to the conversation.
+#[derive(Debug, Clone, Copy)]
+struct Panels {
+    sidebar: bool,
+    details: bool,
+}
+
 enum Screen {
     Linking(Entity<Linking>),
     Main {
@@ -77,6 +95,13 @@ impl Workspace {
         let subscriptions = vec![
             cx.observe(&store, |_, _, cx| cx.notify()),
             cx.subscribe_in(&store, window, Self::on_store_event),
+            // Remembered as it happens, written once on the way out: a drag
+            // reports every frame, and the session file is not a log.
+            cx.observe_window_bounds(window, |this, window, _| this.remember_size(window)),
+            cx.on_app_quit(|this, _| {
+                this.session.save();
+                async {}
+            }),
         ];
 
         let notices = cx.new(|_| Notices::default());
@@ -336,7 +361,6 @@ impl Workspace {
 
         let delete: menu::thread::Delete = {
             let this = cx.entity();
-            let thread = thread.clone();
             std::rc::Rc::new(move |window, cx| {
                 let thread = thread.clone();
                 this.update(cx, |this, cx| this.confirm_delete(thread, window, cx));
@@ -613,6 +637,48 @@ impl Workspace {
         conversation.update(cx, |conversation, cx| act(conversation, window, cx));
     }
 
+    /// Keeps the size the window would be restored to, which is what it should
+    /// open at next time. Every `WindowBounds` variant carries that size, so a
+    /// window quit while maximised comes back the size it was before.
+    fn remember_size(&mut self, window: &Window) {
+        let bounds = match window.window_bounds() {
+            gpui::WindowBounds::Windowed(bounds)
+            | gpui::WindowBounds::Maximized(bounds)
+            | gpui::WindowBounds::Fullscreen(bounds) => bounds,
+        };
+        self.session.window = crate::session::WindowSize {
+            width: f32::from(bounds.size.width),
+            height: f32::from(bounds.size.height),
+        };
+    }
+
+    /// Which panels are actually drawn. The session records what you asked for;
+    /// this is what fits, and the toggles keep meaning what you asked for so a
+    /// window dragged wide again brings the panels back with it.
+    ///
+    /// The details panel gives way first, and only then the sidebar: the list is
+    /// how you get anywhere, and details without a list to leave by is worse
+    /// than no details.
+    fn panels(&self, window: &Window) -> Panels {
+        let width = f32::from(window.viewport_size().width);
+        let mut shown = Panels {
+            sidebar: self.session.sidebar.open,
+            details: self.session.details.open,
+        };
+        let sidebar = match shown.sidebar {
+            true => self.session.sidebar.width,
+            false => 0.0,
+        };
+
+        if shown.details && width - sidebar - self.session.details.width < MIN_CONVERSATION {
+            shown.details = false;
+        }
+        if shown.sidebar && width - sidebar < MIN_CONVERSATION {
+            shown.sidebar = false;
+        }
+        shown
+    }
+
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         self.session.sidebar.open = !self.session.sidebar.open;
         self.session.save();
@@ -652,6 +718,7 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = cx.palette().clone();
         let border = cx.theme().border;
+        let panels = self.panels(window);
 
         let title = self.title(cx);
         if title != self.titled {
@@ -686,7 +753,7 @@ impl Render for Workspace {
                 div()
                     .size_full()
                     .flex()
-                    .when(self.session.sidebar.open, |this| {
+                    .when(panels.sidebar, |this| {
                         this.child(
                             div()
                                 .w(px(self.session.sidebar.width))
@@ -703,10 +770,10 @@ impl Render for Workspace {
                             .flex()
                             .flex_col()
                             .bg(palette.background)
-                            .child(self.header(&title, &palette, cx))
+                            .child(self.header(&title, panels, &palette, cx))
                             .child(div().flex_1().min_h_0().child(conversation.clone())),
                     )
-                    .when(self.session.details.open, |this| {
+                    .when(panels.details, |this| {
                         this.child(
                             div()
                                 .w(px(self.session.details.width))
@@ -723,7 +790,7 @@ impl Render for Workspace {
 
         let translucent = self.store.read(cx).config.sidebar.blurred();
         if translucent {
-            let showing = self.session.sidebar.open && matches!(self.screen, Screen::Main { .. });
+            let showing = panels.sidebar && matches!(self.screen, Screen::Main { .. });
             super::vibrancy::sidebar(self.session.sidebar.width, showing, palette.is_light());
         }
 
@@ -824,6 +891,7 @@ impl Workspace {
     fn header(
         &self,
         title: &str,
+        panels: Panels,
         palette: &petunia_config::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -835,12 +903,12 @@ impl Workspace {
             .gap_2()
             .px_3()
             // Clears the traffic lights when the sidebar is not there to.
-            .when(!self.session.sidebar.open, |this| this.pl(px(84.0)))
+            .when(!panels.sidebar, |this| this.pl(px(TRAFFIC_LIGHTS)))
             .h(px(TITLE_BAR))
             .flex_none()
             .child(kit::icon_button(
                 "toggle-sidebar",
-                if self.session.sidebar.open {
+                if panels.sidebar {
                     IconName::PanelLeftClose
                 } else {
                     IconName::PanelLeftOpen
@@ -859,7 +927,7 @@ impl Workspace {
             )
             .child(kit::icon_button(
                 "toggle-details",
-                if self.session.details.open {
+                if panels.details {
                     IconName::PanelRightClose
                 } else {
                     IconName::PanelRightOpen

@@ -173,7 +173,7 @@ mod tests {
             master_key: [0; 32],
             title: "Team".into(),
             description: None,
-            members: vec![zoe.clone(), alice.clone(), admin.clone()],
+            members: vec![zoe, alice, admin],
             invited: 0,
             requesting: 0,
             expire_timer: None,

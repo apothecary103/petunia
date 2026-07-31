@@ -268,21 +268,20 @@ fn prose(
         (to > from).then(|| {
             let text = body[from..to].trim_matches('\n');
             (!text.is_empty()).then(|| {
+                // Two shifts in one pass: out of the whole body and past the
+                // newlines the trim took off the front. A range that started
+                // inside those is not in this paragraph any more.
+                let offset = from + body[from..to].find(text).unwrap_or(0);
                 let shifted: Vec<Range> = ranges
                     .iter()
                     .filter(|range| range.start >= from && range.end() <= to)
-                    .map(|range| Range {
-                        start: range.start - from,
-                        ..*range
+                    .filter_map(|range| {
+                        range.start.checked_sub(offset).map(|start| Range {
+                            start,
+                            ..*range
+                        })
                     })
                     .collect();
-                let offset = body[from..to].find(text).unwrap_or(0);
-                let shifted = shifted
-                    .into_iter()
-                    .filter_map(|range| {
-                        range.start.checked_sub(offset).map(|start| Range { start, ..range })
-                    })
-                    .collect::<Vec<_>>();
 
                 div()
                     .text_size(px(size))

@@ -28,6 +28,15 @@ pub const RADIUS_LG: f32 = 12.0;
 pub const EMPHASIS: gpui::FontWeight = gpui::FontWeight::SEMIBOLD;
 pub const STRONG: gpui::FontWeight = gpui::FontWeight::BOLD;
 
+/// How far a row's content sits from the edge of the column it is in: the list's
+/// own padding, the row's, and the outline every row keeps so selecting one never
+/// shifts it. Anything else pinned to that column lines up with this rather than
+/// picking a padding of its own and landing a few pixels out.
+pub const INSET: f32 = LIST_PADDING + ROW_PADDING + 1.0;
+/// What a column of rows keeps clear at its own edges.
+pub const LIST_PADDING: f32 = 10.0;
+const ROW_PADDING: f32 = 8.0;
+
 /// A row that can be picked: quiet by default, filled when it is the one you
 /// are on, outlined so selecting it never shifts the layout.
 pub fn row(id: impl Into<gpui::ElementId>, selected: bool, theme: &Theme) -> Stateful<Div> {
@@ -36,7 +45,7 @@ pub fn row(id: impl Into<gpui::ElementId>, selected: bool, theme: &Theme) -> Sta
         .flex()
         .items_start()
         .gap_2p5()
-        .px_2()
+        .px(px(ROW_PADDING))
         .py_2()
         .rounded(px(RADIUS))
         .border_1()
@@ -65,7 +74,10 @@ pub fn heading(icon: Option<IconName>, label: impl Into<SharedString>, theme: &T
         .flex()
         .items_center()
         .gap_1p5()
-        .px_2()
+        // A heading is not a row, so it has no outline to sit inside. The extra
+        // pixel on the left is what lines it up with the rows under it.
+        .pl(px(ROW_PADDING + 1.0))
+        .pr(px(ROW_PADDING))
         .pt_3()
         .pb_1p5()
         .when_some(icon, |this, icon| {

@@ -211,7 +211,7 @@ impl Settings {
                                 let selected = name == chosen;
                                 let wanted = name.clone();
                                 chip(
-                                    name.clone(),
+                                    name,
                                     selected,
                                     palette,
                                     cx.listener(move |this: &mut Self, _, _, cx| {

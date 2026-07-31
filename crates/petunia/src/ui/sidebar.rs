@@ -46,7 +46,12 @@ impl Render for Sidebar {
         let now = chrono::Utc::now().timestamp_millis() as u64;
         let sections = state.index.sections();
 
-        let mut list = div().flex().flex_col().gap_4().px_2p5().pb_3();
+        let mut list = div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .px(px(kit::LIST_PADDING))
+            .pb_3();
 
         for section in sections {
             let (icon, label) = match &section {
@@ -119,23 +124,33 @@ impl Render for Sidebar {
         }
 
         let body = div()
-            .id("conversations")
             .flex_1()
             .min_h_0()
-            // The window's traffic lights float over the top of this column.
-            .pt(px(super::workspace::TITLE_BAR))
-            .overflow_y_scroll()
-            .child(if state.index.is_empty() {
+            .flex()
+            .flex_col()
+            // The window's traffic lights float over the top of this column, so
+            // the band they sit in is its own element rather than padding on the
+            // scroll area -- padding scrolls away with the content, which slid
+            // the first row up underneath them.
+            .child(div().h(px(super::workspace::TITLE_BAR)).flex_none())
+            .child(
                 div()
-                    .px_4()
-                    .py_6()
-                    .text_size(px(palette.typography.ui_size - 1.0))
-                    .text_color(palette.text_muted)
-                    .child("Waiting for Signal to sync your conversations…")
-                    .into_any_element()
-            } else {
-                list.into_any_element()
-            });
+                    .id("conversations")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(if state.index.is_empty() {
+                        div()
+                            .px(px(kit::INSET))
+                            .py_6()
+                            .text_size(px(palette.typography.ui_size - 1.0))
+                            .text_color(palette.text_muted)
+                            .child("Waiting for Signal to sync your conversations…")
+                            .into_any_element()
+                    } else {
+                        list.into_any_element()
+                    }),
+            );
 
         shell(
             &palette,
@@ -160,15 +175,23 @@ fn identity(
     palette: &Theme,
     on_settings: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> impl IntoElement {
+    let name = state.own_name();
+
     div()
         .flex()
         .items_center()
+        .flex_none()
         .gap_2p5()
-        .px_3p5()
+        // Lined up with the rows above rather than padded to taste, so the
+        // column has one left edge.
+        .px(px(kit::INSET))
         .py_3()
+        // The list scrolls up to here, so there has to be something to stop at.
+        .border_t_1()
+        .border_color(palette.border)
         .child(avatar(
             state.avatar_for(state.aci),
-            &state.own_name(),
+            &name,
             state.aci.as_bytes(),
             30.0,
             palette,
@@ -184,7 +207,7 @@ fn identity(
                         .font_weight(kit::EMPHASIS)
                         .text_color(palette.text)
                         .truncate()
-                        .child(SharedString::from(state.own_name())),
+                        .child(SharedString::from(name)),
                 )
                 .child(connection(state.connection, palette)),
         )
@@ -372,6 +395,14 @@ fn badge(unread: u32, mentions: u32, muted: bool, palette: &Theme) -> Div {
     kit::chip(unread.to_string(), tint, palette)
 }
 
+/// One allocation, not one per byte. The list is a scrolling `div`, so every row
+/// is rebuilt on every frame of every flick, and a group's seed is 32 bytes.
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    use std::fmt::Write;
+
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
 }
