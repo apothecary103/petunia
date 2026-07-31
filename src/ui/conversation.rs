@@ -15,10 +15,16 @@ use crate::signal::Command;
 use crate::store::{Focus, Store};
 use crate::theme::ActivePalette;
 
+/// Asks the worker for an attachment the auto-download policy skipped.
+pub type Download =
+    std::rc::Rc<dyn Fn(u64, &crate::data::attachment::Id, &mut Window, &mut gpui::App)>;
+
 /// The focused conversation: its message list, and in the next phase the
 /// composer beneath it.
 pub struct Conversation {
     store: Entity<Store>,
+    /// Whether the formatting toolbar is showing.
+    formatting: bool,
     scroll: ScrollHandle,
     /// The thread the scroll position belongs to, so switching conversations
     /// starts at the newest message rather than wherever the last one was.
@@ -32,6 +38,7 @@ impl Conversation {
             store,
             scroll: ScrollHandle::new(),
             anchored: None,
+            formatting: false,
         }
     }
 
@@ -93,9 +100,29 @@ impl Render for Conversation {
                         placeholder: format!("Message {title}…"),
                         typing: None,
                         palette: &palette,
+                        formatting: self.formatting,
+                        on_formatting: Box::new(cx.listener(|this: &mut Self, _, _, cx| {
+                            this.formatting = !this.formatting;
+                            cx.notify();
+                        })),
                     }
                     .render(),
                 );
+        };
+
+        let on_download: Download = {
+            let store = self.store.clone();
+            let thread = thread.clone();
+            std::rc::Rc::new(move |timestamp, id, _window, cx| {
+                store.update(cx, |store, cx| {
+                    store.send(Command::DownloadAttachment {
+                        thread: thread.clone(),
+                        timestamp,
+                        id: id.clone(),
+                    });
+                    cx.notify();
+                });
+            })
         };
 
         let entries = group::entries(history.messages(), history.first_unread(), group_within_ms);
@@ -162,6 +189,7 @@ impl Render for Conversation {
                         timestamps,
                         max_image,
                         on_sender,
+                        on_download.clone(),
                     )
                     .into_any_element()
                 }
@@ -196,6 +224,11 @@ impl Render for Conversation {
                     placeholder: format!("Message {title}…"),
                     typing,
                     palette: &palette,
+                    formatting: self.formatting,
+                    on_formatting: Box::new(cx.listener(|this: &mut Self, _, _, cx| {
+                        this.formatting = !this.formatting;
+                        cx.notify();
+                    })),
                 }
                 .render(),
             )
@@ -235,6 +268,7 @@ fn run_block(
     timestamps: Timestamps,
     max_image: (f32, f32),
     on_sender: std::rc::Rc<dyn Fn(&gpui::MouseDownEvent, &mut Window, &mut gpui::App)>,
+    on_download: Download,
 ) -> gpui::Div {
     let name = state.sender_name(run.sender);
     let tint = palette.accent_for(run.sender.as_bytes());
@@ -273,6 +307,7 @@ fn run_block(
             theme: palette,
             spacing,
             max_image,
+            on_download: on_download.clone(),
         }
         .render()
     });

@@ -1,13 +1,17 @@
 use gpui::prelude::*;
-use gpui::{AnyElement, Div, MouseButton, SharedString, div, img, px};
+use gpui::{
+    AnyElement, Div, FontStyle, FontWeight, HighlightStyle, MouseButton, SharedString, StyledText,
+    div, img, px,
+};
 use gpui_component::IconName;
 
 use crate::config::Theme;
 use crate::config::messages::Spacing;
 use crate::data::attachment::{Attachment, Blob, Kind};
-use crate::data::message::{Content, Quote, Reaction, Update};
+use crate::data::message::{Content, Quote, Range, Reaction, Status, Update};
 use crate::data::{Message, State};
 use crate::ui::kit;
+use super::format;
 
 /// Everything one message shows: its body, whatever it carries, and whatever
 /// was done to it afterwards.
@@ -17,6 +21,8 @@ pub struct Body<'a> {
     pub theme: &'a Theme,
     pub spacing: Spacing,
     pub max_image: (f32, f32),
+    /// Asks the worker for an attachment the auto-download policy skipped.
+    pub on_download: crate::ui::conversation::Download,
 }
 
 impl Body<'_> {
@@ -33,14 +39,13 @@ impl Body<'_> {
             });
 
         block = match &self.message.content {
-            Content::Text { body, .. } if !body.is_empty() => block.child(
+            Content::Text { body, ranges } => block.child(
                 div()
                     .text_size(px(spacing.body))
                     .line_height(px(spacing.body * theme.typography.line_height))
                     .text_color(theme.text)
-                    .child(SharedString::from(body.clone())),
+                    .child(styled(body, ranges, self.state, theme)),
             ),
-            Content::Text { .. } => block,
             Content::Sticker(sticker) => block.child(self.sticker(sticker.image.as_ref())),
             Content::Deleted => block.child(
                 div()
@@ -63,6 +68,13 @@ impl Body<'_> {
 
         if !self.message.reactions.is_empty() {
             block = block.child(reactions(&self.message.reactions, self.state, theme));
+        }
+
+        // Only our own messages have a delivery state, and only ours show one.
+        if self.message.sender() == self.state.aci
+            && let Some(status) = self.message.status
+        {
+            block = block.child(receipt(status, self.message.edited.is_some(), theme));
         }
 
         block
@@ -116,9 +128,130 @@ impl Body<'_> {
                 theme,
             )
             .into_any_element(),
-            (_, Blob::Missing) => file_chip(attachment, None, theme).into_any_element(),
+            (_, Blob::Missing) => {
+                let id = attachment.id.clone();
+                let timestamp = self.message.timestamp();
+                let ask = self.on_download.clone();
+                file_chip(attachment, None, theme)
+                    .id(SharedString::from(format!("get-{}", id.as_str())))
+                    .cursor_pointer()
+                    .hover(|this| this.border_color(theme.border_focus))
+                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                        ask(timestamp, &id, window, cx)
+                    })
+                    .into_any_element()
+            }
         }
     }
+}
+
+/// How far a message of ours has got. Small and dim: it matters when you look
+/// for it and never otherwise.
+fn receipt(status: Status, edited: bool, theme: &Theme) -> Div {
+    let (label, tint) = match status {
+        Status::Sending => ("Sending…", theme.text_muted),
+        Status::Failed => ("Failed to send", theme.danger),
+        Status::Sent => ("Sent", theme.text_muted),
+        Status::Delivered => ("Delivered", theme.text_muted),
+        Status::Read => ("Read", theme.text_dim),
+        Status::Viewed => ("Viewed", theme.text_dim),
+    };
+
+    div()
+        .flex()
+        .items_center()
+        .gap_1p5()
+        .text_size(px(theme.typography.ui_size - 3.0))
+        .text_color(tint)
+        .when(edited, |this| {
+            this.child(
+                div()
+                    .text_color(theme.text_muted)
+                    .child("edited")
+                    .into_any_element(),
+            )
+        })
+        .child(label)
+}
+
+/// Renders the body with Signal's formatting applied. Mentions carry a
+/// placeholder in the body, so the name is substituted before highlighting and
+/// the offsets are recomputed against the text actually drawn.
+fn styled(body: &str, ranges: &[Range], state: &State, theme: &Theme) -> StyledText {
+    let segments = format::segments(body, ranges);
+    let mut text = String::new();
+    let mut highlights = Vec::new();
+
+    for segment in segments {
+        let styles = segment.styles;
+        let start = text.len();
+
+        match (styles.spoiler, styles.mention) {
+            // A hidden spoiler must not leak its text through glyph widths, so
+            // it is replaced rather than merely recoloured.
+            (true, _) => {
+                let width = body[segment.start..segment.end].chars().count();
+                text.push_str(&"█".repeat(width.clamp(1, 40)));
+            }
+            (false, Some(uuid)) => {
+                text.push('@');
+                text.push_str(&state.sender_name(uuid));
+            }
+            (false, None) => text.push_str(&body[segment.start..segment.end]),
+        }
+
+        if let Some(highlight) = highlight(styles, theme) {
+            highlights.push((start..text.len(), highlight));
+        }
+    }
+
+    StyledText::new(text).with_highlights(highlights)
+}
+
+fn highlight(styles: format::Styles, theme: &Theme) -> Option<HighlightStyle> {
+    let mut highlight = HighlightStyle::default();
+    let mut touched = false;
+
+    if styles.bold {
+        highlight.font_weight = Some(FontWeight::BOLD);
+        touched = true;
+    }
+    if styles.italic {
+        highlight.font_style = Some(FontStyle::Italic);
+        touched = true;
+    }
+    if styles.strikethrough {
+        highlight.strikethrough = Some(gpui::StrikethroughStyle {
+            thickness: px(1.0),
+            color: Some(theme.text_dim),
+        });
+        touched = true;
+    }
+    if styles.monospace {
+        highlight.background_color = Some(theme.sunken);
+        touched = true;
+    }
+    if styles.spoiler {
+        // Same colour as the block it draws, so nothing shows through until a
+        // reveal replaces the text.
+        highlight.color = Some(theme.text_muted);
+        highlight.background_color = Some(theme.text_muted);
+        touched = true;
+    } else if styles.mention.is_some() {
+        highlight.color = Some(theme.accent);
+        highlight.background_color = Some(kit::tinted(theme.accent));
+        touched = true;
+    } else if styles.link {
+        highlight.color = Some(theme.accent);
+        highlight.underline = Some(gpui::UnderlineStyle {
+            thickness: px(1.0),
+            color: Some(theme.accent),
+            wavy: false,
+        });
+        touched = true;
+    }
+
+    touched.then_some(highlight)
 }
 
 /// Scales an image down to fit inside the box, keeping its aspect ratio and
@@ -187,13 +320,14 @@ fn chip_shell(theme: &Theme) -> Div {
         .border_color(theme.border)
 }
 
-fn file_chip(attachment: &Attachment, cached: Option<String>, theme: &Theme) -> Div {
+fn file_chip(attachment: &Attachment, cached: Option<String>, theme: &Theme) -> gpui::Stateful<Div> {
     let detail = match cached {
         Some(_) => size(attachment.size),
         None => format!("{} · tap to download", size(attachment.size)),
     };
 
     chip_shell(theme)
+        .id("chip")
         .child(kit::icon(icon_for(&attachment.kind), 16.0, theme.text_dim))
         .child(
             div()

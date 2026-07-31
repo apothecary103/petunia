@@ -104,6 +104,8 @@ impl Render for Sidebar {
             .id("conversations")
             .flex_1()
             .min_h_0()
+            // The window's traffic lights float over the top of this column.
+            .pt(px(super::workspace::TITLE_BAR))
             .overflow_y_scroll()
             .child(if state.index.is_empty() {
                 div()

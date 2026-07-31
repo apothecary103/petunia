@@ -12,6 +12,9 @@ use crate::session::Session;
 use crate::store::{Store, StoreEvent};
 use crate::theme::ActivePalette;
 
+/// Tall enough to clear the traffic lights, which macOS draws at a fixed size.
+pub const TITLE_BAR: f32 = 40.0;
+
 /// The root view. Shows the linking screen until an account exists, then the
 /// conversation shell.
 pub struct Workspace {
@@ -150,9 +153,13 @@ impl Render for Workspace {
                     })
                     .unwrap_or_default();
 
-                let panels = div()
-                    .flex_1()
-                    .min_h_0()
+                // The sidebar runs the full height of the window and the
+                // traffic lights float over its own top padding, so the header
+                // belongs to the conversation column rather than spanning
+                // everything. A full-width strip left a dead band above the
+                // sidebar, which is what made the titlebar look wrong.
+                div()
+                    .size_full()
                     .flex()
                     .when(self.session.sidebar.open, |this| {
                         this.child(
@@ -164,7 +171,15 @@ impl Render for Workspace {
                                 .child(sidebar.clone()),
                         )
                     })
-                    .child(div().flex_1().min_w_0().child(conversation.clone()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(self.header(&title, &palette, cx))
+                            .child(div().flex_1().min_h_0().child(conversation.clone())),
+                    )
                     .when(self.session.details.open, |this| {
                         this.child(
                             div()
@@ -173,16 +188,9 @@ impl Render for Workspace {
                                 .border_l_1()
                                 .border_color(border)
                                 .bg(palette.surface)
-                                .p_4()
                                 .child(details.clone()),
                         )
-                    });
-
-                div()
-                    .size_full()
-                    .flex().flex_col()
-                    .child(self.header(&title, &palette, cx))
-                    .child(panels)
+                    })
                     .into_any_element()
             }
         };
@@ -210,18 +218,24 @@ impl Workspace {
         palette: &crate::config::Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        // No border underneath: the reference separates the columns, not the
+        // strip, and a rule here cuts the window in half.
         div()
             .flex()
             .items_center()
             .gap_2()
-            // Clears the traffic lights, which float over this strip.
-            .pl(px(84.0))
-            .pr_3()
-            .h(px(44.0))
+            .px_3()
+            // Clears the traffic lights when the sidebar is not there to.
+            .when(!self.session.sidebar.open, |this| this.pl(px(84.0)))
+            .h(px(TITLE_BAR))
             .flex_none()
             .child(kit::icon_button(
                 "toggle-sidebar",
-                IconName::PanelLeft,
+                if self.session.sidebar.open {
+                    IconName::PanelLeftClose
+                } else {
+                    IconName::PanelLeftOpen
+                },
                 palette,
                 cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)),
             ))
@@ -229,19 +243,18 @@ impl Workspace {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .flex()
-                    .justify_center()
-                    .child(
-                        div()
-                            .truncate()
-                            .text_size(px(palette.typography.ui_size))
-                            .text_color(palette.text_dim)
-                            .child(SharedString::from(title.to_owned())),
-                    ),
+                    .truncate()
+                    .text_size(px(palette.typography.ui_size))
+                    .text_color(palette.text)
+                    .child(SharedString::from(title.to_owned())),
             )
             .child(kit::icon_button(
                 "toggle-details",
-                IconName::PanelRight,
+                if self.session.details.open {
+                    IconName::PanelRightClose
+                } else {
+                    IconName::PanelRightOpen
+                },
                 palette,
                 cx.listener(|this, _, _, cx| this.toggle_details(cx)),
             ))
