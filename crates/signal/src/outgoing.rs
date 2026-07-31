@@ -175,18 +175,16 @@ pub fn typing(thread: &Thread, started: bool, timestamp: u64) -> TypingMessage {
         action: Some(action as i32),
         group_id: match thread {
             Thread::Contact(_) => None,
-            Thread::Group(master_key) => group_identifier(master_key),
+            Thread::Group(master_key) => Some(group_identifier(master_key)),
         },
     }
 }
 
-fn group_identifier(master_key: &[u8; 32]) -> Option<Vec<u8>> {
+fn group_identifier(master_key: &[u8; 32]) -> Vec<u8> {
     let key = GroupMasterKey::new(*master_key);
-    Some(
-        GroupSecretParams::derive_from_master_key(key)
-            .get_group_identifier()
-            .to_vec(),
-    )
+    GroupSecretParams::derive_from_master_key(key)
+        .get_group_identifier()
+        .to_vec()
 }
 
 /// Wraps an outgoing message as presage would have stored it had it come off

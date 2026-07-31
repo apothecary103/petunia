@@ -698,7 +698,11 @@ impl Workspace {
             .store
             .read(cx)
             .state()
-            .map(|state| state.index.total_unread())
+            .map(|state| {
+                state
+                    .index
+                    .total_unread(chrono::Utc::now().timestamp_millis() as u64)
+            })
             .unwrap_or(0);
 
         match unread {

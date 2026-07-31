@@ -4,7 +4,8 @@ Petunia reads and writes a real conversation. The sidebar, the message list, the
 composer, the media viewer, playback and the details panel are all live against
 a linked account.
 
-380 tests pass and `cargo clippy --all-targets` is clean. `cargo test`, and
+385 tests pass and `cargo clippy --workspace --all-targets` is clean. Inside
+`nix develop` (or with direnv, just `cd`): `cargo test`, and
 `cargo build && ./target/debug/petunia` to run it.
 
 ## What works
@@ -46,9 +47,12 @@ a linked account.
 
 Roughly in the order it would be worth doing.
 
-- **`ListState`.** The message list is still a plain `overflow_y_scroll` div.
-  Paging older messages corrects the scroll a frame later, which works but will
-  flicker on a slow frame; `gpui::list()` splicing at index 0 would be exact.
+- **The sidebar is still a plain `overflow_y_scroll` div,** so it rebuilds every
+  row on every frame of every flick — the trap the message list was converted off
+  in favour of `gpui::list()`. It is bounded by the conversation count rather than
+  by the history, which is why it has not bitten yet, but a row still builds a
+  preview summary and a relative time per frame. Flattening the sections into
+  rows the way `ui::message::group` does would let it use `list()` too.
 - **Spoiler reveal and link hit-testing.** Spoilers render as blocks and URLs
   are styled, but only whole-message clicks are routed. Both need per-span
   hit-testing (`InteractiveText`), with reveal state keyed by message timestamp
@@ -59,6 +63,10 @@ Roughly in the order it would be worth doing.
 - **Notifications.** `[notifications]` is settable and nothing reads it, which
   the settings window says out loud rather than pretending otherwise.
 - **Per-thread drafts** — body and ranges only, never attachment paths.
+- **Draggable panel edges.** `session.json` carries a width for the sidebar and
+  the details panel, and nothing but a hand edit can change either. A narrow
+  window already lends their width back to the conversation; being able to set it
+  is the other half.
 - **Jump to a quoted message.** The quote block is deliberately not clickable:
   a target outside the loaded page needs a `Command::LoadAround` that does not
   exist, and a control that silently does nothing is worse than none.

@@ -250,15 +250,13 @@ async fn collect(
     entries: &mut Vec<(std::time::SystemTime, PathBuf, u64)>,
     total: &mut u64,
 ) -> Result<(), Error> {
-    let mut shards = match fs::read_dir(dir).await {
-        Ok(shards) => shards,
-        Err(_) => return Ok(()),
+    let Ok(mut shards) = fs::read_dir(dir).await else {
+        return Ok(());
     };
 
     while let Some(shard) = shards.next_entry().await? {
-        let mut files = match fs::read_dir(shard.path()).await {
-            Ok(files) => files,
-            Err(_) => continue,
+        let Ok(mut files) = fs::read_dir(shard.path()).await else {
+            continue;
         };
         while let Some(file) = files.next_entry().await? {
             let Ok(metadata) = file.metadata().await else {

@@ -44,8 +44,6 @@ impl Render for Sidebar {
 
         let show_preview = store.config.sidebar.show_preview;
         let now = chrono::Utc::now().timestamp_millis() as u64;
-        let sections = state.index.sections();
-
         let mut list = div()
             .flex()
             .flex_col()
@@ -53,7 +51,7 @@ impl Render for Sidebar {
             .px(px(kit::LIST_PADDING))
             .pb_3();
 
-        for section in sections {
+        for (section, entries) in state.index.grouped() {
             let (icon, label) = match &section {
                 Section::Pinned => (Some(IconName::StarFill), "Pinned".to_string()),
                 Section::Requests => (Some(IconName::Inbox), "Requests".to_string()),
@@ -61,16 +59,6 @@ impl Render for Sidebar {
                 Section::Archived => (Some(IconName::FolderClosed), "Archived".to_string()),
                 Section::Folder(name) => (Some(IconName::Folder), name.clone()),
             };
-            // A contact sync lists everyone you have ever known; only threads
-            // with something in them belong in a conversation list.
-            let entries: Vec<_> = state
-                .index
-                .section(section.clone())
-                .filter(|entry| entry.started())
-                .collect();
-            if entries.is_empty() {
-                continue;
-            }
 
             let rows = entries.into_iter().map(|entry| {
                 let thread = entry.thread.clone();

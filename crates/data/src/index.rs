@@ -11,7 +11,10 @@ pub enum Sort {
     Name,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Declared in the order the sidebar draws them, which is what `Ord` then means:
+/// the fixed sections in place, folders between the request queue and the rest,
+/// and folders among themselves by name.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Section {
     Pinned,
@@ -117,27 +120,26 @@ impl Index {
         self.get(thread).map(|entry| entry.name.as_str())
     }
 
-    pub fn section(&self, section: Section) -> impl Iterator<Item = &Entry> {
-        self.entries
-            .iter()
-            .filter(move |entry| entry.section() == section)
-    }
+    /// The sidebar, section by section, in the order it is drawn: the fixed ones
+    /// with the folders in between, each carrying the conversations that belong
+    /// to it and nothing else. Empty sections are left out -- an empty folder is
+    /// a name with nothing under it.
+    ///
+    /// One pass. Asking for the sections and then for each section's contents
+    /// walked every entry once per section, on every frame of every scroll,
+    /// because the list is a scrolling `div` and rebuilds all of itself.
+    pub fn grouped(&self) -> Vec<(Section, Vec<&Entry>)> {
+        let mut sections: Vec<(Section, Vec<&Entry>)> = Vec::new();
 
-    /// The sections to draw, in order, with folders in between the fixed ones.
-    /// Only the folders that have something in them: an empty folder is a name
-    /// with nothing to show.
-    pub fn sections(&self) -> Vec<Section> {
-        let mut folders: Vec<&str> = self
-            .conversations()
-            .filter(|entry| entry.section() != Section::Archived)
-            .filter_map(|entry| entry.flags.folder.as_deref())
-            .collect();
-        folders.sort_unstable();
-        folders.dedup();
+        for entry in self.conversations() {
+            let section = entry.section();
+            match sections.iter_mut().find(|(known, _)| *known == section) {
+                Some((_, entries)) => entries.push(entry),
+                None => sections.push((section, vec![entry])),
+            }
+        }
 
-        let mut sections = vec![Section::Pinned, Section::Requests];
-        sections.extend(folders.into_iter().map(|name| Section::Folder(name.to_owned())));
-        sections.extend([Section::Chats, Section::Archived]);
+        sections.sort_by(|(left, _), (right, _)| left.cmp(right));
         sections
     }
 
@@ -208,10 +210,13 @@ impl Index {
         Some(threads[next])
     }
 
-    pub fn total_unread(&self) -> u32 {
+    /// What the window title counts. Muting is an instant rather than a flag, so
+    /// this needs to be told when now is -- reading `muted_until` for presence
+    /// alone kept a conversation silent long after its mute had run out.
+    pub fn total_unread(&self, now: u64) -> u32 {
         self.entries
             .iter()
-            .filter(|entry| !entry.flags.archived && entry.flags.muted_until.is_none())
+            .filter(|entry| !entry.flags.archived && !entry.flags.muted(now))
             .map(|entry| entry.unread)
             .sum()
     }
@@ -267,6 +272,16 @@ impl Index {
                 group.title.clone()
             };
             entries.push(self.carry(Thread::Group(group.master_key), name, false));
+        }
+
+        // A thread `touch` made from a message alone -- an unknown sender, or a
+        // group the sync has not caught up with -- is not in the contact list,
+        // and rebuilding from that list alone dropped it off the sidebar along
+        // with its preview and its unread count.
+        for entry in &self.entries {
+            if entry.started() && !entries.iter().any(|kept| kept.thread == entry.thread) {
+                entries.push(entry.clone());
+            }
         }
 
         self.entries = entries;
@@ -432,6 +447,85 @@ mod tests {
     /// The threads the sidebar would actually draw.
     fn listed(index: &Index) -> Vec<Thread> {
         index.conversations().map(|e| e.thread.clone()).collect()
+    }
+
+    /// The order the sidebar draws, and nothing in it that has no conversation
+    /// behind it. Folders sit between the request queue and the rest, and among
+    /// themselves by name.
+    #[test]
+    fn grouped_lists_the_sections_in_drawing_order() {
+        let people = ["Pinned", "Filed", "Also filed", "Plain", "Put away", "Silent"]
+            .map(contact);
+        let (mut index, _) = index(&people, &[]);
+        let thread = |who: &Contact| Thread::Contact(ContactId::Aci(who.uuid));
+
+        // Everyone but "Silent", who stays a contact with nothing in it.
+        for (at, who) in people.iter().enumerate().take(5) {
+            index.touch(&thread(who), &message(100 + at as u64, who.uuid, "hi"), unknown);
+        }
+        for (who, flags) in [
+            (&people[0], Flags { pinned: true, ..Flags::default() }),
+            (&people[1], Flags { folder: Some("Work".into()), ..Flags::default() }),
+            (&people[2], Flags { folder: Some("Family".into()), ..Flags::default() }),
+            (&people[4], Flags { archived: true, ..Flags::default() }),
+        ] {
+            index.set_flags(&thread(who), flags);
+        }
+
+        let grouped = index.grouped();
+        let order: Vec<&Section> = grouped.iter().map(|(section, _)| section).collect();
+
+        assert_eq!(
+            order,
+            [
+                &Section::Pinned,
+                &Section::Folder("Family".into()),
+                &Section::Folder("Work".into()),
+                &Section::Chats,
+                &Section::Archived,
+            ]
+        );
+        // "Plain" and Note to Self, which is always a conversation.
+        assert_eq!(grouped[3].1.len(), 2);
+        assert!(
+            grouped
+                .iter()
+                .all(|(_, entries)| entries.iter().all(|entry| entry.started()))
+        );
+    }
+
+    /// A message from someone the contact sync has never mentioned makes its own
+    /// entry, and the next sync used to throw it away again -- along with the
+    /// preview and the unread count the sidebar was drawing from it.
+    #[test]
+    fn a_thread_known_only_from_a_message_survives_a_contact_sync() {
+        let stranger = Uuid::new_v4();
+        let thread = Thread::Contact(ContactId::Aci(stranger));
+        let alice = contact("Alice");
+        let (mut index, aci) = index(std::slice::from_ref(&alice), &[]);
+
+        index.touch(&thread, &message(100, stranger, "hello?"), unknown);
+        index.mark_unread(&thread, false);
+
+        index.rebuild(std::slice::from_ref(&alice), &[], aci);
+
+        assert!(listed(&index).contains(&thread));
+        assert_eq!(index.get(&thread).unwrap().unread, 1);
+    }
+
+    /// The contact list is the better source once it catches up, so a synced
+    /// entry must not end up beside the one a message made.
+    #[test]
+    fn a_contact_sync_does_not_duplicate_a_thread_it_now_knows() {
+        let late = contact("Late");
+        let thread = Thread::Contact(ContactId::Aci(late.uuid));
+        let (mut index, aci) = index(&[], &[]);
+
+        index.touch(&thread, &message(100, late.uuid, "hello?"), unknown);
+        index.rebuild(std::slice::from_ref(&late), &[], aci);
+
+        assert_eq!(index.entries().iter().filter(|e| e.thread == thread).count(), 1);
+        assert_eq!(index.name(&thread), Some("Late"));
     }
 
     #[test]
@@ -738,7 +832,27 @@ mod tests {
             },
         );
 
-        assert_eq!(index.total_unread(), 1);
+        assert_eq!(index.total_unread(0), 1);
+    }
+
+    /// A mute is an instant, so one that has run out counts again.
+    #[test]
+    fn total_unread_counts_a_mute_that_has_expired() {
+        let quiet = contact("Quiet");
+        let (mut index, _) = index(std::slice::from_ref(&quiet), &[]);
+        let thread = Thread::Contact(ContactId::Aci(quiet.uuid));
+
+        index.mark_unread(&thread, false);
+        index.set_flags(
+            &thread,
+            Flags {
+                muted_until: Some(1_000),
+                ..Flags::default()
+            },
+        );
+
+        assert_eq!(index.total_unread(999), 0);
+        assert_eq!(index.total_unread(1_001), 1);
     }
 
     #[test]

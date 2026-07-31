@@ -96,12 +96,17 @@ pub fn parse(input: &str) -> (String, Vec<Range>) {
         }
     }
 
-    // An opener that was never closed is just text the user typed.
+    // An opener that was never closed is just text the user typed. Putting it
+    // back moves everything after it along, and *widens* anything it lands
+    // inside: `**a*b**` is bold over three characters once the stray star is
+    // text again, not over the two it covered while the star was a marker.
     for (marker, _, start) in open {
         body.insert_str(start, marker);
         for range in &mut ranges {
             if range.start >= start {
                 range.start += marker.len();
+            } else if range.end() > start {
+                range.len += marker.len();
             }
         }
     }
@@ -155,13 +160,10 @@ pub fn block(text: &str) -> Option<(Option<&str>, &str)> {
         None => (rest.trim(), ""),
     };
 
-    let code = body
-        .strip_suffix(FENCE)
-        .unwrap_or(body)
-        // The newline before the closing fence belongs to the fence, not to the
-        // code, or every block ends with a blank line.
-        .strip_suffix('\n')
-        .unwrap_or_else(|| body.strip_suffix(FENCE).unwrap_or(body));
+    let closed = body.strip_suffix(FENCE).unwrap_or(body);
+    // The newline before the closing fence belongs to the fence, not to the
+    // code, or every block ends with a blank line.
+    let code = closed.strip_suffix('\n').unwrap_or(closed);
 
     Some((Some(info).filter(|info| !info.is_empty()), code))
 }
@@ -314,6 +316,16 @@ mod tests {
     #[test]
     fn an_underscore_at_a_boundary_still_works() {
         assert_eq!(styles("say _this_ now").1, [(4, 4, Style::Italic)]);
+    }
+
+    /// The stray star goes back into the text, so the bold run has to grow with
+    /// it. Otherwise the last character silently loses its style.
+    #[test]
+    fn a_style_widens_around_an_unclosed_marker_inside_it() {
+        let (body, ranges) = styles("**a*b**");
+
+        assert_eq!(body, "a*b");
+        assert_eq!(ranges, [(0, 3, Style::Bold)]);
     }
 
     #[test]
