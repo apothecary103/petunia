@@ -1,2 +1,2 @@
-# petunia
-A native signal client in rust
+# Petunia
+Petunia is a native Signal client, named after the flower.
