@@ -13,6 +13,10 @@ use crate::ui::{image, kit};
 const TILE: f32 = 68.0;
 const COVER: f32 = 32.0;
 
+/// Something the picker reports back. `Rc` because one closure is cloned into
+/// every tile it draws.
+pub type Pick<T> = std::rc::Rc<dyn Fn(&T, &mut gpui::Window, &mut gpui::App)>;
+
 /// Which pack is showing, or all of them at once.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Showing {
@@ -27,9 +31,9 @@ pub struct Picker<'a> {
     pub query: &'a str,
     pub search: &'a gpui::Entity<gpui_component::input::InputState>,
     pub theme: &'a Theme,
-    pub on_pack: std::rc::Rc<dyn Fn(&Showing, &mut gpui::Window, &mut gpui::App)>,
+    pub on_pack: Pick<Showing>,
     /// Which sticker was chosen: its pack, its id, its emoji and its file.
-    pub on_pick: std::rc::Rc<dyn Fn(&Chosen, &mut gpui::Window, &mut gpui::App)>,
+    pub on_pick: Pick<Chosen>,
 }
 
 #[derive(Debug, Clone)]
@@ -182,7 +186,7 @@ fn tab(
     on_click: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
 ) -> gpui::Stateful<Div> {
     div()
-        .id(SharedString::from(id.into()))
+        .id(id.into())
         .flex_none()
         .p_1()
         .rounded(px(kit::RADIUS))

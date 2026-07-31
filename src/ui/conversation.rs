@@ -44,6 +44,10 @@ pub struct Conversation {
     /// Runs only while something is playing, because a repaint every tenth of a
     /// second for an idle window is not free.
     ticking: Option<gpui::Task<()>>,
+    /// Ages out typing indicators. `State::typing` already filters by elapsed
+    /// time, but nothing would ask it again, so an indicator whose "stopped" was
+    /// lost would sit there until the next unrelated repaint.
+    aging: Option<gpui::Task<()>>,
 }
 
 impl Conversation {
@@ -53,7 +57,35 @@ impl Conversation {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        cx.observe(&store, |_, _, cx| cx.notify()).detach();
+        cx.observe(&store, |this: &mut Self, store, cx| {
+            if store.read(cx).state().is_some_and(State::anyone_typing) {
+                this.age_typing(cx);
+            }
+            cx.notify();
+        })
+        .detach();
+        cx.subscribe_in(
+            &store,
+            window,
+            |this: &mut Self, _, event: &crate::store::StoreEvent, window, cx| {
+                // A page of *older* messages is inserted above what is on
+                // screen, which would otherwise shove the reader down by exactly
+                // the height of what arrived. How tall that is is only knowable
+                // once it has been laid out, so the correction waits a frame.
+                if let crate::store::StoreEvent::History { older: true } = event {
+                    let scroll = this.scroll.clone();
+                    let before = scroll.max_offset().y;
+                    window.on_next_frame(move |_, _| {
+                        let grown = scroll.max_offset().y - before;
+                        let mut offset = scroll.offset();
+                        offset.y -= grown;
+                        scroll.set_offset(offset);
+                    });
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
         let composer = cx.new(|cx| Composer::new(store.clone(), window, cx));
         Self {
             store,
@@ -62,7 +94,36 @@ impl Conversation {
             scroll: ScrollHandle::new(),
             anchored: None,
             ticking: None,
+            aging: None,
         }
+    }
+
+    /// One tick a second while anyone is typing, and none otherwise.
+    fn age_typing(&mut self, cx: &mut Context<Self>) {
+        if self.aging.is_some() {
+            return;
+        }
+        self.aging = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
+                let carry_on = this.update(cx, |this, cx| {
+                    this.store.update(cx, |store, cx| {
+                        if let Some(state) = store.state_mut() {
+                            state.expire_typing();
+                        }
+                        cx.notify();
+                        store.state().is_some_and(crate::data::State::anyone_typing)
+                    })
+                });
+                match carry_on {
+                    Ok(true) => {}
+                    _ => break,
+                }
+            }
+            this.update(cx, |this, _| this.aging = None).ok();
+        }));
     }
 
     /// Everything a control on a message can ask for, answered in one place.
@@ -99,11 +160,25 @@ impl Conversation {
             Act::View(path) => cx.emit(Viewing(path)),
             Act::Save(path) => self.save(path, window, cx),
             Act::Open(path) => open(&path),
+            Act::OpenLink(url) => {
+                if let Err(error) = open::that_detached(&url) {
+                    tracing::warn!(%error, %url, "could not open the link");
+                }
+            }
             Act::Play(path) => {
                 self.player.toggle(path);
                 self.follow_playback(cx);
             }
-            Act::Seek(_, fraction) => self.player.seek(fraction),
+            // Clicking into the waveform of something that is not playing means
+            // "play this, from here" -- without the first half it would silently
+            // scrub whatever else happened to be running.
+            Act::Seek(path, fraction) => {
+                if !self.player.playback().is(&path) {
+                    self.player.toggle(path);
+                    self.follow_playback(cx);
+                }
+                self.player.seek(fraction);
+            }
             Act::InstallStickers { pack_id, key } => self.store.update(cx, |store, _| {
                 store.send(Command::InstallStickerPack { pack_id, key })
             }),
@@ -277,10 +352,20 @@ impl Conversation {
             else {
                 return;
             };
+            if store
+                .state()
+                .and_then(|state| state.history(&thread))
+                .is_some_and(crate::data::History::is_loading)
+            {
+                return;
+            }
             store.send(Command::LoadThread {
-                thread,
+                thread: thread.clone(),
                 before: Some(before),
             });
+            if let Some(state) = store.state_mut() {
+                state.history_mut(&thread).set_loading(true);
+            }
             cx.notify();
         });
     }
@@ -300,7 +385,7 @@ impl Render for Conversation {
             return empty(&palette, "Still connecting…").into_any_element();
         };
 
-        let spacing = store.config.messages.density.spacing();
+        let spacing = store.config.messages.spacing();
         let timestamps = store.config.messages.timestamps;
         // The config counts seconds; message timestamps are milliseconds.
         let group_within_ms = store.config.messages.group_within * 1000;
@@ -327,6 +412,9 @@ impl Render for Conversation {
         if self.anchored.as_ref() != Some(&thread) {
             self.anchored = Some(thread.clone());
             self.scroll.scroll_to_bottom();
+            // A voice note belongs to the conversation it was sent in, so it
+            // does not follow you into the next one.
+            self.player.stop();
         }
 
         let mut list = kit::measured()

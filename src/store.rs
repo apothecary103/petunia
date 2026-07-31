@@ -9,7 +9,7 @@ use crate::config::Config;
 use crate::data::message::Range;
 use crate::data::{self, Fragment, History, MessageId, State, Thread};
 use crate::signal::command::Quoted;
-use crate::signal::{Command, Connection, Event};
+use crate::signal::{Command, Event};
 use crate::ui::composer::Intent;
 
 /// Everything the views read, and the one way they talk back to the Signal
@@ -72,8 +72,30 @@ impl Store {
         self.state.as_ref()
     }
 
+    pub fn state_mut(&mut self) -> Option<&mut State> {
+        self.state.as_mut()
+    }
+
     pub fn active(&self) -> Option<&Thread> {
         self.active.as_ref()
+    }
+
+    /// The conversation before or after this one in the sidebar's order.
+    pub fn adjacent(&self, forward: bool) -> Option<Thread> {
+        self.state
+            .as_ref()?
+            .index
+            .cycle(self.active.as_ref(), forward)
+            .cloned()
+    }
+
+    /// The next conversation owed attention, wrapping past the end.
+    pub fn next_unread(&self) -> Option<Thread> {
+        self.state
+            .as_ref()?
+            .index
+            .next_unread(self.active.as_ref())
+            .cloned()
     }
 
     pub fn focus(&self) -> Option<&Focus> {
@@ -112,13 +134,6 @@ impl Store {
         // Opening a conversation is not a claim about whose profile you wanted.
         self.focus = None;
         cx.notify();
-    }
-
-    pub fn connection(&self) -> Connection {
-        self.state
-            .as_ref()
-            .map(|state| state.connection)
-            .unwrap_or_default()
     }
 
     /// Sends what the composer built, and puts it on screen before the network
@@ -353,7 +368,17 @@ impl Store {
 
     pub fn config_changed(&mut self, config: Arc<Config>, cx: &mut Context<Self>) {
         self.config = config;
+        self.apply_sort();
         cx.notify();
+    }
+
+    /// The sidebar's order comes from the config, so a hot reload has to reach
+    /// the index rather than only the palette.
+    fn apply_sort(&mut self) {
+        let sort = self.config.sidebar.sort;
+        if let Some(state) = self.state.as_mut() {
+            state.index.set_sort(sort);
+        }
     }
 
     /// Routes one worker event into the model. The only place `State` is
@@ -374,6 +399,7 @@ impl Store {
                 self.link_url = None;
                 self.link_failure = None;
                 self.state = Some(State::new(aci));
+                self.apply_sort();
                 cx.emit(StoreEvent::Linked);
             }
             Event::Error(message) if self.state.is_none() => {
@@ -441,6 +467,12 @@ impl Store {
                     history.merge(messages, more);
                 }
                 cx.emit(StoreEvent::History { older });
+                // Opening a thread marks it read, but on the first open there is
+                // nothing loaded yet to owe a receipt for, so the page arriving
+                // is when the debt becomes knowable.
+                if !older && self.active.as_ref() == Some(&thread) {
+                    self.mark_read(thread);
+                }
             }
             Event::MessageStatus { timestamps, status } => {
                 let aci = state.aci;

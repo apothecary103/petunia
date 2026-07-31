@@ -8,6 +8,9 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 
+/// The sidebar's order. Defined where it is applied rather than duplicated
+/// here, so the config and the index cannot disagree about what "recent" means.
+pub use crate::data::index::Sort;
 pub use keys::Keys;
 pub use messages::Messages;
 pub use theme::Theme;
@@ -35,13 +38,6 @@ pub struct Sidebar {
     pub width: f32,
     pub sort: Sort,
     pub show_preview: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Sort {
-    Recent,
-    Name,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -104,6 +100,23 @@ impl Config {
             1.0
         }
     }
+}
+
+/// Applies `scale` to everything measured in pixels.
+///
+/// gpui has no window-wide scale factor to hand this to — the display's own is
+/// already applied underneath — so the multiplier is folded into the two places
+/// sizes come from. Doing it once at load keeps every view free of it.
+fn apply_scale(loaded: &mut Loaded) {
+    let scale = loaded.config.scale();
+    if (scale - 1.0).abs() < f32::EPSILON {
+        return;
+    }
+
+    let typography = &mut Arc::make_mut(&mut loaded.theme).typography;
+    typography.ui_size *= scale;
+    typography.message_size *= scale;
+    loaded.config.messages.scale = scale;
 }
 
 impl Default for Sidebar {
@@ -170,11 +183,13 @@ pub fn load() -> Loaded {
     let (theme, theme_error) = theme::load(&config.theme);
     errors.extend(theme_error);
 
-    Loaded {
+    let mut loaded = Loaded {
         config,
         theme: Arc::new(theme),
         errors,
-    }
+    };
+    apply_scale(&mut loaded);
+    loaded
 }
 
 /// Points at the line, because "invalid type" with no location is not actionable.

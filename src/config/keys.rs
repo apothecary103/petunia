@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
 
-use gpui::{Keystroke, Modifiers};
+use gpui::Modifiers;
 use serde::{Deserialize, Deserializer};
 
 /// Everything a keypress can ask for. Adding a variant and a default binding is
@@ -20,6 +20,8 @@ pub enum Action {
     ScrollToTop,
     ScrollToBottom,
     NextUnread,
+    NextConversation,
+    PreviousConversation,
     MarkRead,
     ReplyToLast,
     EditLast,
@@ -44,15 +46,6 @@ pub struct Keys {
 }
 
 impl Keys {
-    pub fn action(&self, keystroke: &Keystroke) -> Option<Action> {
-        self.bindings
-            .get(&KeyBind {
-                modifiers: keystroke.modifiers,
-                key: keystroke.key.to_ascii_lowercase(),
-            })
-            .copied()
-    }
-
     /// Every binding as a gpui keystroke string, for registering the keymap.
     pub fn bindings(&self) -> Vec<(String, Action)> {
         self.bindings
@@ -86,6 +79,8 @@ impl Default for Keys {
             ("cmd+home", Action::ScrollToTop),
             ("cmd+end", Action::ScrollToBottom),
             ("cmd+j", Action::NextUnread),
+            ("cmd+shift+down", Action::NextConversation),
+            ("cmd+shift+up", Action::PreviousConversation),
             ("cmd+shift+r", Action::MarkRead),
             ("cmd+r", Action::ReplyToLast),
             ("cmd+e", Action::EditLast),
@@ -272,6 +267,7 @@ impl fmt::Display for KeyBind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::Keystroke;
 
     fn bind(raw: &str) -> KeyBind {
         raw.parse().expect(raw)
@@ -281,14 +277,6 @@ mod tests {
         let mut modifiers = Modifiers::default();
         set_command(&mut modifiers);
         modifiers
-    }
-
-    fn press(key: &str, modifiers: Modifiers) -> Keystroke {
-        Keystroke {
-            modifiers,
-            key: key.to_owned(),
-            key_char: None,
-        }
     }
 
     #[test]
@@ -340,21 +328,26 @@ mod tests {
         assert_eq!(bind("+").modifiers, Modifiers::default());
     }
 
+    /// Bindings go into gpui's keymap as chord strings, so what the table holds
+    /// is only ever seen through that spelling.
+    fn bound(keys: &Keys, chord: &str) -> Option<Action> {
+        keys.bindings()
+            .into_iter()
+            .find(|(keystroke, _)| keystroke == chord)
+            .map(|(_, action)| action)
+    }
+
     #[test]
     fn defaults_resolve_the_quick_switcher() {
-        let keys = Keys::default();
-
         assert_eq!(
-            keys.action(&press("k", command())),
+            bound(&Keys::default(), "cmd-k"),
             Some(Action::QuickSwitcher)
         );
     }
 
     #[test]
     fn a_bare_letter_is_not_a_shortcut() {
-        let keys = Keys::default();
-
-        assert_eq!(keys.action(&press("k", Modifiers::default())), None);
+        assert_eq!(bound(&Keys::default(), "k"), None);
     }
 
     /// Unlike iced, gpui reports shift as a modifier rather than folding it into
@@ -362,44 +355,31 @@ mod tests {
     #[test]
     fn shift_distinguishes_two_bindings() {
         let keys = Keys::default();
-        let mut shifted = command();
-        shifted.shift = true;
 
-        assert_eq!(keys.action(&press("r", command())), Some(Action::ReplyToLast));
-        assert_eq!(keys.action(&press("r", shifted)), Some(Action::MarkRead));
+        assert_eq!(bound(&keys, "cmd-r"), Some(Action::ReplyToLast));
+        assert_eq!(bound(&keys, "cmd-shift-r"), Some(Action::MarkRead));
     }
 
     #[test]
     fn escape_resolves_to_cancel() {
-        let keys = Keys::default();
-
-        assert_eq!(
-            keys.action(&press("escape", Modifiers::default())),
-            Some(Action::Cancel)
-        );
+        assert_eq!(bound(&Keys::default(), "escape"), Some(Action::Cancel));
     }
 
     #[test]
     fn overrides_merge_over_the_defaults() {
         let keys: Keys = toml::from_str(r#"quick-switcher = "cmd+p""#).unwrap();
 
-        assert_eq!(
-            keys.action(&press("p", command())),
-            Some(Action::QuickSwitcher)
-        );
+        assert_eq!(bound(&keys, "cmd-p"), Some(Action::QuickSwitcher));
         // The old binding is gone, and everything else survives.
-        assert_eq!(keys.action(&press("k", command())), None);
-        assert_eq!(
-            keys.action(&press("escape", Modifiers::default())),
-            Some(Action::Cancel)
-        );
+        assert_eq!(bound(&keys, "cmd-k"), None);
+        assert_eq!(bound(&keys, "escape"), Some(Action::Cancel));
     }
 
     #[test]
     fn a_binding_can_be_cleared() {
         let keys: Keys = toml::from_str(r#"quick-switcher = "none""#).unwrap();
 
-        assert_eq!(keys.action(&press("k", command())), None);
+        assert_eq!(bound(&keys, "cmd-k"), None);
     }
 
     #[test]
@@ -448,11 +428,10 @@ mod tests {
             let parsed = Keystroke::parse(&keystroke)
                 .unwrap_or_else(|error| panic!("{action:?} bound to {keystroke:?}: {error:?}"));
 
-            assert_eq!(
-                Keys::default().action(&parsed),
-                Some(action),
-                "{keystroke:?} did not resolve back to {action:?}"
-            );
+            // Round-tripped through gpui's own parser: what it understands has
+            // to be the same chord that went in, or the binding fires on a key
+            // nobody meant.
+            assert_eq!(parsed.unparse(), keystroke, "{action:?}");
         }
     }
 }

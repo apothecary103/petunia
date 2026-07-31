@@ -17,9 +17,6 @@ pub fn icon(name: IconName, size: f32, tint: Hsla) -> Icon {
 pub const RADIUS: f32 = 8.0;
 pub const RADIUS_LG: f32 = 12.0;
 
-/// Vertical space between unrelated blocks, in the units the reference uses.
-pub const GAP: f32 = 8.0;
-
 /// A row that can be picked: quiet by default, filled when it is the one you
 /// are on, outlined so selecting it never shifts the layout.
 pub fn row(id: impl Into<gpui::ElementId>, selected: bool, theme: &Theme) -> Stateful<Div> {
@@ -95,11 +92,6 @@ pub fn chip(label: impl Into<SharedString>, tint: Hsla, theme: &Theme) -> Div {
 /// A filled dot, for "something happened here" with nothing worth counting.
 pub fn dot(tint: Hsla) -> Div {
     div().flex_none().size(px(6.0)).rounded_full().bg(tint)
-}
-
-/// A hairline. Borders in the reference are barely there.
-pub fn rule(theme: &Theme) -> Div {
-    div().h_px().flex_1().bg(theme.border)
 }
 
 /// The reading column. Prose that runs the full width of a wide window is

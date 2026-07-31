@@ -28,7 +28,31 @@ pub struct Frame<'a> {
 }
 
 impl Frame<'_> {
+    /// An attachment with the caption its sender wrote under it, when there is
+    /// one. A caption is not the message body and must not be folded into it.
     pub fn render(&self, attached: &Attachment) -> AnyElement {
+        let media = self.body(attached);
+        let Some(caption) = attached.caption.clone().filter(|text| !text.trim().is_empty())
+        else {
+            return media;
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(media)
+            .child(
+                div()
+                    .max_w(px(self.max_image.0))
+                    .text_size(px(self.spacing.small))
+                    .text_color(self.theme.text_dim)
+                    .child(SharedString::from(caption)),
+            )
+            .into_any_element()
+    }
+
+    fn body(&self, attached: &Attachment) -> AnyElement {
         match (&attached.kind, &attached.blob) {
             (Kind::Image { size, .. }, Blob::Cached(path)) => self.picture(attached, *size, path),
             (

@@ -15,6 +15,8 @@ actions!(
         ScrollToTop,
         ScrollToBottom,
         NextUnread,
+        NextConversation,
+        PreviousConversation,
         MarkRead,
         ReplyToLast,
         EditLast,
@@ -59,6 +61,10 @@ fn binding(keystroke: &str, action: Action) -> KeyBinding {
         Action::ScrollToTop => KeyBinding::new(keystroke, ScrollToTop, None),
         Action::ScrollToBottom => KeyBinding::new(keystroke, ScrollToBottom, None),
         Action::NextUnread => KeyBinding::new(keystroke, NextUnread, None),
+        Action::NextConversation => KeyBinding::new(keystroke, NextConversation, None),
+        Action::PreviousConversation => {
+            KeyBinding::new(keystroke, PreviousConversation, None)
+        }
         Action::MarkRead => KeyBinding::new(keystroke, MarkRead, None),
         Action::ReplyToLast => KeyBinding::new(keystroke, ReplyToLast, None),
         Action::EditLast => KeyBinding::new(keystroke, EditLast, None),

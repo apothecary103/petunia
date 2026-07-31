@@ -3,6 +3,11 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Messages {
+    /// Multiplies every length in the message list. Not read from the file: it
+    /// is folded in from the top-level `scale` at load, so views never have to
+    /// remember to apply it.
+    #[serde(skip)]
+    pub scale: f32,
     pub density: Density,
     pub timestamps: Timestamps,
     /// Seconds. Messages from one sender closer together than this group.
@@ -30,6 +35,7 @@ pub enum Timestamps {
 impl Default for Messages {
     fn default() -> Self {
         Self {
+            scale: 1.0,
             density: Density::default(),
             timestamps: Timestamps::default(),
             group_within: 300,
@@ -54,6 +60,31 @@ pub struct Spacing {
     pub small: f32,
     /// The edge of a sticker, which has no bubble and no intrinsic layout size.
     pub sticker: f32,
+}
+
+impl Messages {
+    pub fn spacing(&self) -> Spacing {
+        self.density.spacing().scaled(self.scale)
+    }
+}
+
+impl Spacing {
+    fn scaled(self, scale: f32) -> Self {
+        if (scale - 1.0).abs() < f32::EPSILON {
+            return self;
+        }
+        Self {
+            between_runs: self.between_runs * scale,
+            within_run: self.within_run * scale,
+            padding_x: self.padding_x * scale,
+            padding_y: self.padding_y * scale,
+            avatar: self.avatar * scale,
+            gutter: self.gutter * scale,
+            body: self.body * scale,
+            small: self.small * scale,
+            sticker: self.sticker * scale,
+        }
+    }
 }
 
 impl Density {
@@ -88,6 +119,35 @@ impl Density {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A scale of one has to be the identity, or every default layout drifts.
+    #[test]
+    fn a_scale_of_one_changes_nothing() {
+        let spacing = Density::Comfortable.spacing();
+
+        assert_eq!(spacing.body, spacing.scaled(1.0).body);
+        assert_eq!(spacing.gutter, spacing.scaled(1.0).gutter);
+    }
+
+    #[test]
+    fn scaling_multiplies_every_length() {
+        let doubled = Density::Comfortable.spacing().scaled(2.0);
+        let plain = Density::Comfortable.spacing();
+
+        assert_eq!(doubled.body, plain.body * 2.0);
+        assert_eq!(doubled.avatar, plain.avatar * 2.0);
+        assert_eq!(doubled.sticker, plain.sticker * 2.0);
+    }
+
+    /// The gutter still has to clear the avatar once both are scaled, or the run
+    /// header lands on top of the picture at any size but the default.
+    #[test]
+    fn scaling_keeps_the_gutter_clear_of_the_avatar() {
+        for scale in [0.5, 1.0, 1.5, 3.0] {
+            let spacing = Density::Comfortable.spacing().scaled(scale);
+            assert!(spacing.gutter > spacing.avatar, "at {scale}");
+        }
+    }
 
     #[test]
     fn compact_is_tighter_than_comfortable() {

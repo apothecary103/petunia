@@ -60,10 +60,6 @@ impl Entry {
         }
     }
 
-    pub fn muted(&self, now: u64) -> bool {
-        self.flags.muted_until.is_some_and(|until| until > now)
-    }
-
     /// Whether there is a conversation here, as opposed to merely a contact. The
     /// contact store holds everyone the account has ever synced, and most of them
     /// have never exchanged a message and carry no profile name -- listing them
@@ -106,30 +102,6 @@ impl Index {
             .filter(move |entry| entry.section() == section)
     }
 
-    pub fn filtered<'a>(&'a self, query: &'a str) -> impl Iterator<Item = &'a Entry> + 'a {
-        let needle = query.trim().to_lowercase();
-        self.entries.iter().filter(move |entry| {
-            needle.is_empty()
-                || entry.name.to_lowercase().contains(&needle)
-                || entry
-                    .preview
-                    .as_ref()
-                    .is_some_and(|message| message.summary().to_lowercase().contains(&needle))
-        })
-    }
-
-    pub fn total_unread(&self) -> u32 {
-        self.entries
-            .iter()
-            .filter(|entry| !entry.flags.archived && entry.flags.muted_until.is_none())
-            .map(|entry| entry.unread)
-            .sum()
-    }
-
-    pub fn nth(&self, index: usize) -> Option<&Thread> {
-        self.selectable().nth(index).map(|entry| &entry.thread)
-    }
-
     /// Walks the sidebar order, wrapping at both ends. Archived threads are
     /// skipped so cycling never lands somewhere the sidebar is not showing.
     pub fn cycle(&self, from: Option<&Thread>, forward: bool) -> Option<&Thread> {
@@ -146,6 +118,14 @@ impl Index {
             (None, false) => threads.len() - 1,
         };
         Some(threads[next])
+    }
+
+    pub fn total_unread(&self) -> u32 {
+        self.entries
+            .iter()
+            .filter(|entry| !entry.flags.archived && entry.flags.muted_until.is_none())
+            .map(|entry| entry.unread)
+            .sum()
     }
 
     pub fn next_unread(&self, from: Option<&Thread>) -> Option<&Thread> {
@@ -245,10 +225,6 @@ impl Index {
         }
     }
 
-    pub fn unread(&self, thread: &Thread) -> u32 {
-        self.get(thread).map_or(0, |entry| entry.unread)
-    }
-
     pub fn clear_unread(&mut self, thread: &Thread) {
         if let Some(entry) = self.entries.iter_mut().find(|e| e.thread == *thread) {
             entry.unread = 0;
@@ -271,6 +247,10 @@ impl Index {
         self.reorder();
     }
 
+    /// Test-only until there is somewhere to persist flags. The sections they
+    /// select are real and ordered here; nothing yet writes a pin or an archive,
+    /// and a setter with no caller would be a control that does nothing.
+    #[cfg(test)]
     pub fn set_flags(&mut self, thread: &Thread, flags: Flags) {
         if let Some(entry) = self.entries.iter_mut().find(|e| e.thread == *thread) {
             entry.flags = flags;
@@ -444,7 +424,7 @@ mod tests {
         let (index, _) = index(&[contact("Alice")], &[]);
 
         assert_eq!(index.entries().len(), 2);
-        assert_eq!(index.filtered("alice").count(), 1);
+        assert!(index.entries().iter().any(|entry| entry.name == "Alice"));
     }
 
     #[test]
@@ -454,7 +434,7 @@ mod tests {
         let (mut index, aci) = index(&[alice.clone(), contact("Bob")], &[]);
         index.touch(&thread, &message(100, alice.uuid, "hi"), unknown);
 
-        let walked: Vec<_> = (0..).map_while(|n| index.nth(n)).cloned().collect();
+        let walked: Vec<_> = index.conversations().map(|e| e.thread.clone()).collect();
 
         assert_eq!(walked.len(), 2);
         assert!(walked.contains(&thread));
@@ -593,10 +573,10 @@ mod tests {
         }
         index.set_sort(Sort::Name);
 
-        let first = index.nth(0).unwrap().clone();
-        let last = index.nth(2).unwrap().clone();
+        let order: Vec<_> = index.conversations().map(|e| e.thread.clone()).collect();
+        let (first, last) = (order[0].clone(), order[order.len() - 1].clone());
 
-        assert_eq!(index.cycle(Some(&first), true), index.nth(1));
+        assert_eq!(index.cycle(Some(&first), true), Some(&order[1]));
         assert_eq!(index.cycle(Some(&last), true), Some(&first));
         assert_eq!(index.cycle(Some(&first), false), Some(&last));
     }
@@ -620,27 +600,9 @@ mod tests {
             },
         );
 
-        let threads: Vec<_> = (0..).map_while(|n| index.nth(n)).collect();
+        let threads: Vec<_> = index.conversations().collect();
         assert_eq!(threads.len(), 1);
-        assert!(!index.get(threads[0]).unwrap().flags.archived);
-    }
-
-    #[test]
-    fn filters_by_name_and_preview() {
-        let alice = contact("Alice");
-        let (mut index, _) = index(&[alice.clone(), contact("Bob")], &[]);
-        index.touch(
-            &Thread::Contact(ContactId::Aci(alice.uuid)),
-            &message(100, alice.uuid, "deploy the thing"),
-            unknown,
-        );
-
-        let by_name: Vec<_> = index.filtered("bob").map(|e| e.name.as_str()).collect();
-        let by_preview: Vec<_> = index.filtered("deploy").map(|e| e.name.as_str()).collect();
-
-        assert_eq!(by_name, ["Bob"]);
-        assert_eq!(by_preview, ["Alice"]);
-        assert_eq!(index.filtered("").count(), 3);
+        assert!(!threads[0].flags.archived);
     }
 
     #[test]

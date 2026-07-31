@@ -86,6 +86,10 @@ impl Body<'_> {
             block = block.child(frame.render(attached));
         }
 
+        if let Some(preview) = self.message.preview.as_ref() {
+            block = block.child(link_card(preview, theme, spacing, self.act));
+        }
+
         if !self.message.reactions.is_empty() {
             block = block.child(reactions(self.message, self.state, theme, self.act));
         }
@@ -306,9 +310,91 @@ fn quoted(quote: &Quote, state: &State, theme: &Theme, spacing: Spacing) -> Div 
                         .truncate()
                         .text_size(px(spacing.small))
                         .text_color(theme.text_muted)
-                        .child(SharedString::from(quote.body.clone())),
+                        .child(styled(&quote.body, &quote.ranges, state, theme)),
                 ),
         )
+}
+
+/// The card a sender attached to a link.
+///
+/// Rendered only for what arrives: fetching the page ourselves to build one
+/// would tell a third party the moment a link reached this client, which is
+/// exactly what the sender's own preview exists to avoid.
+fn link_card(
+    preview: &crate::data::message::LinkPreview,
+    theme: &Theme,
+    spacing: Spacing,
+    act: &Dispatch,
+) -> gpui::Stateful<Div> {
+    let act = act.clone();
+    let url = preview.url.clone();
+    let thumbnail = match preview.image.as_ref().map(|image| &image.blob) {
+        Some(Blob::Cached(path)) => Some(path.clone()),
+        _ => None,
+    };
+
+    div()
+        .id("preview")
+        .flex()
+        .gap_2p5()
+        .p_2()
+        .max_w(px(360.0))
+        .rounded(px(kit::RADIUS))
+        .bg(theme.elevated)
+        .border_1()
+        .border_color(theme.border)
+        .cursor_pointer()
+        .hover(|this| this.border_color(theme.border_focus))
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            act(Act::OpenLink(url.clone()), window, cx)
+        })
+        .when_some(thumbnail, |this, path| {
+            this.child(crate::ui::image::cropped(&path, 56.0).rounded(px(4.0)))
+        })
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .min_w_0()
+                .gap_px()
+                .when_some(preview.title.clone(), |this, title| {
+                    this.child(
+                        div()
+                            .truncate()
+                            .text_size(px(spacing.small + 1.0))
+                            .text_color(theme.text)
+                            .child(SharedString::from(title)),
+                    )
+                })
+                .when_some(preview.description.clone(), |this, description| {
+                    this.child(
+                        div()
+                            .truncate()
+                            .text_size(px(spacing.small))
+                            .text_color(theme.text_dim)
+                            .child(SharedString::from(description)),
+                    )
+                })
+                .child(
+                    div()
+                        .truncate()
+                        .text_size(px(spacing.small))
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(host(&preview.url))),
+                ),
+        )
+}
+
+/// A link shown as where it goes rather than as its full query string.
+fn host(url: &str) -> String {
+    url.rsplit("://")
+        .next()
+        .unwrap_or(url)
+        .split('/')
+        .next()
+        .unwrap_or(url)
+        .trim_start_matches("www.")
+        .to_string()
 }
 
 /// One chip per distinct emoji, tinted when it includes you. Clicking a chip

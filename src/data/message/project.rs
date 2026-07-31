@@ -154,8 +154,10 @@ pub fn pointers(envelope: &Envelope) -> Vec<(attachment::Id, AttachmentPointer)>
         .collect()
 }
 
-/// Kept as the single-message entry point for the receive path; history loading
-/// goes through `project` so that reactions, edits and deletes fold together.
+/// The plain-message half of `classify`, which is all the tests that predate
+/// fragments care about. Nothing in the app uses it: the receive path needs the
+/// reactions, edits and deletes that `classify` keeps.
+#[cfg(test)]
 pub fn from_content(envelope: &Envelope) -> Option<(Thread, Message)> {
     match classify(envelope)? {
         (thread, Fragment::Message(message)) => Some((thread, message)),

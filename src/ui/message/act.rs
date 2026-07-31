@@ -40,6 +40,8 @@ pub enum Act {
     Seek(PathBuf, f32),
     /// Installs the pack a received sticker came from.
     InstallStickers { pack_id: Vec<u8>, key: Vec<u8> },
+    /// Opens a link in the browser.
+    OpenLink(String),
     /// Opens someone's profile in the details panel.
     Inspect(uuid::Uuid),
 }

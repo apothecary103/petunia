@@ -181,6 +181,9 @@ use objc2::rc::Retained;
                 flags: objc2_core_media::CMTimeFlags::Valid,
                 epoch: 0,
             };
+            // The asynchronous replacement takes a completion block, and this
+            // already runs on a thread of its own where blocking is the point.
+            #[allow(deprecated)]
             let image = generator
                 .copyCGImageAtTime_actualTime_error(at, std::ptr::null_mut())
                 .ok()?;
@@ -193,16 +196,14 @@ use objc2::rc::Retained;
     /// renderer needs no second decoding path.
     fn encode(image: &objc2_core_graphics::CGImage) -> Option<Vec<u8>> {
         use objc2_core_foundation::{CFData, CFMutableData};
-        use objc2_core_graphics::CGImage;
-        use objc2_image_io::{CGImageDestinationCreateWithData, CGImageDestinationAddImage,
-            CGImageDestinationFinalize};
+        use objc2_image_io::CGImageDestination;
 
         unsafe {
             let data = CFMutableData::new(None, 0)?;
             let kind = objc2_core_foundation::CFString::from_str("public.png");
-            let destination = CGImageDestinationCreateWithData(&data, &kind, 1, None)?;
-            CGImageDestinationAddImage(&destination, image, None);
-            if !CGImageDestinationFinalize(&destination) {
+            let destination = CGImageDestination::with_data(&data, &kind, 1, None)?;
+            CGImageDestination::add_image(&destination, image, None);
+            if !CGImageDestination::finalize(&destination) {
                 return None;
             }
             Some(CFData::to_vec(&data))

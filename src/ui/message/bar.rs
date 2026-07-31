@@ -146,7 +146,7 @@ fn button(
 
 fn square(id: impl Into<SharedString>, theme: &Theme) -> gpui::Stateful<Div> {
     div()
-        .id(SharedString::from(id.into()))
+        .id(id.into())
         .size(px(24.0))
         .flex()
         .flex_none()

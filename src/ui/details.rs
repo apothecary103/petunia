@@ -27,9 +27,11 @@ impl gpui::EventEmitter<Viewing> for Details {}
 /// are borrowed out of it.
 #[derive(Clone)]
 struct Hooks {
-    view: std::rc::Rc<dyn Fn(PathBuf, &mut Window, &mut gpui::App)>,
-    inspect: std::rc::Rc<dyn Fn(Uuid, &mut Window, &mut gpui::App)>,
+    view: Hook<PathBuf>,
+    inspect: Hook<Uuid>,
 }
+
+type Hook<T> = std::rc::Rc<dyn Fn(T, &mut Window, &mut gpui::App)>;
 
 /// Who or what the conversation is, and what has been shared in it.
 pub struct Details {

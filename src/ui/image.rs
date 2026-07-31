@@ -36,6 +36,7 @@ impl Asset for Scaled {
     type Source = Request;
     type Output = Result<Arc<RenderImage>, ImageCacheError>;
 
+    #[allow(clippy::manual_async_fn)]
     fn load(
         source: Self::Source,
         _cx: &mut App,

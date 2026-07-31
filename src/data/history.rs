@@ -102,11 +102,6 @@ impl History {
         }
     }
 
-    pub fn remove(&mut self, timestamps: &[u64]) {
-        self.messages
-            .retain(|message| !timestamps.contains(&message.timestamp()));
-    }
-
     pub fn apply_edit(&mut self, target: &MessageId, edit: Message, edited_at: u64) {
         if let Some(index) = self.index_of(target) {
             project::apply_edit(&mut self.messages[index], edit, edited_at);
@@ -348,15 +343,4 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn removes_expired_messages_by_timestamp() {
-        let sender = Uuid::new_v4();
-        let mut history = History::default();
-        history.insert(message(100, sender, "a"));
-        history.insert(message(200, sender, "b"));
-
-        history.remove(&[100]);
-
-        assert_eq!(bodies(&history), ["b"]);
-    }
 }

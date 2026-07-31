@@ -302,7 +302,7 @@ impl Viewer {
         let Some(player) = self.playing.as_ref() else {
             return div();
         };
-        let playing = player.is_playing();
+        let playing = player.is_playing() && !player.finished();
         let position = player.position();
         let duration = player.duration();
         let fraction = duration

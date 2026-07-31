@@ -38,7 +38,6 @@ pub struct Attachment {
 pub enum Kind {
     Image {
         size: Option<Size>,
-        blurhash: Option<String>,
     },
     Video {
         size: Option<Size>,
@@ -95,7 +94,7 @@ pub fn from_path(path: PathBuf, size: u64) -> Attachment {
 
     Attachment {
         id: Id(path.to_string_lossy().into_owned()),
-        kind: classify(&content_type, None, None),
+        kind: classify(&content_type, None),
         content_type,
         file_name,
         size,
@@ -150,12 +149,12 @@ fn kind(pointer: &AttachmentPointer, content_type: &str) -> Kind {
         };
     }
 
-    classify(content_type, size(pointer), pointer.blur_hash.clone())
+    classify(content_type, size(pointer))
 }
 
-fn classify(content_type: &str, size: Option<Size>, blurhash: Option<String>) -> Kind {
+fn classify(content_type: &str, size: Option<Size>) -> Kind {
     match content_type.split('/').next().unwrap_or_default() {
-        "image" => Kind::Image { size, blurhash },
+        "image" => Kind::Image { size },
         "video" => Kind::Video {
             size,
             duration: None,

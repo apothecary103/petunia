@@ -4,8 +4,10 @@ use gpui_component::{ActiveTheme, IconName};
 
 use super::conversation::{Conversation, Viewing};
 use super::details::{self, Details};
+use super::help::{self, Help};
 use super::kit;
 use super::linking::Linking;
+use super::notice::Notices;
 use super::palette::{Dismissed, Switcher};
 use super::sidebar::Sidebar;
 use super::viewer::{self, Viewer};
@@ -32,6 +34,9 @@ pub struct Workspace {
     /// The full-size picture, over everything else. One at a time, so Escape
     /// never has to choose.
     viewer: Option<Entity<Viewer>>,
+    help: Option<Entity<Help>>,
+    /// Always present, and draws nothing until something has gone wrong.
+    notices: Entity<Notices>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -58,6 +63,7 @@ impl Workspace {
             cx.subscribe_in(&store, window, Self::on_store_event),
         ];
 
+        let notices = cx.new(|_| Notices::default());
         let mut workspace = Self {
             store: store.clone(),
             player,
@@ -66,6 +72,8 @@ impl Workspace {
             session: Session::load(),
             switcher: None,
             viewer: None,
+            help: None,
+            notices,
             _subscriptions: subscriptions,
         };
 
@@ -127,6 +135,13 @@ impl Workspace {
                     self.session.save();
                 }
                 cx.notify();
+            }
+            // A failure nobody is told about is a failure that looks like
+            // nothing happening.
+            StoreEvent::Failed(message) => {
+                let message = message.clone();
+                self.notices
+                    .update(cx, |notices, cx| notices.raise(message, cx));
             }
             _ => {}
         }
@@ -194,6 +209,30 @@ impl Workspace {
             .collect()
     }
 
+    /// cmd+/. Generated from the bindings actually in force, so a rebound key is
+    /// never described wrongly.
+    fn open_help(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let bindings = self.store.read(cx).config.keys.listing();
+        let help = cx.new(|cx| Help::new(bindings, cx));
+
+        cx.subscribe(&help, |this, _, _: &help::Dismissed, cx| {
+            this.help = None;
+            cx.notify();
+        })
+        .detach();
+        window.focus(&help.read(cx).focus_handle(cx), cx);
+
+        self.help = Some(help);
+        cx.notify();
+    }
+
+    fn step_conversation(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let next = self.store.read(cx).adjacent(forward);
+        if let Some(thread) = next {
+            self.store.update(cx, |store, cx| store.activate(thread, cx));
+        }
+    }
+
     fn conversation(&self) -> Option<&Entity<Conversation>> {
         match &self.screen {
             Screen::Main { conversation, .. } => Some(conversation),
@@ -204,6 +243,11 @@ impl Workspace {
     /// Escape, in the order a person means it: the overlay first, then whatever
     /// the composer is carrying.
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.help.take().is_some() {
+            window.focus(&self.focus, cx);
+            cx.notify();
+            return;
+        }
         if self.viewer.take().is_some() {
             window.focus(&self.focus, cx);
             cx.notify();
@@ -353,6 +397,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &actions::QuickSwitcher, window, cx| {
                 this.open_switcher(window, cx)
             }))
+            .on_action(cx.listener(|this, _: &actions::Help, window, cx| {
+                this.open_help(window, cx)
+            }))
             .on_action(cx.listener(|this, _: &actions::Cancel, window, cx| {
                 this.cancel(window, cx)
             }))
@@ -378,6 +425,18 @@ impl Render for Workspace {
                         .update(cx, |composer, cx| composer.pick_files(window, cx));
                 })
             }))
+            .on_action(cx.listener(|this, _: &actions::NextConversation, _, cx| {
+                this.step_conversation(true, cx)
+            }))
+            .on_action(cx.listener(|this, _: &actions::PreviousConversation, _, cx| {
+                this.step_conversation(false, cx)
+            }))
+            .on_action(cx.listener(|this, _: &actions::NextUnread, _, cx| {
+                let next = this.store.read(cx).next_unread();
+                if let Some(thread) = next {
+                    this.store.update(cx, |store, cx| store.activate(thread, cx));
+                }
+            }))
             .on_action(cx.listener(|this, _: &actions::MarkRead, _, cx| {
                 let thread = this.store.read(cx).active().cloned();
                 if let Some(thread) = thread {
@@ -387,6 +446,8 @@ impl Render for Workspace {
             .child(body)
             .children(self.switcher.clone())
             .children(self.viewer.clone())
+            .children(self.help.clone())
+            .child(self.notices.clone())
     }
 }
 
