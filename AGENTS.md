@@ -4,50 +4,81 @@ Petunia is a native Signal client, named after the flower.
 
 - **Signal library:** [`presage`](https://github.com/whisperfish/presage) — follow
   its examples for how to link, send, and receive.
-- **GUI framework:** [`gpui`](https://gpui.rs), via the
-  [`gpui-ce`](https://github.com/gpui-ce/gpui-ce) community fork, with
-  [`gpui-component`](https://github.com/longbridge/gpui-component) for widgets.
-  Both are pinned to git revisions in `Cargo.toml`: gpui-component's published
-  release does not build against gpui-ce's HEAD.
-- **Look and feel:** modeled on [Zed](https://zed.dev) — a collapsible left
-  sidebar, one focused conversation, and an optional right details panel. No
-  tabs, and no movable pane grid.
+- **GUI framework:** [`gpui`](https://gpui.rs), taken from the
+  [Zed](https://github.com/zed-industries/zed) repository, with
+  [`gpui-component`](https://github.com/longbridge/gpui-component) for the
+  window root, icons and text input.
+- **Look and feel:** modeled on Zed — a collapsible left sidebar, one focused
+  conversation, and an optional right details panel. No tabs, and no movable
+  pane grid.
 - **Themes:** TOML files in `~/.config/petunia/themes/`, documented by
   `themes.example.toml`. A theme carries a full semantic colour token set plus
   typography, and is hot-reloaded. The built-ins are `dark` and `light` —
-  neutral cool greys with a violet accent. Not Catppuccin, and not any other
-  borrowed scheme.
+  neutral greys, no hue, spending their only bright value on the send button.
+  Not Catppuccin, and not any other borrowed scheme.
 
 ## Layout
 
 Follow the reference design, not the layout the old iced client used. The iced
 version is gone and its arrangement is not a precedent for anything.
 
-- **Sidebar.** Small quiet section headers with their own affordances, and
-  two-line entries carrying real metadata — not a flat list of one-line rows.
-  Identity sits at the very bottom.
+- **Sidebar.** Runs the full height of the window, with the traffic lights
+  floating over its own top padding. Small quiet section headers and two-line
+  entries carrying real metadata. Identity sits at the very bottom.
+- **Header.** Belongs to the conversation column, not the whole window — a
+  full-width strip leaves a dead band above the sidebar. No rule beneath it;
+  the columns are what separate things.
 - **Composer.** A rounded card floating over the conversation with its controls
-  *inside* it, right-aligned, and a thin context strip beneath. Not a bordered
-  field with a row of buttons stacked above or below it.
+  *inside* it, right-aligned, and a thin context strip beneath.
 - **Chrome.** Generous vertical rhythm, hairline borders, rounded chips, muted
-  secondary text. Panels are toggled from icons at the window's edges.
+  secondary text.
 - **Messages.** Discord-style runs: an avatar gutter, one header per run,
-  hanging indent. This is the one place that deliberately departs from the
-  reference, which is not a chat app.
+  hanging indent. The one place that departs from the reference, which is not a
+  chat app.
 
-The first version implements only basic features, but the goal is a fully-featured
-Signal client. Structure the project so that future features can be added without
-reworking what already exists.
+Anything with a visual opinion goes in `src/ui/kit.rs`, so the look is one
+decision rather than a per-view accident.
 
-## Layout
+## Source layout
 
 - `src/signal/` — the Signal engine: the worker thread, the command/event
   protocol, presage's store, petunia's own sqlite tables, and the media cache.
   Framework-agnostic apart from `bridge.rs`.
 - `src/data/` — the model the views read: threads, messages, history, the
-  sidebar index. Framework-agnostic; no gpui imports belong here.
+  sidebar index. Framework-agnostic; **no gpui imports belong here**.
 - `src/config/` — `config.toml`, themes, and keybindings.
+- `src/store.rs` — the one entity views observe, and the only way they talk back
+  to the worker.
 - `src/ui/` — everything gpui.
+
+## Building
+
+`protoc` must be on `PATH`; a presage dependency generates code from `.proto`
+files at build time.
+
+## Traps
+
+Every one of these has already cost a debugging session.
+
+- **Two copies of gpui.** `gpui-component` declares a *bare* git dependency on
+  the Zed repo. Cargo treats `git = url` and `git = url, rev = ...` as different
+  sources, so pinning a revision silently builds a second, type-incompatible
+  gpui. The dependency is deliberately unpinned; `Cargo.lock` does the pinning.
+  Check with `grep -c '^name = "gpui"$' Cargo.lock` — it must be `1`.
+- **gpui-ce does not work here.** The community fork is missing what
+  gpui-component uses (`flex_grow_1`, `container_query`). It was tried and
+  abandoned.
+- **Icons need the asset source.** `application().with_assets(...)` must be
+  passed `gpui_component_assets::Assets`, or every icon silently draws nothing.
+- **Actions dispatch along the focus path.** If nothing has claimed focus, no
+  keybinding fires anywhere. The workspace holds a `FocusHandle` and takes focus
+  at launch.
+- **Timestamps are milliseconds**, but `group_within` is configured in seconds.
+  Convert at the boundary.
+- **Commands sent before the worker reports in** used to be dropped. The window
+  is clickable a second or two before `Event::Ready`; `Store` queues and flushes.
+- **`max_w`/`max_h` on an image is not enough.** An image's natural size is its
+  pixel size, so the fitted size is computed from the pointer's dimensions.
 
 ## Coding rules
 
@@ -60,8 +91,7 @@ reworking what already exists.
 - **No comments** unless absolutely necessary — code should explain itself.
   Comment only what stays genuinely surprising (protocol quirks, invariants,
   `unsafe`).
+- **No false affordances.** A control that looks like it does something must do
+  it, or not be drawn.
 
-## Building
-
-`protoc` must be on `PATH` (a presage dependency generates code from `.proto`
-files at build time).
+See `TODO.md` for what is left.
