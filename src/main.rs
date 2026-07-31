@@ -25,7 +25,10 @@ fn main() {
         )
         .init();
 
-    gpui_platform::application().run(|cx: &mut App| {
+    // Carries the icon set; without it every icon renders as nothing.
+    let app = gpui_platform::application().with_assets(gpui_component_assets::Assets);
+
+    app.run(|cx: &mut App| {
         gpui_component::init(cx);
 
         let loaded = config::load();

@@ -82,12 +82,35 @@ pub struct Typography {
 impl Default for Typography {
     fn default() -> Self {
         Self {
-            family: "Inter".into(),
-            mono: "JetBrains Mono".into(),
+            family: system_ui().into(),
+            mono: system_mono().into(),
             ui_size: 13.0,
             message_size: 14.0,
-            line_height: 1.55,
+            line_height: 1.5,
         }
+    }
+}
+
+/// The platform's own interface font. Naming a specific family by default would
+/// be worse everywhere it is not installed, and on macOS nothing beats the
+/// system one for this.
+const fn system_ui() -> &'static str {
+    if cfg!(target_os = "macos") {
+        ".SystemUIFont"
+    } else if cfg!(target_os = "windows") {
+        "Segoe UI"
+    } else {
+        "sans-serif"
+    }
+}
+
+const fn system_mono() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "SF Mono"
+    } else if cfg!(target_os = "windows") {
+        "Consolas"
+    } else {
+        "monospace"
     }
 }
 

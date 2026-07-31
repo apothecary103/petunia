@@ -23,6 +23,16 @@ pub struct Store {
     pub link_failure: Option<String>,
     /// The conversation on screen. A message arriving here is read, not unread.
     active: Option<Thread>,
+    /// What the details panel is looking at. `None` means the conversation
+    /// itself, which is what opening the panel with nothing picked shows.
+    focus: Option<Focus>,
+}
+
+/// Something worth inspecting, named by what it is rather than by which panel
+/// happens to show it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Focus {
+    Person(uuid::Uuid),
 }
 
 /// What views react to. A repaint alone is `cx.notify()`; these are the moments
@@ -33,6 +43,8 @@ pub enum StoreEvent {
     /// A page of history arrived for a thread, and the list has to keep its
     /// scroll position if it was a page of *older* messages.
     History { older: bool },
+    /// Something was clicked that wants the details panel open.
+    Inspecting,
     Failed(String),
 }
 
@@ -45,6 +57,7 @@ impl Store {
             state: None,
             commands: None,
             queued: Vec::new(),
+            focus: None,
             link_url: None,
             link_failure: None,
             active: None,
@@ -57,6 +70,18 @@ impl Store {
 
     pub fn active(&self) -> Option<&Thread> {
         self.active.as_ref()
+    }
+
+    pub fn focus(&self) -> Option<&Focus> {
+        self.focus.as_ref()
+    }
+
+    /// Emitted rather than applied here, because whether the panel opens is the
+    /// workspace's business, not the model's.
+    pub fn inspect(&mut self, focus: Option<Focus>, cx: &mut Context<Self>) {
+        self.focus = focus;
+        cx.emit(StoreEvent::Inspecting);
+        cx.notify();
     }
 
     /// Opens a conversation, loading its newest page the first time.
@@ -77,6 +102,8 @@ impl Store {
         }
 
         self.active = Some(thread);
+        // Opening a conversation is not a claim about whose profile you wanted.
+        self.focus = None;
         cx.notify();
     }
 

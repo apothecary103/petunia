@@ -1,8 +1,9 @@
 use gpui::prelude::*;
 use gpui::{App, Context, Entity, SharedString, Subscription, Window, div, px};
-use gpui_component::ActiveTheme;
+use gpui_component::{ActiveTheme, IconName};
 
 use super::conversation::Conversation;
+use super::details::Details;
 use super::kit;
 use super::linking::Linking;
 use super::sidebar::Sidebar;
@@ -25,6 +26,7 @@ enum Screen {
     Main {
         sidebar: Entity<Sidebar>,
         conversation: Entity<Conversation>,
+        details: Entity<Details>,
     },
 }
 
@@ -55,6 +57,7 @@ impl Workspace {
     fn enter_main(&mut self, cx: &mut Context<Self>) {
         let sidebar = cx.new(|cx| Sidebar::new(self.store.clone(), cx));
         let conversation = cx.new(|cx| Conversation::new(self.store.clone(), cx));
+        let details = cx.new(|cx| Details::new(self.store.clone(), cx));
 
         if let Some(thread) = self.session.active.clone() {
             self.store
@@ -64,6 +67,7 @@ impl Workspace {
         self.screen = Screen::Main {
             sidebar,
             conversation,
+            details,
         };
     }
 
@@ -74,9 +78,21 @@ impl Workspace {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let StoreEvent::Linked = event {
-            self.enter_main(cx);
-            cx.notify();
+        match event {
+            StoreEvent::Linked => {
+                self.enter_main(cx);
+                cx.notify();
+            }
+            // Clicking a name is a request to see it, so the panel opens
+            // itself rather than making you find the toggle.
+            StoreEvent::Inspecting => {
+                if !self.session.details.open {
+                    self.session.details.open = true;
+                    self.session.save();
+                }
+                cx.notify();
+            }
+            _ => {}
         }
     }
 
@@ -120,6 +136,7 @@ impl Render for Workspace {
             Screen::Main {
                 sidebar,
                 conversation,
+                details,
             } => {
                 let title = self
                     .store
@@ -157,9 +174,7 @@ impl Render for Workspace {
                                 .border_color(border)
                                 .bg(palette.surface)
                                 .p_4()
-                                .text_size(px(palette.typography.ui_size))
-                                .text_color(palette.text_muted)
-                                .child("Details"),
+                                .child(details.clone()),
                         )
                     });
 
@@ -206,7 +221,7 @@ impl Workspace {
             .flex_none()
             .child(kit::icon_button(
                 "toggle-sidebar",
-                "◧",
+                IconName::PanelLeft,
                 palette,
                 cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)),
             ))
@@ -226,7 +241,7 @@ impl Workspace {
             )
             .child(kit::icon_button(
                 "toggle-details",
-                "◨",
+                IconName::PanelRight,
                 palette,
                 cx.listener(|this, _, _, cx| this.toggle_details(cx)),
             ))

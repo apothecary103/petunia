@@ -1,29 +1,43 @@
 use chrono::{Local, NaiveDate};
 use gpui::prelude::*;
-use gpui::{Context, Entity, MouseButton, SharedString, Window, div, px};
+use gpui::{Context, Entity, MouseButton, ScrollHandle, SharedString, Window, div, px};
 
 use super::avatar::avatar;
 use super::composer::Composer;
 use super::kit;
 use super::message::group::{self, Entry};
+use super::message::content;
 use super::relative;
 use crate::config::Theme;
 use crate::config::messages::{Spacing, Timestamps};
 use crate::data::{Message, State, Thread};
 use crate::signal::Command;
-use crate::store::Store;
+use crate::store::{Focus, Store};
 use crate::theme::ActivePalette;
 
 /// The focused conversation: its message list, and in the next phase the
 /// composer beneath it.
 pub struct Conversation {
     store: Entity<Store>,
+    scroll: ScrollHandle,
+    /// The thread the scroll position belongs to, so switching conversations
+    /// starts at the newest message rather than wherever the last one was.
+    anchored: Option<Thread>,
 }
 
 impl Conversation {
     pub fn new(store: Entity<Store>, cx: &mut Context<Self>) -> Self {
         cx.observe(&store, |_, _, cx| cx.notify()).detach();
-        Self { store }
+        Self {
+            store,
+            scroll: ScrollHandle::new(),
+            anchored: None,
+        }
+    }
+
+    fn inspect(&mut self, sender: uuid::Uuid, cx: &mut Context<Self>) {
+        self.store
+            .update(cx, |store, cx| store.inspect(Some(Focus::Person(sender)), cx));
     }
 
     fn load_older(&mut self, thread: Thread, cx: &mut Context<Self>) {
@@ -63,6 +77,10 @@ impl Render for Conversation {
         let timestamps = store.config.messages.timestamps;
         // The config counts seconds; message timestamps are milliseconds.
         let group_within_ms = store.config.messages.group_within * 1000;
+        let max_image = (
+            store.config.media.image_max_width,
+            store.config.media.image_max_height,
+        );
 
         let Some(history) = state.history(&thread).filter(|history| !history.is_empty()) else {
             return div()
@@ -81,6 +99,13 @@ impl Render for Conversation {
         };
 
         let entries = group::entries(history.messages(), history.first_unread(), group_within_ms);
+
+        // A conversation opens at its newest message, and stays where it was
+        // put once you have scrolled it yourself.
+        if self.anchored.as_ref() != Some(&thread) {
+            self.anchored = Some(thread.clone());
+            self.scroll.scroll_to_bottom();
+        }
 
         let mut list = kit::measured()
             .flex()
@@ -123,7 +148,22 @@ impl Render for Conversation {
                 Entry::UnreadMarker => unread_marker(&palette, spacing),
                 Entry::Update(message) => update_line(message, &palette, spacing),
                 Entry::Run(run) => {
-                    run_block(&run, state, &palette, spacing, timestamps).into_any_element()
+                    let sender = run.sender;
+                    let on_sender = std::rc::Rc::new(cx.listener(
+                        move |this: &mut Self, _, _: &mut Window, cx: &mut Context<Self>| {
+                            this.inspect(sender, cx)
+                        },
+                    ));
+                    run_block(
+                        &run,
+                        state,
+                        &palette,
+                        spacing,
+                        timestamps,
+                        max_image,
+                        on_sender,
+                    )
+                    .into_any_element()
                 }
             });
         }
@@ -135,6 +175,7 @@ impl Render for Conversation {
             .child(
                 div()
                     .id("messages")
+                    .track_scroll(&self.scroll)
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
@@ -192,6 +233,8 @@ fn run_block(
     palette: &Theme,
     spacing: Spacing,
     timestamps: Timestamps,
+    max_image: (f32, f32),
+    on_sender: std::rc::Rc<dyn Fn(&gpui::MouseDownEvent, &mut Window, &mut gpui::App)>,
 ) -> gpui::Div {
     let name = state.sender_name(run.sender);
     let tint = palette.accent_for(run.sender.as_bytes());
@@ -203,8 +246,15 @@ fn run_block(
         .gap_2()
         .child(
             div()
+                .id("sender")
+                .cursor_pointer()
                 .text_size(px(spacing.body))
                 .text_color(tint)
+                .hover(|this| this.underline())
+                .on_mouse_down(MouseButton::Left, {
+                    let on_sender = on_sender.clone();
+                    move |event, window, cx| on_sender(event, window, cx)
+                })
                 .child(SharedString::from(name.clone())),
         )
         .when_some(first.filter(|_| timestamps != Timestamps::Never), |this, message| {
@@ -217,23 +267,36 @@ fn run_block(
         });
 
     let bodies = run.messages.iter().map(|message| {
-        div()
-            .text_size(px(spacing.body))
-            .text_color(palette.text)
-            .child(SharedString::from(message.summary()))
+        content::Body {
+            message,
+            state,
+            theme: palette,
+            spacing,
+            max_image,
+        }
+        .render()
     });
 
     div()
         .flex()
         .items_start()
         .gap(px(spacing.gutter - spacing.avatar))
-        .child(avatar(
-            state.avatar_for(run.sender),
-            &name,
-            run.sender.as_bytes(),
-            spacing.avatar,
-            palette,
-        ))
+        .child(
+            div()
+                .id("sender-avatar")
+                .flex_none()
+                .cursor_pointer()
+                .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                    on_sender(event, window, cx)
+                })
+                .child(avatar(
+                    state.avatar_for(run.sender),
+                    &name,
+                    run.sender.as_bytes(),
+                    spacing.avatar,
+                    palette,
+                )),
+        )
         .child(
             div()
                 .flex().flex_col()

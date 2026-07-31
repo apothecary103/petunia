@@ -4,8 +4,14 @@
 
 use gpui::prelude::*;
 use gpui::{App, Div, Hsla, MouseButton, SharedString, Stateful, Window, div, px};
+use gpui_component::{Icon, IconName};
 
 use crate::config::Theme;
+
+/// An icon at a weight that reads as chrome rather than as content.
+pub fn icon(name: IconName, size: f32, tint: Hsla) -> Icon {
+    Icon::new(name).size(px(size)).text_color(tint)
+}
 
 /// The rounding used everywhere. One value, so nothing drifts.
 pub const RADIUS: f32 = 8.0;
@@ -56,7 +62,7 @@ pub fn section(label: impl Into<SharedString>, theme: &Theme) -> Div {
 /// its chrome, only glyphs that light up.
 pub fn icon_button(
     id: impl Into<gpui::ElementId>,
-    glyph: impl Into<SharedString>,
+    name: IconName,
     theme: &Theme,
     on_click: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
@@ -68,11 +74,9 @@ pub fn icon_button(
         .items_center()
         .justify_center()
         .rounded(px(6.0))
-        .text_size(px(12.0))
-        .text_color(theme.text_muted)
-        .hover(|this| this.bg(theme.hover).text_color(theme.text_dim))
+        .hover(|this| this.bg(theme.hover))
         .on_mouse_down(MouseButton::Left, on_click)
-        .child(glyph.into())
+        .child(icon(name, 15.0, theme.text_muted))
 }
 
 /// A small rounded label. Used for counts, states and anything annotating
