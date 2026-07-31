@@ -40,7 +40,7 @@ core-foundation = "0.10.1"
 objc2-core-graphics = "0.3.2"
 objc2-image-io = "0.3.2"
 objc2-core-foundation = "0.3.2"
-objc2-app-kit = { version = "0.3.2", features = ["NSVisualEffectView", "NSView", "NSWindow", "NSApplication", "NSResponder", "NSGraphics"] }
+objc2-app-kit = { version = "0.3.2", features = ["NSAppearance", "NSVisualEffectView", "NSView", "NSWindow", "NSApplication", "NSResponder", "NSGraphics"] }
 
 [patch.crates-io]
 curve25519-dalek = { git = "https://github.com/signalapp/curve25519-dalek", tag = "signal-curve25519-4.1.3" }

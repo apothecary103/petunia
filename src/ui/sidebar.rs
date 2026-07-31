@@ -230,12 +230,13 @@ fn connection(connection: crate::signal::Connection, palette: &Theme) -> Div {
 }
 
 fn shell(palette: &Theme, translucent: bool, body: Div) -> Div {
-    // Nearly solid. The vibrancy layer underneath is not there to be looked
+    // Mostly solid. The vibrancy layer underneath is not there to be looked
     // through -- at any strength where the wallpaper is legible the list stops
     // being -- but to give the surface the depth a flat fill does not have.
+    // At 0.97 there was nothing to see; below about 0.9 the frost reads.
     let backing = match translucent {
         true => gpui::Hsla {
-            a: 0.97,
+            a: 0.84,
             ..palette.surface
         },
         false => palette.surface,

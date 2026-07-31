@@ -103,8 +103,11 @@ Every one of these has already cost a debugging session.
   puts an `NSVisualEffectView` across the *whole* window using the `Selection`
   material, through which the desktop is simply there, in focus. `ui::vibrancy`
   asks for `Transparent` instead and puts its own view behind the conversation
-  list with the `Sidebar` material, which is what Finder uses and what people
-  mean by a blurred sidebar.
+  list with the `HUDWindow` material, the thickest frost AppKit offers, under an
+  appearance taken from the theme rather than the system. The semantic `Sidebar`
+  material is too thin to read through the list's own fill, which stays mostly
+  opaque for the list to be legible — at alpha 0.97 the blur was invisible
+  altogether, which reads as "the blur is broken".
 - **`gpui_component::Root` paints the theme background** across the window. It
   covers anything behind it, vibrancy included; it implements `Styled`, so
   `main` clears it when the sidebar is translucent.

@@ -10,8 +10,14 @@
 //! the content, sized to the list. Per-region, which gpui has no way to express,
 //! and thick, which it has no way to ask for.
 //!
-//! No `unsafe` here: everything it touches is safe in objc2's bindings once the
-//! main thread has been established, which `MainThreadMarker` does.
+//! The material is `HUDWindow`, the thickest frost AppKit will hand out, under
+//! an appearance taken from petunia's theme rather than the system's: a light
+//! theme on a dark desktop would otherwise get a dark slab behind a light fill.
+//!
+//! The only `unsafe` is reading the two `NSAppearanceName` constants, which are
+//! `extern` statics AppKit has always had. Everything else is safe in objc2's
+//! bindings once the main thread has been established, which `MainThreadMarker`
+//! does.
 
 #[cfg(target_os = "macos")]
 mod platform {
@@ -20,34 +26,42 @@ mod platform {
     use objc2::MainThreadOnly;
     use objc2::rc::Retained;
     use objc2_app_kit::{
+        NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
         NSApplication, NSAutoresizingMaskOptions, NSVisualEffectBlendingMode,
         NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView, NSWindowOrderingMode,
     };
     use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
 
+    /// The view and the appearance it was last given, kept rather than looked
+    /// up. `NSView`'s tag is read-only without subclassing, and this is
+    /// main-thread-only anyway -- which is the same thread every call arrives
+    /// on, since it is a render.
+    struct Blur {
+        view: Retained<NSVisualEffectView>,
+        light: bool,
+    }
+
     thread_local! {
-        /// The view, kept rather than looked up. `NSView`'s tag is read-only
-        /// without subclassing, and this is main-thread-only anyway -- which is
-        /// the same thread every call arrives on, since it is a render.
-        static VIEW: RefCell<Option<Retained<NSVisualEffectView>>> = const { RefCell::new(None) };
+        static BLUR: RefCell<Option<Blur>> = const { RefCell::new(None) };
     }
 
     /// Puts the blur behind the leftmost `width` points of the window, or takes
     /// it away when the list is not showing.
     ///
     /// Called per frame and cheap when nothing has changed: the view is held
-    /// rather than looked up, and its frame is only written when it differs.
-    pub fn sidebar(width: f32, showing: bool) {
+    /// rather than looked up, and its frame and appearance are only written
+    /// when they differ.
+    pub fn sidebar(width: f32, showing: bool, light: bool) {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
 
-        VIEW.with(|held| {
+        BLUR.with(|held| {
             let mut held = held.borrow_mut();
 
             if !showing {
-                if let Some(view) = held.take() {
-                    view.removeFromSuperview();
+                if let Some(blur) = held.take() {
+                    blur.view.removeFromSuperview();
                 }
                 return;
             }
@@ -68,17 +82,24 @@ mod platform {
                 NSSize::new(f64::from(width), content.bounds().size.height),
             );
 
-            if let Some(view) = held.as_ref() {
-                if view.frame() != wanted {
-                    view.setFrame(wanted);
+            if let Some(blur) = held.as_mut() {
+                if blur.view.frame() != wanted {
+                    blur.view.setFrame(wanted);
+                }
+                if blur.light != light {
+                    blur.view.setAppearance(appearance(light).as_deref());
+                    blur.light = light;
                 }
                 return;
             }
 
             let view = NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), wanted);
-            // The material a sidebar is supposed to use. `Selection`, which gpui
-            // picks, is a tint and reads as plain transparency.
-            view.setMaterial(NSVisualEffectMaterial::Sidebar);
+            // The thickest frost AppKit offers. `Sidebar` is the semantically
+            // right one and far too thin to read through a nearly opaque fill;
+            // `Selection`, which gpui picks, is a tint and reads as plain
+            // transparency.
+            view.setMaterial(NSVisualEffectMaterial::HUDWindow);
+            view.setAppearance(appearance(light).as_deref());
             // Behind the window: what is being blurred is the desktop, not
             // whatever petunia drew underneath.
             view.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
@@ -88,8 +109,16 @@ mod platform {
             view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewHeightSizable);
 
             content.addSubview_positioned_relativeTo(&view, NSWindowOrderingMode::Below, None);
-            *held = Some(view);
+            *held = Some(Blur { view, light });
         });
+    }
+
+    fn appearance(light: bool) -> Option<Retained<NSAppearance>> {
+        let name = match light {
+            true => unsafe { NSAppearanceNameAqua },
+            false => unsafe { NSAppearanceNameDarkAqua },
+        };
+        NSAppearance::appearanceNamed(name)
     }
 }
 
@@ -97,7 +126,7 @@ mod platform {
 mod platform {
     /// Nothing to do: vibrancy is a macOS idea, and there is no equivalent to
     /// put behind a window elsewhere that is worth pretending about.
-    pub fn sidebar(_width: f32, _showing: bool) {}
+    pub fn sidebar(_width: f32, _showing: bool, _light: bool) {}
 }
 
 pub use platform::sidebar;
