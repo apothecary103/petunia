@@ -136,6 +136,28 @@ Every one of these has already cost a debugging session.
 - **Two crates wrap `CVPixelBuffer`.** gpui's `surface` takes `core-video`'s;
   AVFoundation's bindings produce `objc2-core-video`'s. Same pointer, so the
   conversion is a cast under a create rule (`video.rs`).
+- **A scrolling `div` builds every child every frame.** A scroll notifies the
+  view that owns the handle, so the whole element tree is rebuilt and re-laid
+  out — for a thread, that is every message in the history per frame of every
+  flick. The conversation uses gpui's `list` with `ListAlignment::Bottom`, which
+  builds only what is on screen plus `OVERDRAW`. Its scroll position is an item
+  index and an offset into it, so rows spliced in at the *front* carry the reader
+  with them and loading older messages needs no correction; row zero is always
+  present, even when it draws nothing, because a row that came and went would
+  shift every index behind it.
+- **A visible row is re-rendered every frame**, so anything derived in one has to
+  be cheap or cached. Two things here were not: `Theme::highlights` is a round
+  trip through Zed's theme JSON (~260µs), now built once per theme install and
+  read from the `Palette` global; and tree-sitter reparses a code block from
+  scratch (~600µs), now memoized in `ui::message::content` on the code, the
+  language and the theme.
+- **`FontWeight::MEDIUM` draws as Regular on macOS.** gpui hands font-kit a CSS
+  weight and font-kit matches per CSS Fonts 3. The system family's faces report
+  CoreText's own weights, and the conversion puts Medium at 530 rather than 500 —
+  so a request for 500 finds no exact match, hits the rule that checks 400 first,
+  and rasterises `.SFNS-Regular`. Semibold (600) and Bold (700) land exactly.
+  `kit::EMPHASIS` and `kit::STRONG` are the two weights above regular that macOS
+  actually draws; nothing should name a weight directly.
 
 ## Coding rules
 

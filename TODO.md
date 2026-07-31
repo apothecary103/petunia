@@ -4,7 +4,7 @@ Petunia reads and writes a real conversation. The sidebar, the message list, the
 composer, the media viewer, playback and the details panel are all live against
 a linked account.
 
-350 tests pass and `cargo clippy --all-targets` is clean. `cargo test`, and
+380 tests pass and `cargo clippy --all-targets` is clean. `cargo test`, and
 `cargo build && ./target/debug/petunia` to run it.
 
 ## What works
@@ -33,7 +33,9 @@ a linked account.
 - **Finding things.** cmd+f over every conversation, cmd+shift+f over the one on
   screen, cmd+k to jump to a conversation.
 - **The list.** Pinning, archiving, muting and flat folders, from right-click
-  menus; menus on messages and people too.
+  menus; menus on messages and people too. Deleting a conversation asks first and
+  clears this device's copy -- Signal's own "delete for me" goes through the
+  Storage Service, which presage does not expose, so it cannot reach the phone.
 - **Settings** (cmd+,) over every preference, writing `config.toml` so the file
   stays authoritative. Keybinding presets: standard, emacs, vim.
 - **Themes.** Petunia's two, and all eleven of Zed's, compiled in.

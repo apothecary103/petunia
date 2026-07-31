@@ -29,6 +29,9 @@ timestamps = "always"
 # Seconds. Messages from one sender closer together than this are grouped.
 group_within = 300
 date_separators = true
+# Attribute your own messages by your profile name rather than as "You". Applies
+# to mentions, quotes and reactions as well as to the run header.
+show_own_name = false
 
 [sidebar]
 width = 240.0
