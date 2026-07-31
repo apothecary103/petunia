@@ -1,6 +1,6 @@
 mod command;
+mod db;
 mod event;
-mod status;
 mod store;
 pub mod subscription;
 mod worker;
@@ -14,8 +14,8 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("store error: {0}")]
     Store(#[from] presage_store_sqlite::SqliteStoreError),
-    #[error("status store error: {0}")]
-    StatusStore(#[from] sqlx::Error),
+    #[error("database error: {0}")]
+    Database(#[from] sqlx::Error),
     #[error("signal error: {0}")]
     Signal(#[from] presage::Error<presage_store_sqlite::SqliteStoreError>),
 }

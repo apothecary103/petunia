@@ -15,7 +15,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-use super::status::StatusStore;
+use super::db::Db;
 use super::{Command, Error, Event, store};
 use crate::data::{self, Contact, ContactId, Group, Thread};
 
@@ -49,7 +49,12 @@ async fn emit(events: &mut Events, event: Event) {
 
 async fn serve(mut commands: UnboundedReceiver<Command>, mut events: Events) -> Result<(), Error> {
     let store = store::open().await?;
-    let statuses = StatusStore::open().await?;
+    let db = Db::open().await?;
+    match db.fail_stale_sends().await {
+        Ok(0) => {}
+        Ok(swept) => warn!(swept, "marked sends left in flight by a previous run as failed"),
+        Err(error) => warn!(%error, "failed to sweep stale sends"),
+    }
     let (mut manager, freshly_linked) = if store.is_registered().await {
         (Manager::load_registered(store).await?, false)
     } else {
@@ -73,7 +78,7 @@ async fn serve(mut commands: UnboundedReceiver<Command>, mut events: Events) -> 
     let (queue_tx, mut queue_rx) = oneshot::channel();
     tokio::task::spawn_local(receive(
         manager.clone(),
-        statuses.clone(),
+        db.clone(),
         events.clone(),
         queue_tx,
     ));
@@ -86,20 +91,20 @@ async fn serve(mut commands: UnboundedReceiver<Command>, mut events: Events) -> 
                 queue_drained = true;
                 info!(pending = pending.len(), "message queue drained");
                 for (thread, body, timestamp) in pending.drain(..) {
-                    send(&mut manager, &statuses, &mut events, thread, body, timestamp).await;
+                    send(&mut manager, &db, &mut events, thread, body, timestamp).await;
                 }
             }
             command = commands.recv() => match command {
                 Some(Command::SendText { thread, body, timestamp }) => {
-                    save_outgoing(&manager, &statuses, &thread, &body, timestamp).await;
+                    save_outgoing(&manager, &db, &thread, &body, timestamp).await;
                     if queue_drained {
-                        send(&mut manager, &statuses, &mut events, thread, body, timestamp).await;
+                        send(&mut manager, &db, &mut events, thread, body, timestamp).await;
                     } else {
                         pending.push((thread, body, timestamp));
                     }
                 }
                 Some(Command::LoadThread(thread)) => {
-                    match load_history(&manager, &statuses, &thread, aci).await {
+                    match load_history(&manager, &db, &thread, aci).await {
                         Ok(messages) => {
                             emit(&mut events, Event::History { thread, messages }).await;
                         }
@@ -141,13 +146,13 @@ async fn link(store: SqliteStore, mut events: Events) -> Result<RegisteredManage
 
 async fn receive(
     mut manager: RegisteredManager,
-    statuses: StatusStore,
+    db: Db,
     mut events: Events,
     queue_tx: oneshot::Sender<()>,
 ) {
     let mut queue_signal = Some(queue_tx);
     loop {
-        match receive_once(&mut manager, &statuses, &mut events, &mut queue_signal).await {
+        match receive_once(&mut manager, &db, &mut events, &mut queue_signal).await {
             Ok(()) => warn!("message stream ended, reconnecting"),
             Err(error) => {
                 error!(%error, "failed to receive messages");
@@ -164,7 +169,7 @@ async fn receive(
 
 async fn receive_once(
     manager: &mut RegisteredManager,
-    statuses: &StatusStore,
+    db: &Db,
     events: &mut Events,
     queue_signal: &mut Option<oneshot::Sender<()>>,
 ) -> Result<(), Error> {
@@ -191,7 +196,8 @@ async fn receive_once(
             Received::Content(content) => {
                 debug!(timestamp = content.timestamp(), "received content");
                 if let Some((timestamps, status)) = data::receipt_from_content(&content) {
-                    if let Err(error) = statuses.upgrade(&timestamps, status).await {
+                    let recipient = content.metadata.sender.raw_uuid();
+                    if let Err(error) = db.record_receipts(&timestamps, recipient, status).await {
                         warn!(%error, "failed to save receipt statuses");
                     }
                     emit(events, Event::MessageStatus { timestamps, status }).await;
@@ -223,7 +229,7 @@ fn text_message(thread: &Thread, body: String, timestamp: u64) -> DataMessage {
 
 async fn save_outgoing(
     manager: &RegisteredManager,
-    statuses: &StatusStore,
+    db: &Db,
     thread: &Thread,
     body: &str,
     timestamp: u64,
@@ -252,14 +258,17 @@ async fn save_outgoing(
     if let Err(error) = manager.store().save_message(&thread.into(), content).await {
         warn!(%error, "failed to save outgoing message");
     }
-    if let Err(error) = statuses.set(timestamp, data::Status::Sending).await {
+    if let Err(error) = db
+        .set_send_state(timestamp, thread, data::Status::Sending)
+        .await
+    {
         warn!(%error, "failed to save message status");
     }
 }
 
 async fn send(
     manager: &mut RegisteredManager,
-    statuses: &StatusStore,
+    db: &Db,
     events: &mut Events,
     thread: Thread,
     body: String,
@@ -272,7 +281,7 @@ async fn send(
             data::Status::Failed
         }
     };
-    if let Err(error) = statuses.set(timestamp, status).await {
+    if let Err(error) = db.set_send_state(timestamp, &thread, status).await {
         warn!(%error, "failed to save message status");
     }
     emit(
@@ -307,7 +316,7 @@ async fn send_text(
 
 async fn load_history(
     manager: &RegisteredManager,
-    statuses: &StatusStore,
+    db: &Db,
     thread: &Thread,
     aci: Uuid,
 ) -> Result<Vec<data::Message>, Error> {
@@ -319,22 +328,31 @@ async fn load_history(
         .filter(|message| message.sender() == aci)
         .map(|message| message.timestamp())
         .collect();
-    let stored = statuses.get(&own).await?;
+    let stored = db.statuses(&own, recipients(manager, thread).await).await?;
     for message in messages
         .iter_mut()
         .filter(|message| message.sender() == aci)
     {
-        let status = stored
-            .get(&message.timestamp())
-            .copied()
-            .unwrap_or(data::Status::Sent);
-        message.status = Some(if status == data::Status::Sending {
-            data::Status::Failed
-        } else {
-            status
-        });
+        message.status = Some(
+            stored
+                .get(&message.timestamp())
+                .copied()
+                .unwrap_or(data::Status::Sent),
+        );
     }
     Ok(messages)
+}
+
+/// How many receipts a message needs before it counts as delivered or read.
+/// Group membership includes us, who never receipts our own message.
+async fn recipients(manager: &RegisteredManager, thread: &Thread) -> usize {
+    match thread {
+        Thread::Contact(_) => 1,
+        Thread::Group(master_key) => match manager.store().group(*master_key).await {
+            Ok(Some(group)) => group.members.len().saturating_sub(1).max(1),
+            _ => 1,
+        },
+    }
 }
 
 async fn fetch_avatars(mut manager: RegisteredManager, mut events: Events) {
