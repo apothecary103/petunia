@@ -10,6 +10,7 @@ mod ui;
 use std::sync::Arc;
 
 use gpui::prelude::*;
+use gpui::Focusable;
 use gpui::{App, Bounds, TitlebarOptions, WindowBounds, WindowOptions, point, px, size};
 use gpui_component::Root;
 
@@ -65,6 +66,9 @@ fn main() {
             },
             |window, cx| {
                 let workspace = cx.new(|cx| Workspace::new(store, window, cx));
+                // Nothing else claims focus on launch, and without it the
+                // keymap has no path to dispatch along.
+                window.focus(&workspace.read(cx).focus_handle(cx), cx);
                 cx.new(|cx| Root::new(workspace, window, cx))
             },
         )

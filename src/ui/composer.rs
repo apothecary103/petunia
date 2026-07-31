@@ -16,15 +16,38 @@ pub struct Composer<'a> {
     pub on_formatting: Box<dyn Fn(&gpui::MouseDownEvent, &mut gpui::Window, &mut gpui::App)>,
 }
 
-/// Signal's own formatting, in the order the toolbar shows it. The label is the
-/// glyph drawn on the button, since these have no icons in the set.
-const MARKS: [(&str, &str); 5] = [
-    ("bold", "B"),
-    ("italic", "I"),
-    ("strike", "S"),
-    ("mono", "M"),
-    ("spoiler", "▚"),
+/// Signal's own formatting. Each button is drawn in the style it applies, so it
+/// shows what it does rather than needing an icon to say so -- the icon set has
+/// no bold or italic, and the box-drawing glyph a spoiler wanted is simply
+/// absent from the system font.
+#[derive(Clone, Copy)]
+enum Mark {
+    Bold,
+    Italic,
+    Strikethrough,
+    Monospace,
+    Spoiler,
+}
+
+const MARKS: [Mark; 5] = [
+    Mark::Bold,
+    Mark::Italic,
+    Mark::Strikethrough,
+    Mark::Monospace,
+    Mark::Spoiler,
 ];
+
+impl Mark {
+    fn id(self) -> &'static str {
+        match self {
+            Self::Bold => "bold",
+            Self::Italic => "italic",
+            Self::Strikethrough => "strikethrough",
+            Self::Monospace => "monospace",
+            Self::Spoiler => "spoiler",
+        }
+    }
+}
 
 impl Composer<'_> {
     pub fn render(self) -> Div {
@@ -107,23 +130,32 @@ fn toolbar(palette: &Theme) -> Div {
         .bg(palette.elevated)
         .border_1()
         .border_color(palette.border)
-        .children(MARKS.iter().map(|(id, glyph)| {
-            div()
-                .id(*id)
-                .size(px(24.0))
+        .children(MARKS.iter().map(|mark| {
+            // A fixed square with everything centred inside it, so a glyph and
+            // an icon sit on the same baseline instead of drifting apart.
+            let button = div()
+                .id(mark.id())
+                .size(px(26.0))
                 .flex()
+                .flex_none()
                 .items_center()
                 .justify_center()
-                .rounded(px(5.0))
+                .rounded(px(6.0))
                 .hover(|this| this.bg(palette.hover))
-                .text_size(px(palette.typography.ui_size - 1.0))
-                .text_color(palette.text_dim)
-                .when(*id == "bold", |this| this.font_weight(gpui::FontWeight::BOLD))
-                .when(*id == "italic", |this| this.italic())
-                .when(*id == "mono", |this| {
-                    this.font_family(palette.typography.mono.clone())
-                })
-                .child(*glyph)
+                .text_size(px(palette.typography.ui_size))
+                .text_color(palette.text_dim);
+
+            match mark {
+                Mark::Bold => button.font_weight(gpui::FontWeight::BOLD).child("B"),
+                Mark::Italic => button.italic().child("I"),
+                Mark::Strikethrough => button.line_through().child("S"),
+                Mark::Monospace => button
+                    .font_family(palette.typography.mono.clone())
+                    .child("M"),
+                Mark::Spoiler => {
+                    button.child(kit::icon(IconName::EyeOff, 15.0, palette.text_dim))
+                }
+            }
         }))
 }
 

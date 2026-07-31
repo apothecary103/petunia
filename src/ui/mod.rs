@@ -5,6 +5,8 @@ pub mod details;
 pub mod kit;
 pub mod linking;
 pub mod message;
+pub mod palette;
 pub mod relative;
 pub mod sidebar;
+pub mod switcher;
 pub mod workspace;

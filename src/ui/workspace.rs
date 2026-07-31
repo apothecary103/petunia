@@ -6,6 +6,7 @@ use super::conversation::Conversation;
 use super::details::Details;
 use super::kit;
 use super::linking::Linking;
+use super::palette::{Dismissed, Switcher};
 use super::sidebar::Sidebar;
 use crate::actions;
 use crate::session::Session;
@@ -19,8 +20,13 @@ pub const TITLE_BAR: f32 = 40.0;
 /// conversation shell.
 pub struct Workspace {
     store: Entity<Store>,
+    /// Actions dispatch along the focus path, so the root has to be in it or
+    /// nothing bound to a key ever reaches this view.
+    focus: gpui::FocusHandle,
     screen: Screen,
     session: Session,
+    /// Present only while it is up, so nothing renders or listens otherwise.
+    switcher: Option<Entity<Switcher>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -44,8 +50,10 @@ impl Workspace {
 
         let mut workspace = Self {
             store: store.clone(),
+            focus: cx.focus_handle(),
             screen: Screen::Linking(linking),
             session: Session::load(),
+            switcher: None,
             _subscriptions: subscriptions,
         };
 
@@ -99,6 +107,27 @@ impl Workspace {
         }
     }
 
+    /// cmd+k. Raising it again while it is up refocuses and clears it, which is
+    /// what pressing the shortcut twice is asking for.
+    fn open_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(self.screen, Screen::Main { .. }) {
+            return;
+        }
+
+        let switcher = self.switcher.get_or_insert_with(|| {
+            let switcher = cx.new(|cx| Switcher::new(self.store.clone(), cx));
+            cx.subscribe(&switcher, |this, _, _: &Dismissed, cx| {
+                this.switcher = None;
+                cx.notify();
+            })
+            .detach();
+            switcher
+        });
+
+        switcher.update(cx, |switcher, cx| switcher.reset(window, cx));
+        cx.notify();
+    }
+
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         self.session.sidebar.open = !self.session.sidebar.open;
         self.session.save();
@@ -125,6 +154,12 @@ impl Workspace {
             0 => "Petunia".into(),
             unread => format!("({unread}) Petunia"),
         }
+    }
+}
+
+impl gpui::Focusable for Workspace {
+    fn focus_handle(&self, _cx: &App) -> gpui::FocusHandle {
+        self.focus.clone()
     }
 }
 
@@ -196,6 +231,7 @@ impl Render for Workspace {
         };
 
         div()
+            .track_focus(&self.focus)
             .size_full()
             .bg(palette.background)
             .text_color(palette.text)
@@ -205,7 +241,16 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &actions::ToggleDetails, _, cx| {
                 this.toggle_details(cx)
             }))
+            .on_action(cx.listener(|this, _: &actions::QuickSwitcher, window, cx| {
+                this.open_switcher(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &actions::Cancel, _, cx| {
+                if this.switcher.take().is_some() {
+                    cx.notify();
+                }
+            }))
             .child(body)
+            .children(self.switcher.clone())
     }
 }
 
