@@ -77,6 +77,11 @@ pub enum Event {
         messages: Vec<Message>,
         /// Whether older messages remain behind this page.
         more: bool,
+        /// The oldest stored row this page reached, which is what the page behind
+        /// it must ask from. Not the oldest message: a reaction or an edit is a
+        /// row that adds no message, and a page of only those would otherwise
+        /// leave the reader asking for it again forever.
+        covered: Option<u64>,
         /// Set when this page was requested by scrolling back rather than by
         /// opening the thread.
         older: bool,

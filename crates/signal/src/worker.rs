@@ -204,6 +204,7 @@ async fn serve(mut commands: UnboundedReceiver<Command>, mut events: Events) -> 
                                 thread,
                                 messages: loaded.messages,
                                 more: loaded.more,
+                                covered: loaded.covered,
                                 older: before.is_some(),
                             })
                             .await;
@@ -560,7 +561,9 @@ async fn send_message(
 struct Loaded {
     messages: Vec<data::Message>,
     more: bool,
-    pointers: Vec<(attachment::Id, AttachmentPointer)>,
+    /// The oldest row the page reached, message or not.
+    covered: Option<u64>,
+    pointers: Vec<data::Wanted>,
 }
 
 async fn load_history(
@@ -573,6 +576,14 @@ async fn load_history(
 ) -> Result<Loaded, Error> {
     let page = db.page(thread, before, super::command::PAGE).await?;
     let more = page.more;
+    // Every row the page reached, not only the ones that became a message: a
+    // reaction, an edit and a delete are rows too, and the page behind this one
+    // has to be asked for from behind them.
+    let covered = page
+        .rows
+        .iter()
+        .map(|row| row.metadata.timestamp.timestamp_millis() as u64)
+        .min();
     let pointers: Vec<_> = page.rows.iter().flat_map(data::pointers).collect();
     let mut messages = data::project(page.rows);
     hydrate(cache, &mut messages).await;
@@ -599,6 +610,7 @@ async fn load_history(
     Ok(Loaded {
         messages,
         more,
+        covered,
         pointers,
     })
 }
@@ -964,7 +976,7 @@ async fn fail_send(events: &mut Events, timestamp: u64) {
 async fn download_all(
     context: Media,
     thread: Thread,
-    pointers: Vec<(attachment::Id, AttachmentPointer)>,
+    pointers: Vec<data::Wanted>,
     forced: Option<attachment::Id>,
 ) {
     let Media {
@@ -977,10 +989,16 @@ async fn download_all(
         ..
     } = context;
 
-    for (id, pointer) in pointers {
+    for data::Wanted {
+        id,
+        pointer,
+        essential,
+    } in pointers
+    {
         let wanted = match &forced {
             Some(only) => *only == id,
-            None => auto_download(&pointer, &policy),
+            // A sticker is fetched whatever it claims to be; see `data::Wanted`.
+            None => essential || auto_download(&pointer, &policy),
         };
         if !wanted {
             continue;
