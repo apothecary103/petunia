@@ -38,22 +38,32 @@ version is gone and its arrangement is not a precedent for anything.
   hanging indent. The one place that departs from the reference, which is not a
   chat app.
 
-Anything with a visual opinion goes in `src/ui/kit.rs`, so the look is one
+Anything with a visual opinion goes in `ui/kit.rs`, so the look is one
 decision rather than a per-view accident.
 
 ## Source layout
 
-- `src/signal/` — the Signal engine: the worker thread, the command/event
-  protocol, presage's store, petunia's own sqlite tables, and the media cache.
-  Framework-agnostic apart from `bridge.rs`.
-- `src/data/` — the model the views read: threads, messages, history, the
-  sidebar index. Framework-agnostic; **no gpui imports belong here**.
-- `src/config/` — `config.toml`, themes, and keybindings.
-- `src/store.rs` — the one entity views observe, and the only way they talk back
-  to the worker.
-- `src/audio.rs`, `src/video.rs` — playback. Each owns its output device on a
-  thread the UI does not touch, and neither imports gpui.
-- `src/ui/` — everything gpui.
+A cargo workspace, so the dependency direction is enforced by the compiler
+rather than by good intentions. Each crate may only reach the ones below it.
+
+- `crates/data` — `petunia-data`, the model the views read: threads, messages,
+  history, the sidebar index, attachments. Depends on nothing of ours, and
+  **nothing of gpui's** — it does not even have it as a dependency, so an
+  accidental import will not compile.
+- `crates/config` — `petunia-config`: `config.toml`, themes, keybindings.
+  Depends on `data` for the one preference that names a model type.
+- `crates/media` — `petunia-media`: `audio` and `video`. Each owns its output
+  device on a thread the window does not touch, and neither has gpui either.
+- `crates/signal` — `petunia-signal`, the engine: the worker thread, the
+  command/event protocol, presage's store, petunia's own sqlite tables, and the
+  media cache. `spawn` starts it; the caller never sees the thread.
+- `crates/petunia` — the binary. `ui/` and everything gpui, `store.rs` (the one
+  entity views observe, and the only way they talk back to the worker),
+  `bridge.rs` (the worker's events into the store), `theme.rs`, `actions.rs`,
+  `session.rs`.
+
+Shared dependency versions live in the root `[workspace.dependencies]`; a crate
+manifest says `foo.workspace = true` and nothing else.
 
 Every control drawn on a message reports through one closure
 (`ui::message::act::Act`), which the conversation answers in a single match.

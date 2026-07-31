@@ -1,0 +1,20 @@
+[package]
+name = "petunia-data"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints.rust]
+# The model the views read. Nothing here may reach for a framework.
+unused_crate_dependencies = "warn"
+
+[dependencies]
+image.workspace = true
+presage.workspace = true
+serde.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+chrono.workspace = true
+presage-store-sqlite.workspace = true
+tokio.workspace = true

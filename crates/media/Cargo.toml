@@ -1,0 +1,27 @@
+[package]
+name = "petunia-media"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+petunia-data.workspace = true
+
+rodio.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation.workspace = true
+core-video.workspace = true
+objc2.workspace = true
+objc2-av-foundation.workspace = true
+objc2-core-foundation.workspace = true
+objc2-core-graphics.workspace = true
+objc2-core-media.workspace = true
+objc2-foundation.workspace = true
+objc2-image-io.workspace = true
+
+# The probe pumps the run loop by hand; `AVPlayer` fills its output on it.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2-core-foundation.workspace = true

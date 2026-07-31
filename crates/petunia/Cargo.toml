@@ -1,0 +1,40 @@
+[package]
+name = "petunia"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+default-run = "petunia"
+
+[dependencies]
+petunia-config.workspace = true
+petunia-data.workspace = true
+petunia-media.workspace = true
+petunia-signal.workspace = true
+
+chrono.workspace = true
+dirs.workspace = true
+futures.workspace = true
+gpui.workspace = true
+gpui-component.workspace = true
+gpui-component-assets.workspace = true
+gpui_platform.workspace = true
+image.workspace = true
+open.workspace = true
+presage.workspace = true
+qrcode.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-video.workspace = true
+objc2.workspace = true
+objc2-app-kit.workspace = true
+objc2-foundation.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

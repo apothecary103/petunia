@@ -1,0 +1,25 @@
+[package]
+name = "petunia-signal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+petunia-config.workspace = true
+petunia-data.workspace = true
+petunia-media.workspace = true
+
+chrono.workspace = true
+futures.workspace = true
+image.workspace = true
+presage.workspace = true
+presage-store-sqlite.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+filetime.workspace = true
+tempfile.workspace = true
