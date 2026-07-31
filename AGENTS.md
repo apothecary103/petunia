@@ -12,10 +12,12 @@ Petunia is a native Signal client, named after the flower.
   conversation, and an optional right details panel. No tabs, and no movable
   pane grid.
 - **Themes:** TOML files in `~/.config/petunia/themes/`, documented by
-  `themes.example.toml`. A theme carries a full semantic colour token set plus
-  typography, and is hot-reloaded. The built-ins are `dark` and `light` —
-  neutral greys, no hue, spending their only bright value on the send button.
-  Not Catppuccin, and not any other borrowed scheme.
+  `themes.example.toml`. A theme carries a full semantic colour token set, a
+  syntax palette for code blocks, and typography, and is hot-reloaded. Petunia's
+  own `dark` and `light` are neutral greys, no hue, spending their only bright
+  value on the send button — not Catppuccin, and not any other borrowed scheme.
+  Zed's eleven ship alongside them, converted by `script/zed-themes.py` and
+  compiled in.
 
 ## Layout
 
