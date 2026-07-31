@@ -659,6 +659,7 @@ fn run_block(run: &group::Run<'_>, frame: Run<'_>) -> gpui::Div {
                 .id("sender")
                 .cursor_pointer()
                 .text_size(px(spacing.body))
+                .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(tint)
                 .hover(|this| this.underline())
                 .on_mouse_down(MouseButton::Left, inspect.clone())

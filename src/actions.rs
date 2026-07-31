@@ -25,6 +25,7 @@ actions!(
         Cancel,
         Help,
         Settings,
+        ThemePicker,
     ]
 );
 
@@ -75,5 +76,6 @@ fn binding(keystroke: &str, action: Action) -> KeyBinding {
         Action::Cancel => KeyBinding::new(keystroke, Cancel, None),
         Action::Help => KeyBinding::new(keystroke, Help, None),
         Action::Settings => KeyBinding::new(keystroke, Settings, None),
+        Action::ThemePicker => KeyBinding::new(keystroke, ThemePicker, None),
     }
 }

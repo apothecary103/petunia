@@ -181,16 +181,12 @@ fn identity(
                 .child(
                     div()
                         .text_size(px(palette.typography.ui_size))
+                        .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(palette.text)
                         .truncate()
                         .child(SharedString::from(state.own_name())),
                 )
-                .child(
-                    div()
-                        .text_size(px(palette.typography.ui_size - 3.0))
-                        .text_color(palette.text_muted)
-                        .child(state.connection.label()),
-                ),
+                .child(connection(state.connection, palette)),
         )
         .child(kit::icon_button(
             "settings",
@@ -198,6 +194,39 @@ fn identity(
             palette,
             on_settings,
         ))
+}
+
+/// Whether messages are flowing, as a dot and a word. A lower-case sentence
+/// under someone's name reads as something they said; a dot reads as a state,
+/// which is what it is.
+fn connection(connection: crate::signal::Connection, palette: &Theme) -> Div {
+    let tint = match connection {
+        crate::signal::Connection::Connected => palette.success,
+        crate::signal::Connection::Reconnecting => palette.warning,
+        crate::signal::Connection::Connecting => palette.text_muted,
+    };
+
+    div()
+        .flex()
+        .items_center()
+        .gap_1p5()
+        .child(
+            div()
+                .flex_none()
+                .size(px(6.0))
+                .rounded_full()
+                .bg(tint)
+                // A ring, so the dot reads as a status light rather than as a
+                // bullet point that happens to be green.
+                .border_2()
+                .border_color(kit::tinted(tint)),
+        )
+        .child(
+            div()
+                .text_size(px(palette.typography.ui_size - 3.0))
+                .text_color(palette.text_muted)
+                .child(connection.label()),
+        )
 }
 
 fn shell(palette: &Theme, translucent: bool, body: Div) -> Div {

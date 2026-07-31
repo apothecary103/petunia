@@ -117,9 +117,9 @@ pub enum Connection {
 impl Connection {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Connecting => "connecting…",
-            Self::Connected => "connected",
-            Self::Reconnecting => "reconnecting…",
+            Self::Connecting => "Connecting",
+            Self::Connected => "Connected",
+            Self::Reconnecting => "Reconnecting",
         }
     }
 }

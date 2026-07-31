@@ -19,7 +19,12 @@ use crate::theme::ActivePalette;
 
 pub struct Dismissed;
 
+/// The whole file was asked for. The workspace opens the editor, because it
+/// covers more than this sheet does.
+pub struct EditFile;
+
 impl gpui::EventEmitter<Dismissed> for Settings {}
+impl gpui::EventEmitter<EditFile> for Settings {}
 
 pub struct Settings {
     store: Entity<Store>,
@@ -154,12 +159,24 @@ impl Settings {
             )
             .child(
                 div()
+                    .id("edit-file")
                     .flex_none()
-                    .text_size(px(palette.typography.ui_size - 3.0))
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .px_2()
+                    .py_1()
+                    .rounded(px(6.0))
+                    .cursor_pointer()
+                    .hover(|this| this.bg(palette.hover))
+                    .text_size(px(palette.typography.ui_size - 2.0))
                     .text_color(palette.text_muted)
-                    .child(SharedString::from(
-                        crate::config::config_path().display().to_string(),
-                    )),
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_, _, _, cx| cx.emit(EditFile)),
+                    )
+                    .child(kit::icon(IconName::File, 13.0, palette.text_muted))
+                    .child("Edit config.toml"),
             )
             .child(kit::icon_button(
                 "close-settings",

@@ -4,6 +4,7 @@ use gpui_component::{ActiveTheme, IconName};
 
 use super::conversation::{Conversation, Raise, Viewing};
 use super::details::{self, Details};
+use super::editor::{self, Editor};
 use super::help::{self, Help};
 use super::kit;
 use super::linking::Linking;
@@ -13,6 +14,7 @@ use super::palette::{Dismissed, Switcher};
 use super::prompt::{self, Prompt};
 use super::search::{self, Scope, Search};
 use super::settings::{self, Settings};
+use super::themes::{self, Themes};
 use super::sidebar::Sidebar;
 use super::viewer::{self, Viewer};
 use crate::actions;
@@ -43,6 +45,8 @@ pub struct Workspace {
     menu: Option<Entity<Menu>>,
     settings: Option<Entity<Settings>>,
     prompt: Option<Entity<Prompt>>,
+    themes: Option<Entity<Themes>>,
+    editor: Option<Entity<Editor>>,
     /// Always present, and draws nothing until something has gone wrong.
     notices: Entity<Notices>,
     /// What the window is called, so the platform is only told when it changes.
@@ -87,6 +91,8 @@ impl Workspace {
             menu: None,
             settings: None,
             prompt: None,
+            themes: None,
+            editor: None,
             notices,
             titled: String::new(),
             _subscriptions: subscriptions,
@@ -215,6 +221,56 @@ impl Workspace {
         cx.notify();
     }
 
+    /// The whole file, for the keys that have no control of their own.
+    fn open_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let editor = cx.new(|cx| Editor::new(window, cx));
+
+        cx.subscribe(&editor, |this, _, _: &editor::Dismissed, cx| {
+            this.editor = None;
+            cx.notify();
+        })
+        .detach();
+        editor.update(cx, |editor, cx| editor.take_focus(window, cx));
+
+        self.editor = Some(editor);
+        cx.notify();
+    }
+
+    /// A theme is a palette, not a name, so this previews as the selection
+    /// moves and puts back what you arrived with if you leave without choosing.
+    fn open_themes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let picker = self.themes.get_or_insert_with(|| {
+            let picker = cx.new(|cx| Themes::new(self.store.clone(), cx));
+            cx.subscribe(&picker, |this, _, _: &themes::Dismissed, cx| {
+                this.close_themes(cx);
+            })
+            .detach();
+            picker
+        });
+
+        picker.update(cx, |picker, cx| picker.reset(window, cx));
+        cx.notify();
+    }
+
+    /// Closing the picker puts back what was in force unless a theme was
+    /// actually chosen. Both ways out come through here -- the picker's own
+    /// Escape and the workspace's -- because one of them forgetting to restore
+    /// would make looking at a theme the same as picking it.
+    fn close_themes(&mut self, cx: &mut Context<Self>) {
+        let Some(picker) = self.themes.take() else {
+            return;
+        };
+        if let Some(restore) = picker.read(cx).abandoned() {
+            self.store.update(cx, |store, cx| {
+                let mut config = (*store.config).clone();
+                config.theme = restore.clone();
+                store.config_changed(std::sync::Arc::new(config), cx);
+            });
+            crate::theme::install(crate::config::theme::load(&restore).0, cx);
+        }
+        cx.notify();
+    }
+
     /// cmd+, opens the preferences. It edits `config.toml`, so everything it
     /// changes arrives through the same reload a hand edit would.
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -226,6 +282,14 @@ impl Workspace {
                     this.settings = None;
                     cx.notify();
                 })
+                .detach();
+                cx.subscribe_in(
+                    &settings,
+                    window,
+                    |this, _, _: &settings::EditFile, window, cx| {
+                        this.open_editor(window, cx)
+                    },
+                )
                 .detach();
                 settings
             })
@@ -420,6 +484,16 @@ impl Workspace {
     /// Escape, in the order a person means it: the overlay first, then whatever
     /// the composer is carrying.
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.editor.take().is_some() {
+            window.focus(&self.focus, cx);
+            cx.notify();
+            return;
+        }
+        if self.themes.is_some() {
+            self.close_themes(cx);
+            window.focus(&self.focus, cx);
+            return;
+        }
         if self.prompt.take().is_some() {
             window.focus(&self.focus, cx);
             cx.notify();
@@ -610,6 +684,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &actions::Settings, window, cx| {
                 this.open_settings(window, cx)
             }))
+            .on_action(cx.listener(|this, _: &actions::ThemePicker, window, cx| {
+                this.open_themes(window, cx)
+            }))
             .on_action(cx.listener(|this, _: &actions::Search, window, cx| {
                 this.open_search(Scope::Everywhere, window, cx)
             }))
@@ -668,6 +745,8 @@ impl Render for Workspace {
             .children(self.settings.clone())
             .children(self.menu.clone())
             .children(self.prompt.clone())
+            .children(self.themes.clone())
+            .children(self.editor.clone())
             .child(self.notices.clone())
     }
 }

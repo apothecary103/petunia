@@ -30,6 +30,7 @@ pub enum Action {
     Cancel,
     Help,
     Settings,
+    ThemePicker,
 }
 
 /// A parsed chord. `cmd` is the platform key on macOS and control elsewhere, so
@@ -126,7 +127,8 @@ impl Preset {
     }
 }
 
-const STANDARD: [(&str, Action); 19] = [
+const STANDARD: [(&str, Action); 20] = [
+    ("cmd+shift+t", Action::ThemePicker),
     ("cmd+,", Action::Settings),
     ("cmd+f", Action::Search),
     ("cmd+shift+f", Action::SearchThread),
@@ -151,7 +153,8 @@ const STANDARD: [(&str, Action); 19] = [
 /// emacs by way of a chat window: `C-s` searches, `C-v`/`M-v` page, `C-x b`
 /// switches buffers -- except that gpui binds single chords, so the two-key
 /// sequences become one.
-const EMACS: [(&str, Action); 19] = [
+const EMACS: [(&str, Action); 20] = [
+    ("ctrl+alt+t", Action::ThemePicker),
     ("ctrl+alt+,", Action::Settings),
     ("ctrl+s", Action::Search),
     ("alt+ctrl+s", Action::SearchThread),
@@ -176,7 +179,8 @@ const EMACS: [(&str, Action); 19] = [
 /// vim's motions where vim puts them. A composer has no normal mode to leave,
 /// so these are the chords that do not collide with typing: `ctrl+d`/`ctrl+u`
 /// page, `g`/`G` become `cmd+g` and `cmd+shift+g`, and `/` searches.
-const VIM: [(&str, Action); 19] = [
+const VIM: [(&str, Action); 20] = [
+    ("cmd+shift+t", Action::ThemePicker),
     ("cmd+,", Action::Settings),
     ("cmd+/", Action::Search),
     ("cmd+shift+/", Action::SearchThread),
@@ -244,6 +248,7 @@ fn name(action: Action) -> &'static str {
         Action::Cancel => "cancel",
         Action::Help => "help",
         Action::Settings => "settings",
+        Action::ThemePicker => "theme-picker",
     }
 }
 

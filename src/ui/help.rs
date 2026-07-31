@@ -138,6 +138,7 @@ fn describe(action: Action) -> &'static str {
         Action::Cancel => "Close, or drop what the composer is carrying",
         Action::Help => "This sheet",
         Action::Settings => "Settings",
+        Action::ThemePicker => "Change the theme",
     }
 }
 
