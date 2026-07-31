@@ -11,20 +11,24 @@ use crate::theme;
 pub fn view<'a, M: 'a>(messages: &'a [Message], aci: Uuid, contacts: &'a [Contact]) -> Element<'a, M> {
     let colors = theme::colors();
     let rows = messages.iter().map(|message| {
-        let own = message.sender == aci;
+        let own = message.sender() == aci;
         let sender_color = if own {
             colors.text
         } else {
-            theme::accent(message.sender.as_bytes())
+            theme::accent(message.sender().as_bytes())
+        };
+        let body = match message.text() {
+            Some(text) => Span::new(text),
+            None => Span::new(message.summary()).color(colors.dim),
         };
         let mut spans: Vec<Span<'a>> = vec![
-            Span::new(format_time(message.timestamp)).color(colors.muted),
+            Span::new(format_time(message.timestamp())).color(colors.muted),
             Span::new(" "),
-            Span::new(sender_name(message.sender, aci, contacts))
+            Span::new(sender_name(message.sender(), aci, contacts))
                 .color(sender_color)
                 .font(theme::FONT_BOLD),
             Span::new(": ").color(colors.muted),
-            Span::new(message.body.as_str()),
+            body,
         ];
         if let Some(status) = message.status {
             spans.push(
@@ -53,6 +57,7 @@ fn status_label(status: Status) -> &'static str {
         Status::Sent => "sent",
         Status::Delivered => "delivered",
         Status::Read => "read",
+        Status::Viewed => "viewed",
     }
 }
 

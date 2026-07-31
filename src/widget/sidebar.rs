@@ -109,11 +109,11 @@ fn preview_text(
     let Some(message) = message else {
         return String::new();
     };
-    let body = message.body.replace('\n', " ");
-    if message.sender == aci {
+    let body = message.summary();
+    if message.sender() == aci {
         format!("You: {body}")
     } else if let Thread::Group(_) = thread {
-        let name = contact_name(contacts, message.sender).unwrap_or("?");
+        let name = contact_name(contacts, message.sender()).unwrap_or("?");
         format!("{name}: {body}")
     } else {
         body
