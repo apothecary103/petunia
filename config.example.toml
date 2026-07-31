@@ -6,9 +6,13 @@
 #
 # The file is watched: saving it applies the change immediately.
 
-# "dark" (default) or "light". Any other name is read from
-# ~/.config/petunia/themes/<name>.toml, which is also where fonts and sizes
-# live. See themes.example.toml for the full set of keys.
+# Petunia's own "dark" and "light", or any of Zed's, which ship with it:
+#   one-dark, one-light, ayu-dark, ayu-mirage, ayu-light,
+#   gruvbox-dark, gruvbox-dark-hard, gruvbox-dark-soft,
+#   gruvbox-light, gruvbox-light-hard, gruvbox-light-soft
+# Any other name is read from ~/.config/petunia/themes/<name>.toml, which also
+# overrides a built-in of the same name. Fonts and sizes live in the theme file;
+# see themes.example.toml for the full set of keys.
 theme = "dark"
 
 # Multiplies every length in the interface, on top of whatever scaling your
