@@ -4,7 +4,6 @@ mod db;
 mod event;
 mod outgoing;
 mod store;
-pub mod subscription;
 mod worker;
 
 pub use command::{Command, Quoted};

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
 
-use iced::keyboard::{Key, Modifiers, key::Named};
+use gpui::{Keystroke, Modifiers};
 use serde::{Deserialize, Deserializer};
 
 /// Everything a keypress can ask for. Adding a variant and a default binding is
@@ -11,15 +11,10 @@ use serde::{Deserialize, Deserializer};
 #[serde(rename_all = "kebab-case")]
 pub enum Action {
     QuickSwitcher,
+    Search,
     FocusComposer,
-    NextPane,
-    PreviousPane,
-    SplitHorizontal,
-    SplitVertical,
-    ClosePane,
-    MaximizePane,
-    ToggleLayout,
     ToggleSidebar,
+    ToggleDetails,
     ScrollUp,
     ScrollDown,
     ScrollToTop,
@@ -33,19 +28,14 @@ pub enum Action {
     Help,
 }
 
-/// A parsed chord. `Modifiers::COMMAND` is LOGO on macOS and CTRL elsewhere, so
+/// A parsed chord. `cmd` is the platform key on macOS and control elsewhere, so
 /// one config file works on both.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct KeyBind {
     pub modifiers: Modifiers,
-    pub key: Chord,
-}
-
-/// The key half of a chord, normalised so `a` and `A` are the same binding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Chord {
-    Character(char),
-    Named(Named),
+    /// gpui's spelling of the key: a single character, or a name like
+    /// `escape` or `pageup`.
+    pub key: String,
 }
 
 #[derive(Debug, Clone)]
@@ -54,19 +44,21 @@ pub struct Keys {
 }
 
 impl Keys {
-    pub fn action(&self, key: &Key, modifiers: Modifiers) -> Option<Action> {
-        let chord = match key {
-            Key::Character(text) => Chord::Character(text.chars().next()?.to_ascii_lowercase()),
-            Key::Named(named) => Chord::Named(*named),
-            Key::Unidentified => return None,
-        };
-        // Shift is part of the chord for named keys but not for characters,
-        // where the character itself already encodes it.
-        let modifiers = match chord {
-            Chord::Character(_) => modifiers - Modifiers::SHIFT,
-            Chord::Named(_) => modifiers,
-        };
-        self.bindings.get(&KeyBind { modifiers, key: chord }).copied()
+    pub fn action(&self, keystroke: &Keystroke) -> Option<Action> {
+        self.bindings
+            .get(&KeyBind {
+                modifiers: keystroke.modifiers,
+                key: keystroke.key.to_ascii_lowercase(),
+            })
+            .copied()
+    }
+
+    /// Every binding as a gpui keystroke string, for registering the keymap.
+    pub fn bindings(&self) -> Vec<(String, Action)> {
+        self.bindings
+            .iter()
+            .map(|(bind, action)| (bind.keystroke(), *action))
+            .collect()
     }
 
     /// Every binding, for the help overlay, sorted so the list is stable.
@@ -85,15 +77,10 @@ impl Default for Keys {
     fn default() -> Self {
         let defaults = [
             ("cmd+k", Action::QuickSwitcher),
+            ("cmd+f", Action::Search),
             ("cmd+l", Action::FocusComposer),
-            ("cmd+]", Action::NextPane),
-            ("cmd+[", Action::PreviousPane),
-            ("cmd+d", Action::SplitVertical),
-            ("cmd+shift+d", Action::SplitHorizontal),
-            ("cmd+w", Action::ClosePane),
-            ("cmd+m", Action::MaximizePane),
-            ("cmd+t", Action::ToggleLayout),
             ("cmd+b", Action::ToggleSidebar),
+            ("cmd+i", Action::ToggleDetails),
             ("pageup", Action::ScrollUp),
             ("pagedown", Action::ScrollDown),
             ("cmd+home", Action::ScrollToTop),
@@ -122,7 +109,7 @@ impl Default for Keys {
 }
 
 /// Merged over the defaults, so binding one key does not silently drop the other
-/// twenty. A binding may be cleared by pointing it at `"none"`.
+/// fifteen. A binding may be cleared by pointing it at `"none"`.
 impl<'de> Deserialize<'de> for Keys {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let overrides = HashMap::<String, String>::deserialize(deserializer)?;
@@ -146,6 +133,16 @@ impl<'de> Deserialize<'de> for Keys {
     }
 }
 
+/// `cmd` means the platform key on macOS and control everywhere else, matching
+/// what gpui calls `secondary`.
+fn set_command(modifiers: &mut Modifiers) {
+    if cfg!(target_os = "macos") {
+        modifiers.platform = true;
+    } else {
+        modifiers.control = true;
+    }
+}
+
 impl FromStr for KeyBind {
     type Err = String;
 
@@ -154,9 +151,9 @@ impl FromStr for KeyBind {
             return Err("empty binding".to_owned());
         }
 
-        let mut modifiers = Modifiers::empty();
-        let mut key = None;
-        let set = |chord: Chord, key: &mut Option<Chord>| -> Result<(), String> {
+        let mut modifiers = Modifiers::default();
+        let mut key: Option<String> = None;
+        let set = |chord: String, key: &mut Option<String>| -> Result<(), String> {
             if key.is_some() {
                 return Err(format!("more than one key in {raw:?}"));
             }
@@ -170,7 +167,7 @@ impl FromStr for KeyBind {
         if parts.len() >= 2 && parts[parts.len() - 1].is_empty() && parts[parts.len() - 2].is_empty()
         {
             parts.truncate(parts.len() - 2);
-            set(Chord::Character('+'), &mut key)?;
+            set("+".to_owned(), &mut key)?;
         }
 
         for part in parts {
@@ -179,10 +176,10 @@ impl FromStr for KeyBind {
                 return Err(format!("empty part in {raw:?}"));
             }
             match part.to_ascii_lowercase().as_str() {
-                "cmd" | "command" | "super" | "meta" => modifiers |= Modifiers::COMMAND,
-                "ctrl" | "control" => modifiers |= Modifiers::CTRL,
-                "alt" | "option" | "opt" => modifiers |= Modifiers::ALT,
-                "shift" => modifiers |= Modifiers::SHIFT,
+                "cmd" | "command" | "super" | "meta" => set_command(&mut modifiers),
+                "ctrl" | "control" => modifiers.control = true,
+                "alt" | "option" | "opt" => modifiers.alt = true,
+                "shift" => modifiers.shift = true,
                 name => {
                     let chord = chord(name).ok_or_else(|| format!("unknown key: {name}"))?;
                     set(chord, &mut key)?;
@@ -195,90 +192,79 @@ impl FromStr for KeyBind {
     }
 }
 
-/// The canonical spelling of every named key, used for both parsing and
-/// display, so `Display` output always parses back to the same binding.
-const NAMED: &[(&str, Named)] = &[
-    ("escape", Named::Escape),
-    ("enter", Named::Enter),
-    ("tab", Named::Tab),
-    ("space", Named::Space),
-    ("backspace", Named::Backspace),
-    ("delete", Named::Delete),
-    ("up", Named::ArrowUp),
-    ("down", Named::ArrowDown),
-    ("left", Named::ArrowLeft),
-    ("right", Named::ArrowRight),
-    ("home", Named::Home),
-    ("end", Named::End),
-    ("pageup", Named::PageUp),
-    ("pagedown", Named::PageDown),
-    ("f1", Named::F1),
-    ("f2", Named::F2),
-    ("f3", Named::F3),
-    ("f4", Named::F4),
-    ("f5", Named::F5),
-    ("f6", Named::F6),
-    ("f7", Named::F7),
-    ("f8", Named::F8),
-    ("f9", Named::F9),
-    ("f10", Named::F10),
-    ("f11", Named::F11),
-    ("f12", Named::F12),
+/// Named keys petunia accepts. The spellings are gpui's, so a chord can be
+/// handed straight to the keymap without translation.
+const NAMED: &[&str] = &[
+    "escape", "enter", "tab", "space", "backspace", "delete", "insert", "up", "down", "left",
+    "right", "home", "end", "pageup", "pagedown", "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8",
+    "f9", "f10", "f11", "f12",
 ];
 
 /// Spellings accepted but not produced.
-const ALIASES: &[(&str, Named)] = &[
-    ("esc", Named::Escape),
-    ("return", Named::Enter),
-    ("del", Named::Delete),
-    ("pgup", Named::PageUp),
-    ("pgdn", Named::PageDown),
+const ALIASES: &[(&str, &str)] = &[
+    ("esc", "escape"),
+    ("return", "enter"),
+    ("del", "delete"),
+    ("pgup", "pageup"),
+    ("pgdn", "pagedown"),
 ];
 
-fn chord(name: &str) -> Option<Chord> {
-    if let Some((_, named)) = NAMED.iter().chain(ALIASES).find(|(spelling, _)| *spelling == name) {
-        return Some(Chord::Named(*named));
+fn chord(name: &str) -> Option<String> {
+    if NAMED.contains(&name) {
+        return Some(name.to_owned());
+    }
+    if let Some((_, canonical)) = ALIASES.iter().find(|(alias, _)| *alias == name) {
+        return Some((*canonical).to_owned());
     }
     let mut chars = name.chars();
     let first = chars.next()?;
     chars
         .next()
         .is_none()
-        .then_some(Chord::Character(first.to_ascii_lowercase()))
+        .then(|| first.to_ascii_lowercase().to_string())
 }
 
-fn spelling(named: Named) -> String {
-    NAMED
-        .iter()
-        .find(|(_, candidate)| *candidate == named)
-        .map(|(spelling, _)| (*spelling).to_owned())
-        .unwrap_or_else(|| format!("{named:?}").to_lowercase())
+impl KeyBind {
+    /// The gpui spelling, which uses `-` between parts.
+    pub fn keystroke(&self) -> String {
+        let mut parts = Vec::new();
+        if self.modifiers.platform {
+            parts.push("cmd");
+        }
+        if self.modifiers.control {
+            parts.push("ctrl");
+        }
+        if self.modifiers.alt {
+            parts.push("alt");
+        }
+        if self.modifiers.shift {
+            parts.push("shift");
+        }
+        parts.push(&self.key);
+        parts.join("-")
+    }
 }
 
+/// The spelling shown to the user and accepted in the config file, which uses
+/// `+` between parts.
 impl fmt::Display for KeyBind {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut parts = Vec::new();
-        if self.modifiers.contains(Modifiers::COMMAND) {
-            parts.push(if cfg!(target_os = "macos") { "cmd" } else { "ctrl" });
+        if self.modifiers.platform {
+            parts.push("cmd");
         }
-        // Off macOS, COMMAND *is* CTRL, so naming both would read "ctrl+ctrl".
-        if self.modifiers.contains(Modifiers::CTRL)
-            && !Modifiers::COMMAND.contains(Modifiers::CTRL)
-        {
-            parts.push("ctrl");
+        if self.modifiers.control {
+            // Off macOS `cmd` *is* control, so it is named "cmd" to match what
+            // the config file said rather than reading "ctrl" back.
+            parts.push(if cfg!(target_os = "macos") { "ctrl" } else { "cmd" });
         }
-        if self.modifiers.contains(Modifiers::ALT) {
+        if self.modifiers.alt {
             parts.push("alt");
         }
-        if self.modifiers.contains(Modifiers::SHIFT) {
+        if self.modifiers.shift {
             parts.push("shift");
         }
-
-        let key = match self.key {
-            Chord::Character(character) => character.to_string(),
-            Chord::Named(named) => spelling(named),
-        };
-        parts.push(&key);
+        parts.push(&self.key);
         write!(formatter, "{}", parts.join("+"))
     }
 }
@@ -291,13 +277,27 @@ mod tests {
         raw.parse().expect(raw)
     }
 
+    fn command() -> Modifiers {
+        let mut modifiers = Modifiers::default();
+        set_command(&mut modifiers);
+        modifiers
+    }
+
+    fn press(key: &str, modifiers: Modifiers) -> Keystroke {
+        Keystroke {
+            modifiers,
+            key: key.to_owned(),
+            key_char: None,
+        }
+    }
+
     #[test]
     fn parses_a_bare_key() {
         assert_eq!(
             bind("k"),
             KeyBind {
-                modifiers: Modifiers::empty(),
-                key: Chord::Character('k')
+                modifiers: Modifiers::default(),
+                key: "k".to_owned(),
             }
         );
     }
@@ -309,7 +309,7 @@ mod tests {
 
     #[test]
     fn command_maps_to_the_platform_modifier() {
-        assert_eq!(bind("cmd+k").modifiers, Modifiers::COMMAND);
+        assert_eq!(bind("cmd+k").modifiers, command());
         assert_eq!(bind("command+k"), bind("super+k"));
     }
 
@@ -322,7 +322,7 @@ mod tests {
     fn parses_named_keys_and_their_aliases() {
         assert_eq!(bind("esc"), bind("escape"));
         assert_eq!(bind("pgup"), bind("pageup"));
-        assert_eq!(bind("enter").key, Chord::Named(Named::Enter));
+        assert_eq!(bind("enter").key, "enter");
     }
 
     #[test]
@@ -334,10 +334,10 @@ mod tests {
 
     #[test]
     fn the_plus_key_itself_can_be_bound() {
-        assert_eq!(bind("cmd++").key, Chord::Character('+'));
-        assert_eq!(bind("cmd++").modifiers, Modifiers::COMMAND);
-        assert_eq!(bind("+").key, Chord::Character('+'));
-        assert_eq!(bind("+").modifiers, Modifiers::empty());
+        assert_eq!(bind("cmd++").key, "+");
+        assert_eq!(bind("cmd++").modifiers, command());
+        assert_eq!(bind("+").key, "+");
+        assert_eq!(bind("+").modifiers, Modifiers::default());
     }
 
     #[test]
@@ -345,7 +345,7 @@ mod tests {
         let keys = Keys::default();
 
         assert_eq!(
-            keys.action(&Key::Character("k".into()), Modifiers::COMMAND),
+            keys.action(&press("k", command())),
             Some(Action::QuickSwitcher)
         );
     }
@@ -354,22 +354,19 @@ mod tests {
     fn a_bare_letter_is_not_a_shortcut() {
         let keys = Keys::default();
 
-        assert_eq!(keys.action(&Key::Character("k".into()), Modifiers::empty()), None);
+        assert_eq!(keys.action(&press("k", Modifiers::default())), None);
     }
 
-    /// Shift is already encoded in the character a keyboard produces, so
-    /// requiring it to match as well would break capitals.
+    /// Unlike iced, gpui reports shift as a modifier rather than folding it into
+    /// the character, so `cmd+shift+r` and `cmd+r` are genuinely different.
     #[test]
-    fn shift_is_ignored_for_character_chords() {
+    fn shift_distinguishes_two_bindings() {
         let keys = Keys::default();
+        let mut shifted = command();
+        shifted.shift = true;
 
-        assert_eq!(
-            keys.action(
-                &Key::Character("k".into()),
-                Modifiers::COMMAND | Modifiers::SHIFT
-            ),
-            Some(Action::QuickSwitcher)
-        );
+        assert_eq!(keys.action(&press("r", command())), Some(Action::ReplyToLast));
+        assert_eq!(keys.action(&press("r", shifted)), Some(Action::MarkRead));
     }
 
     #[test]
@@ -377,7 +374,7 @@ mod tests {
         let keys = Keys::default();
 
         assert_eq!(
-            keys.action(&Key::Named(Named::Escape), Modifiers::empty()),
+            keys.action(&press("escape", Modifiers::default())),
             Some(Action::Cancel)
         );
     }
@@ -387,16 +384,13 @@ mod tests {
         let keys: Keys = toml::from_str(r#"quick-switcher = "cmd+p""#).unwrap();
 
         assert_eq!(
-            keys.action(&Key::Character("p".into()), Modifiers::COMMAND),
+            keys.action(&press("p", command())),
             Some(Action::QuickSwitcher)
         );
         // The old binding is gone, and everything else survives.
+        assert_eq!(keys.action(&press("k", command())), None);
         assert_eq!(
-            keys.action(&Key::Character("k".into()), Modifiers::COMMAND),
-            None
-        );
-        assert_eq!(
-            keys.action(&Key::Named(Named::Escape), Modifiers::empty()),
+            keys.action(&press("escape", Modifiers::default())),
             Some(Action::Cancel)
         );
     }
@@ -405,10 +399,7 @@ mod tests {
     fn a_binding_can_be_cleared() {
         let keys: Keys = toml::from_str(r#"quick-switcher = "none""#).unwrap();
 
-        assert_eq!(
-            keys.action(&Key::Character("k".into()), Modifiers::COMMAND),
-            None
-        );
+        assert_eq!(keys.action(&press("k", command())), None);
     }
 
     #[test]
@@ -443,9 +434,25 @@ mod tests {
 
     #[test]
     fn display_round_trips_through_the_parser() {
-        for raw in ["cmd+k", "cmd+shift+d", "escape", "pageup", "alt+left"] {
+        for raw in ["cmd+k", "cmd+shift+r", "escape", "pageup", "alt+left"] {
             let bind = bind(raw);
             assert_eq!(bind.to_string().parse::<KeyBind>().unwrap(), bind, "{raw}");
+        }
+    }
+
+    /// Whatever we hand the keymap has to be something gpui can parse back, or
+    /// the binding silently never fires.
+    #[test]
+    fn every_default_binding_is_a_valid_gpui_keystroke() {
+        for (keystroke, action) in Keys::default().bindings() {
+            let parsed = Keystroke::parse(&keystroke)
+                .unwrap_or_else(|error| panic!("{action:?} bound to {keystroke:?}: {error:?}"));
+
+            assert_eq!(
+                Keys::default().action(&parsed),
+                Some(action),
+                "{keystroke:?} did not resolve back to {action:?}"
+            );
         }
     }
 }

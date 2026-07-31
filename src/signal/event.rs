@@ -25,8 +25,8 @@ pub enum Event {
         uuid: Uuid,
         name: String,
     },
-    /// A path rather than bytes: iced hashes it and loads off the UI thread in
-    /// its own image pipeline, and the file survives a restart.
+    /// A path rather than bytes: the view layer decodes and caches it off the
+    /// UI thread, and the file survives a restart.
     Avatar {
         thread: Thread,
         path: PathBuf,

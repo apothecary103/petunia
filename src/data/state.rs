@@ -1,7 +1,7 @@
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use iced::widget::image;
 use uuid::Uuid;
 
 /// Signal re-sends "started" roughly every ten seconds, so anything older than
@@ -18,7 +18,8 @@ pub struct State {
     pub groups: Vec<Group>,
     pub index: Index,
     pub histories: HashMap<Thread, History>,
-    pub avatars: HashMap<Thread, image::Handle>,
+    /// Paths into the media cache; decoding is the view's business.
+    pub avatars: HashMap<Thread, PathBuf>,
     /// Names from profiles. Signal's contact sync only carries names the user
     /// typed on their own phone, so for group members and anyone never saved this
     /// is the only name there is.
@@ -100,15 +101,16 @@ impl State {
         self.histories.entry(thread.clone()).or_default()
     }
 
-    pub fn avatar(&self, thread: &Thread) -> Option<&image::Handle> {
-        self.avatars.get(thread)
+    pub fn avatar(&self, thread: &Thread) -> Option<&Path> {
+        self.avatars.get(thread).map(PathBuf::as_path)
     }
 
     /// A group member's own avatar, which is keyed by their one-to-one thread
     /// even when the message arrived in a group.
-    pub fn avatar_for(&self, sender: Uuid) -> Option<&image::Handle> {
+    pub fn avatar_for(&self, sender: Uuid) -> Option<&Path> {
         self.avatars
             .get(&Thread::Contact(super::ContactId::Aci(sender)))
+            .map(PathBuf::as_path)
     }
 
     pub fn title(&self, thread: &Thread) -> String {

@@ -10,7 +10,7 @@ use serde::Deserialize;
 
 pub use keys::{Action, Keys};
 pub use messages::Messages;
-pub use theme::Colors;
+pub use theme::Theme;
 
 /// Hand-edited preferences. Every section defaults, so an absent or partial file
 /// is as valid as a complete one.
@@ -19,7 +19,7 @@ pub use theme::Colors;
 pub struct Config {
     pub theme: String,
     /// Multiplies every length in the interface. The one knob for "everything is
-    /// too small", since iced sizes widgets in logical pixels and the display's
+    /// too small", since gpui sizes elements in logical pixels and the display's
     /// own scale factor is already applied underneath.
     pub scale: f32,
     pub messages: Messages,
@@ -58,7 +58,7 @@ pub struct Media {
     pub cache_limit: u32,
     /// Inline media is scaled down to fit inside both of these, at its own aspect
     /// ratio. Without a width cap a wide screenshot lays out thousands of units
-    /// across, because iced reads an image's pixel size as its natural size.
+    /// across, because an image's natural size is its pixel size.
     pub image_max_width: f32,
     pub image_max_height: f32,
 }
@@ -145,7 +145,7 @@ impl Default for Notifications {
 /// from starting, so problems are reported and the defaults stand.
 pub struct Loaded {
     pub config: Config,
-    pub colors: Arc<Colors>,
+    pub theme: Arc<Theme>,
     pub errors: Vec<String>,
 }
 
@@ -167,12 +167,12 @@ pub fn load() -> Loaded {
         }
     };
 
-    let (colors, theme_error) = theme::load(&config.theme);
+    let (theme, theme_error) = theme::load(&config.theme);
     errors.extend(theme_error);
 
     Loaded {
         config,
-        colors: Arc::new(colors),
+        theme: Arc::new(theme),
         errors,
     }
 }
@@ -222,7 +222,7 @@ mod tests {
 
         assert_eq!(config.sidebar.width, 240.0);
         assert!(config.media.auto_download_images);
-        assert_eq!(config.messages.layout, messages::Layout::Grouped);
+        assert_eq!(config.messages.density, messages::Density::Comfortable);
     }
 
     #[test]
@@ -261,7 +261,7 @@ mod tests {
 
         assert_eq!(config.theme, "mocha");
         assert_eq!(config.scale, 1.0);
-        assert_eq!(config.messages.layout, messages::Layout::Grouped);
+        assert_eq!(config.messages.density, messages::Density::Comfortable);
         assert_eq!(config.sidebar.width, 240.0);
         assert_eq!(config.media.image_max_width, 400.0);
     }
@@ -297,11 +297,11 @@ mod tests {
     }
 
     #[test]
-    fn layout_and_density_parse() {
+    fn density_and_timestamps_parse() {
         let config: Config =
-            toml::from_str("[messages]\nlayout = \"irc\"\ndensity = \"compact\"").unwrap();
+            toml::from_str("[messages]\ndensity = \"compact\"\ntimestamps = \"hover\"").unwrap();
 
-        assert_eq!(config.messages.layout, messages::Layout::Irc);
         assert_eq!(config.messages.density, messages::Density::Compact);
+        assert_eq!(config.messages.timestamps, messages::Timestamps::Hover);
     }
 }

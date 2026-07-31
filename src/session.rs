@@ -12,7 +12,10 @@ use crate::data::Thread;
 #[serde(default)]
 pub struct Session {
     pub window: WindowSize,
-    pub layout: Option<Layout>,
+    /// The conversation to reopen on launch.
+    pub active: Option<Thread>,
+    pub sidebar: PanelState,
+    pub details: PanelState,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -21,22 +24,11 @@ pub struct WindowSize {
     pub height: f32,
 }
 
-/// Mirrors iced's pane grid so a workspace survives a restart.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Layout {
-    Split {
-        axis: Axis,
-        ratio: f32,
-        a: Box<Layout>,
-        b: Box<Layout>,
-    },
-    Pane(Option<Thread>),
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub enum Axis {
-    Horizontal,
-    Vertical,
+#[serde(default)]
+pub struct PanelState {
+    pub open: bool,
+    pub width: f32,
 }
 
 impl Default for Session {
@@ -46,7 +38,24 @@ impl Default for Session {
                 width: 1024.0,
                 height: 720.0,
             },
-            layout: None,
+            active: None,
+            sidebar: PanelState {
+                open: true,
+                width: 240.0,
+            },
+            details: PanelState {
+                open: false,
+                width: 280.0,
+            },
+        }
+    }
+}
+
+impl Default for PanelState {
+    fn default() -> Self {
+        Self {
+            open: true,
+            width: 240.0,
         }
     }
 }
@@ -80,7 +89,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reads_a_session_written_before_the_move() {
+    fn falls_back_to_defaults_for_a_missing_or_partial_file() {
+        let session: Session = serde_json::from_str("{}").unwrap();
+
+        assert_eq!(session.window.width, 1024.0);
+        assert!(session.active.is_none());
+        assert!(session.sidebar.open);
+        assert!(!session.details.open);
+    }
+
+    /// Sessions written by the iced build carry a `layout` pane tree that no
+    /// longer exists; the window size in them is still worth keeping.
+    #[test]
+    fn a_session_from_the_pane_grid_still_loads() {
         let stored = r#"{
             "window": { "width": 1512.0, "height": 949.0 },
             "layout": { "Pane": { "Contact": { "Aci": "9946e398-4709-477e-baf2-4f6ab82bbad4" } } }
@@ -89,42 +110,25 @@ mod tests {
         let session: Session = serde_json::from_str(stored).unwrap();
 
         assert_eq!(session.window.width, 1512.0);
-        let Some(Layout::Pane(Some(Thread::Contact(contact)))) = session.layout else {
-            panic!("expected a single restored contact pane");
-        };
-        assert_eq!(
-            contact.uuid().to_string(),
-            "9946e398-4709-477e-baf2-4f6ab82bbad4"
-        );
+        assert_eq!(session.window.height, 949.0);
     }
 
     #[test]
-    fn falls_back_to_defaults_for_a_missing_or_partial_file() {
-        let session: Session = serde_json::from_str("{}").unwrap();
-
-        assert_eq!(session.window.width, 1024.0);
-        assert!(session.layout.is_none());
-    }
-
-    #[test]
-    fn round_trips_a_split_layout() {
+    fn round_trips_the_active_thread_and_panels() {
         let session = Session {
-            layout: Some(Layout::Split {
-                axis: Axis::Vertical,
-                ratio: 0.4,
-                a: Box::new(Layout::Pane(None)),
-                b: Box::new(Layout::Pane(Some(Thread::Group([3u8; 32])))),
-            }),
+            active: Some(Thread::Group([3u8; 32])),
+            details: PanelState {
+                open: true,
+                width: 320.0,
+            },
             ..Session::default()
         };
 
         let json = serde_json::to_string(&session).unwrap();
         let restored: Session = serde_json::from_str(&json).unwrap();
 
-        let Some(Layout::Split { ratio, b, .. }) = restored.layout else {
-            panic!("expected a split");
-        };
-        assert_eq!(ratio, 0.4);
-        assert!(matches!(*b, Layout::Pane(Some(Thread::Group(_)))));
+        assert!(matches!(restored.active, Some(Thread::Group(_))));
+        assert!(restored.details.open);
+        assert_eq!(restored.details.width, 320.0);
     }
 }

@@ -1,57 +1,48 @@
 use std::time::Duration;
 
-use iced::Subscription;
-use iced::futures::{SinkExt, Stream, StreamExt};
+use futures::StreamExt;
+use futures::channel::mpsc::{self, Receiver};
 use notify::{RecursiveMode, Watcher};
 
-/// Fires when the config or a theme file changes on disk.
-pub fn changes() -> Subscription<()> {
-    Subscription::run(stream)
-}
-
+/// Fires once per settled burst of writes to the config or a theme file. The
+/// watcher is returned alongside because dropping it stops the stream.
+///
 /// Watches the *directory*, not the file: editors save by writing a temporary
 /// file and renaming it, which removes the inode a file watch is holding.
-fn stream() -> impl Stream<Item = ()> {
-    iced::stream::channel(1, async |mut output| {
-        let (sender, mut receiver) = iced::futures::channel::mpsc::channel(16);
+pub fn changes() -> Option<(impl Watcher, Receiver<()>)> {
+    let (sender, receiver) = mpsc::channel(16);
 
-        // The watcher must outlive the loop, and its callback is sync, so it
-        // hands events over the channel rather than awaiting.
-        let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-            if let Ok(event) = event
-                && interesting(&event)
-            {
-                let _ = sender.clone().try_send(());
-            }
-        });
-
-        let Ok(mut watcher) = watcher else {
-            tracing::warn!("could not start the config watcher; hot reload is off");
-            std::future::pending::<()>().await;
-            unreachable!("pending never resolves")
-        };
-
-        let dir = super::dir();
-        let _ = std::fs::create_dir_all(&dir);
-        if let Err(error) = watcher.watch(&dir, RecursiveMode::Recursive) {
-            tracing::warn!(%error, "could not watch the config directory");
+    // The callback is sync, so it hands events over the channel rather than
+    // awaiting.
+    let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        if let Ok(event) = event
+            && interesting(&event)
+        {
+            let _ = sender.clone().try_send(());
         }
+    });
 
-        loop {
-            if receiver.next().await.is_none() {
-                break;
-            }
-            // One save often lands as several events; collapse the burst.
-            settle(&mut receiver).await;
-            let _ = output.send(()).await;
+    let mut watcher = match watcher {
+        Ok(watcher) => watcher,
+        Err(error) => {
+            tracing::warn!(%error, "could not start the config watcher; hot reload is off");
+            return None;
         }
+    };
 
-        drop(watcher);
-    })
+    let dir = super::dir();
+    let _ = std::fs::create_dir_all(&dir);
+    if let Err(error) = watcher.watch(&dir, RecursiveMode::Recursive) {
+        tracing::warn!(%error, "could not watch the config directory");
+        return None;
+    }
+
+    Some((watcher, receiver))
 }
 
-/// Waits for the writes to stop arriving before reporting a change.
-async fn settle(receiver: &mut iced::futures::channel::mpsc::Receiver<()>) {
+/// Waits for the writes to stop arriving before reporting a change, because one
+/// save often lands as several events.
+pub async fn settle(receiver: &mut Receiver<()>) {
     const DEBOUNCE: Duration = Duration::from_millis(250);
 
     loop {
@@ -72,9 +63,10 @@ fn interesting(event: &notify::Event) -> bool {
         return false;
     }
     // session.json is ours; reacting to our own writes would loop.
-    event.paths.iter().any(|path| {
-        path.extension().is_some_and(|extension| extension == "toml")
-    })
+    event
+        .paths
+        .iter()
+        .any(|path| path.extension().is_some_and(|extension| extension == "toml"))
 }
 
 #[cfg(test)]

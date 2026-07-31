@@ -1,16 +1,10 @@
-mod app;
 mod config;
 mod data;
-mod pane;
-mod screen;
 mod session;
 mod signal;
-mod theme;
-mod widget;
+mod ui;
 
-use app::Petunia;
-
-fn main() -> iced::Result {
+fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -18,11 +12,9 @@ fn main() -> iced::Result {
         )
         .init();
 
-    iced::daemon(Petunia::new, Petunia::update, Petunia::view)
-        .title(Petunia::title)
-        .subscription(Petunia::subscription)
-        .theme(Petunia::theme)
-        .scale_factor(Petunia::scale)
-        .default_font(iced::Font::MONOSPACE)
-        .run()
+    let loaded = config::load();
+    for error in &loaded.errors {
+        tracing::warn!(%error, "config problem");
+    }
+    tracing::info!(theme = %loaded.theme.name, "config loaded");
 }
