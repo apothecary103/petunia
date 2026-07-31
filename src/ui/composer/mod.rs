@@ -1,4 +1,3 @@
-pub mod draft;
 pub mod stickers;
 
 use std::path::{Path, PathBuf};
@@ -12,6 +11,7 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use super::kit;
 use crate::actions;
 use crate::config::Theme;
+use crate::data::message::markup;
 use crate::data::message::range::Style;
 use crate::data::{MessageId, Thread};
 use crate::signal::Command;
@@ -222,7 +222,7 @@ impl Composer {
             return;
         };
         let typed = self.input.read(cx).value().to_string();
-        let (body, ranges) = draft::shortcuts(typed.trim());
+        let (body, ranges) = markup::parse(typed.trim());
         let attachments = std::mem::take(&mut self.attachments);
 
         if body.is_empty() && attachments.is_empty() {
@@ -248,7 +248,7 @@ impl Composer {
     fn mark(&mut self, style: Style, window: &mut Window, cx: &mut Context<Self>) {
         self.input.update(cx, |input, cx| {
             let text = input.value().to_string();
-            let (wrapped, selection) = draft::wrap(&text, input.selected_range(), style);
+            let (wrapped, selection) = markup::wrap(&text, input.selected_range(), style);
             input.set_value(wrapped, window, cx);
             input.set_selected_range(selection, cx);
             input.focus(window, cx);

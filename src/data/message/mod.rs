@@ -1,3 +1,4 @@
+pub mod markup;
 pub mod project;
 pub mod range;
 

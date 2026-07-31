@@ -7,6 +7,7 @@ use gpui_component::IconName;
 
 use super::act::{Act, Dispatch};
 use super::{bar, emoji, format, media};
+use crate::data::message::markup;
 use crate::audio::Playback;
 use crate::config::Theme;
 use crate::config::messages::Spacing;
@@ -44,19 +45,29 @@ impl Body<'_> {
 
         said = match &self.message.content {
             Content::Text { body, ranges } => {
+                // No client sends markdown as ranges, so a message typed as
+                // `*hai*` elsewhere arrives as three literal characters. It is
+                // read here -- but only when the sender said nothing, because a
+                // sender who did send ranges meant them, and a second pass over
+                // the same text would fight their offsets.
+                let (body, ranges) = match ranges.is_empty() {
+                    true => {
+                        let (read, found) = markup::parse(body);
+                        (std::borrow::Cow::Owned(read), std::borrow::Cow::Owned(found))
+                    }
+                    false => (
+                        std::borrow::Cow::Borrowed(body.as_str()),
+                        std::borrow::Cow::Borrowed(ranges.as_slice()),
+                    ),
+                };
+
                 // A message that is nothing but a couple of emoji is drawn at a
                 // size you can read, the way Signal does.
-                let size = match emoji::jumbo(body) {
+                let size = match emoji::jumbo(&body) {
                     Some(scale) if ranges.is_empty() => spacing.body * scale,
                     _ => spacing.body,
                 };
-                said.child(
-                    div()
-                        .text_size(px(size))
-                        .line_height(px(size * theme.typography.line_height))
-                        .text_color(theme.text)
-                        .child(styled(body, ranges, self.state, theme)),
-                )
+                said.children(prose(&body, &ranges, self.state, theme, size))
             }
             Content::Sticker(sticker) => said.child(self.sticker(sticker)),
             Content::Deleted => said.child(
@@ -220,6 +231,133 @@ fn ticks(count: usize, tint: gpui::Hsla) -> Div {
                 .when(index > 0, |this| this.ml(px(-4.0)))
                 .child(kit::icon(IconName::Check, 11.0, tint))
         }))
+}
+
+/// The body, split so that a code block gets a box of its own and everything
+/// else stays in the paragraph it belongs to.
+///
+/// A block is a monospace range covering whole lines, which is the only thing
+/// the wire can say about it: Signal has one monospace style and no way to mark
+/// a block as such.
+fn prose(
+    body: &str,
+    ranges: &[Range],
+    state: &State,
+    theme: &Theme,
+    size: f32,
+) -> Vec<AnyElement> {
+    let mut blocks: Vec<&Range> = ranges
+        .iter()
+        .filter(|range| markup::is_block(body, range))
+        .collect();
+    blocks.sort_by_key(|range| range.start);
+
+    let paragraph = |from: usize, to: usize| {
+        (to > from).then(|| {
+            let text = body[from..to].trim_matches('\n');
+            (!text.is_empty()).then(|| {
+                let shifted: Vec<Range> = ranges
+                    .iter()
+                    .filter(|range| range.start >= from && range.end() <= to)
+                    .map(|range| Range {
+                        start: range.start - from,
+                        ..*range
+                    })
+                    .collect();
+                let offset = body[from..to].find(text).unwrap_or(0);
+                let shifted = shifted
+                    .into_iter()
+                    .filter_map(|range| {
+                        range.start.checked_sub(offset).map(|start| Range { start, ..range })
+                    })
+                    .collect::<Vec<_>>();
+
+                div()
+                    .text_size(px(size))
+                    .line_height(px(size * theme.typography.line_height))
+                    .text_color(theme.text)
+                    .child(styled(text, &shifted, state, theme))
+                    .into_any_element()
+            })
+        })
+    };
+
+    if blocks.is_empty() {
+        return paragraph(0, body.len()).flatten().into_iter().collect();
+    }
+
+    let mut parts = Vec::new();
+    let mut at = 0;
+    for block in blocks {
+        parts.extend(paragraph(at, block.start).flatten());
+        parts.push(code_block(&body[block.start..block.end()], theme, size));
+        at = block.end();
+    }
+    parts.extend(paragraph(at, body.len()).flatten());
+    parts
+}
+
+/// Code, in a box, in the monospace font, coloured by what it is. Nothing else
+/// in a message gets a background, which is what makes it read as a block
+/// rather than as a word.
+fn code_block(fenced: &str, theme: &Theme, size: f32) -> AnyElement {
+    let Some((language, code)) = markup::block(fenced) else {
+        return div().into_any_element();
+    };
+    let language = language.unwrap_or("text");
+
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .px_3()
+        .py_2()
+        .rounded(px(kit::RADIUS))
+        .bg(theme.sunken)
+        .border_1()
+        .border_color(theme.border)
+        .when(language != "text", |this| {
+            this.child(
+                div()
+                    .text_size(px(size - 3.0))
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(language.to_owned())),
+            )
+        })
+        .child(
+            div()
+                .font_family(theme.typography.mono.clone())
+                .text_size(px(size - 1.0))
+                .line_height(px((size - 1.0) * 1.45))
+                .text_color(theme.text)
+                .child(highlighted(code, language, theme)),
+        )
+        .into_any_element()
+}
+
+/// Runs the code through the widget library's tree-sitter highlighter. It has a
+/// grammar for the languages people actually paste; anything else parses as
+/// text and comes back one flat span, which is the right answer rather than a
+/// guess dressed up in colour.
+fn highlighted(code: &str, language: &str, theme: &Theme) -> StyledText {
+    use gpui_component::highlighter::{HighlightTheme, SyntaxHighlighter};
+
+    let mut highlighter = SyntaxHighlighter::new(language);
+    let rope = gpui_component::input::Rope::from(code);
+    highlighter.update(None, &rope, None);
+
+    let palette = match theme.is_light() {
+        true => HighlightTheme::default_light(),
+        false => HighlightTheme::default_dark(),
+    };
+    let styles: Vec<_> = highlighter
+        .styles(&(0..code.len()), &palette)
+        .into_iter()
+        .filter(|(range, _)| range.end <= code.len() && code.is_char_boundary(range.start))
+        .collect();
+
+    StyledText::new(code.to_owned()).with_highlights(styles)
 }
 
 /// Renders the body with Signal's formatting applied. Mentions carry a

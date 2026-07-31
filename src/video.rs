@@ -14,6 +14,7 @@ mod platform {
     use std::time::Duration;
 
     use core_foundation::base::TCFType;
+    use tracing::warn;
     use objc2::AnyThread;
 use objc2::rc::Retained;
     use objc2_av_foundation::{AVPlayer, AVPlayerItem, AVPlayerItemVideoOutput};
@@ -22,10 +23,14 @@ use objc2::rc::Retained;
         MainThreadMarker, NSDictionary, NSNumber, NSString, NSURL,
     };
 
-    /// What the pixel buffers come out as. BGRA is what gpui's atlas and its
-    /// surface shader both expect, so asking for it here avoids a conversion
-    /// per frame.
-    const BGRA: u32 = 0x42475241;
+    /// What the pixel buffers must come out as: bi-planar full-range YCbCr,
+    /// `kCVPixelFormatType_420YpCbCr8BiPlanarFullRange`.
+    ///
+    /// Not a preference. gpui's surface path builds two Metal textures from the
+    /// buffer's planes -- luma and chroma -- and asserts this exact format
+    /// before it does. Handing it BGRA aborts the process inside the renderer,
+    /// which is a hard crash a long way from the mistake.
+    const YCBCR_420F: u32 = 0x34323066;
 
     pub struct Player {
         player: Retained<AVPlayer>,
@@ -53,7 +58,7 @@ use objc2::rc::Retained;
                 let item = AVPlayerItem::playerItemWithURL(&url, mtm);
 
                 let key = NSString::from_str("PixelFormatType");
-                let format = NSNumber::new_u32(BGRA);
+                let format = NSNumber::new_u32(YCBCR_420F);
                 let attributes = NSDictionary::from_slices(
                     &[&*key],
                     &[format.as_ref() as &objc2::runtime::AnyObject],
@@ -144,9 +149,19 @@ use objc2::rc::Retained;
                     // AVFoundation's bindings produce the `objc2` one. Retained
                     // here so both halves own a reference.
                     let raw = Retained::into_raw(buffer) as core_video::pixel_buffer::CVPixelBufferRef;
-                    self.frame = Some(
-                        core_video::pixel_buffer::CVPixelBuffer::wrap_under_create_rule(raw),
-                    );
+                    let frame = core_video::pixel_buffer::CVPixelBuffer::wrap_under_create_rule(raw);
+
+                    // gpui asserts the format rather than checking it, so a
+                    // buffer in the wrong one aborts the process from inside its
+                    // renderer. Refusing it here costs a frame instead.
+                    if frame.get_pixel_format() == YCBCR_420F {
+                        self.frame = Some(frame);
+                    } else {
+                        warn!(
+                            format = frame.get_pixel_format(),
+                            "decoder produced a pixel format the renderer cannot draw"
+                        );
+                    }
                 }
             }
             self.frame.clone()
