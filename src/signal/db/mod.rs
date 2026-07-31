@@ -5,6 +5,7 @@ pub mod messages;
 pub mod read;
 pub mod receipts;
 pub mod search;
+pub mod threads;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool};
 use sqlx::Row;

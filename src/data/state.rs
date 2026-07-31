@@ -33,6 +33,10 @@ pub struct State {
     /// because it is not part of the message stream.
     typing: HashMap<Thread, Vec<(Uuid, Instant)>>,
     pub sticker_packs: Vec<super::stickers::Pack>,
+    /// Whether our own messages are attributed by name rather than as "You". A
+    /// preference, pushed in from the config so that what to call someone stays
+    /// one answer here rather than a decision each view makes for itself.
+    pub show_own_name: bool,
 }
 
 impl State {
@@ -49,6 +53,7 @@ impl State {
             connection: crate::signal::Connection::default(),
             typing: HashMap::new(),
             sticker_packs: Vec::new(),
+            show_own_name: false,
         }
     }
 
@@ -150,7 +155,7 @@ impl State {
     }
 
     pub fn sender_name(&self, sender: Uuid) -> String {
-        if sender == self.aci {
+        if sender == self.aci && !self.show_own_name {
             return "You".into();
         }
         self.name_of(sender)
@@ -407,6 +412,21 @@ mod tests {
             state.index.name(&Thread::Contact(crate::data::ContactId::Aci(own))),
             Some("Note to Self")
         );
+    }
+
+    /// The preference reaches the one place that decides what to call someone,
+    /// so a mention, a quote and a run header cannot disagree about it.
+    #[test]
+    fn our_own_messages_can_be_attributed_by_name_instead() {
+        let mut state = state();
+        let own = state.aci;
+        state.set_profile(own, "Sam".into());
+
+        assert_eq!(state.sender_name(own), "You");
+
+        state.show_own_name = true;
+
+        assert_eq!(state.sender_name(own), "Sam");
     }
 
     /// Receipts are owed to other people, never to ourselves, or we would send

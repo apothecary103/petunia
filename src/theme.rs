@@ -1,21 +1,37 @@
+use std::sync::Arc;
+
 use gpui::{App, Global, Hsla, px};
+use gpui_component::highlighter::HighlightTheme;
 use gpui_component::{Theme as Widgets, ThemeMode};
 
 use crate::config;
 
 /// Petunia's own palette, installed alongside the widget library's so that both
 /// read from one theme file.
-struct Palette(config::Theme);
+///
+/// The highlight palette is derived once and kept, not derived where it is used:
+/// building it is a round trip through Zed's theme JSON, and a code block on
+/// screen would otherwise pay for it on every frame.
+struct Palette {
+    theme: config::Theme,
+    highlights: Arc<HighlightTheme>,
+}
 
 impl Global for Palette {}
 
 pub trait ActivePalette {
     fn palette(&self) -> &config::Theme;
+    /// The colours a code block is drawn in.
+    fn highlights(&self) -> &Arc<HighlightTheme>;
 }
 
 impl ActivePalette for App {
     fn palette(&self) -> &config::Theme {
-        &self.global::<Palette>().0
+        &self.global::<Palette>().theme
+    }
+
+    fn highlights(&self) -> &Arc<HighlightTheme> {
+        &self.global::<Palette>().highlights
     }
 }
 
@@ -32,14 +48,20 @@ pub fn install(theme: config::Theme, cx: &mut App) {
     // has an opinion about is overwritten below, and the rest -- charts,
     // tables, skeletons -- keeps a sensible derived value.
     Widgets::change(mode, None, cx);
-    apply(&theme, cx);
+    let highlights = Arc::new(theme.highlights());
+    apply(&theme, highlights.clone(), cx);
 
-    cx.set_global(Palette(theme));
+    cx.set_global(Palette { theme, highlights });
     cx.refresh_windows();
 }
 
-fn apply(theme: &config::Theme, cx: &mut App) {
+fn apply(theme: &config::Theme, highlights: Arc<HighlightTheme>, cx: &mut App) {
     let widgets = Widgets::global_mut(cx);
+
+    // What the code editor colours `config.toml` with. It reads this global
+    // rather than being handed a theme, so without it the editor is highlighted
+    // by whichever default the library seeded and matches nothing else.
+    widgets.highlight_theme = highlights;
 
     widgets.font_family = theme.typography.family.clone().into();
     widgets.font_size = px(theme.typography.ui_size);

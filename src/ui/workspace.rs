@@ -11,6 +11,7 @@ use super::linking::Linking;
 use super::menu::{self, Menu};
 use super::notice::Notices;
 use super::palette::{Dismissed, Switcher};
+use super::confirm::{self, Confirm};
 use super::prompt::{self, Prompt};
 use super::search::{self, Scope, Search};
 use super::settings::{self, Settings};
@@ -45,6 +46,7 @@ pub struct Workspace {
     menu: Option<Entity<Menu>>,
     settings: Option<Entity<Settings>>,
     prompt: Option<Entity<Prompt>>,
+    confirm: Option<Entity<Confirm>>,
     themes: Option<Entity<Themes>>,
     editor: Option<Entity<Editor>>,
     /// Always present, and draws nothing until something has gone wrong.
@@ -91,6 +93,7 @@ impl Workspace {
             menu: None,
             settings: None,
             prompt: None,
+            confirm: None,
             themes: None,
             editor: None,
             notices,
@@ -331,8 +334,59 @@ impl Workspace {
             })
         };
 
-        let items = menu::thread::items(&flags, &folders, now, apply, create);
+        let delete: menu::thread::Delete = {
+            let this = cx.entity();
+            let thread = thread.clone();
+            std::rc::Rc::new(move |window, cx| {
+                let thread = thread.clone();
+                this.update(cx, |this, cx| this.confirm_delete(thread, window, cx));
+            })
+        };
+
+        let items = menu::thread::items(&flags, &folders, now, apply, create, delete);
         self.raise_menu(items, at, window, cx);
+    }
+
+    /// Asks before forgetting a conversation, and says what that means: the
+    /// messages are this device's copy, and deleting them cannot reach the phone.
+    fn confirm_delete(
+        &mut self,
+        thread: crate::data::Thread,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = self
+            .store
+            .read(cx)
+            .state()
+            .map(|state| state.title(&thread))
+            .unwrap_or_default();
+
+        let confirm = cx.new(|cx| {
+            Confirm::new(
+                format!("Delete your conversation with {name}?"),
+                "Every message in it is removed from this device, along with what \
+                 petunia remembers about it. This cannot be undone, and it does not \
+                 delete anything from your phone or for anyone else.",
+                "Delete",
+                cx,
+            )
+        });
+
+        cx.subscribe(&confirm, |this, _, _: &confirm::Dismissed, cx| {
+            this.confirm = None;
+            cx.notify();
+        })
+        .detach();
+        cx.subscribe(&confirm, move |this, _, _: &confirm::Confirmed, cx| {
+            this.store
+                .update(cx, |store, cx| store.delete_thread(thread.clone(), cx));
+        })
+        .detach();
+
+        confirm.update(cx, |confirm, cx| confirm.take_focus(window, cx));
+        self.confirm = Some(confirm);
+        cx.notify();
     }
 
     /// Asks what to call a new folder, and puts the conversation in it.
@@ -492,6 +546,13 @@ impl Workspace {
         if self.themes.is_some() {
             self.close_themes(cx);
             window.focus(&self.focus, cx);
+            return;
+        }
+        // Before the prompt and the menu: it is raised over both, and Escape
+        // means the thing most recently put in front of you.
+        if self.confirm.take().is_some() {
+            window.focus(&self.focus, cx);
+            cx.notify();
             return;
         }
         if self.prompt.take().is_some() {
@@ -749,6 +810,8 @@ impl Render for Workspace {
             .children(self.settings.clone())
             .children(self.menu.clone())
             .children(self.prompt.clone())
+            // Over the menu it was raised from, since that is what it answers.
+            .children(self.confirm.clone())
             .children(self.themes.clone())
             .children(self.editor.clone())
             .child(self.notices.clone())

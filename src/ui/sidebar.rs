@@ -181,7 +181,7 @@ fn identity(
                 .child(
                     div()
                         .text_size(px(palette.typography.ui_size))
-                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .font_weight(kit::EMPHASIS)
                         .text_color(palette.text)
                         .truncate()
                         .child(SharedString::from(state.own_name())),
@@ -301,7 +301,7 @@ fn row(palette: &Theme, line: Line<'_>) -> Stateful<Div> {
                                 .truncate()
                                 .text_size(px(palette.typography.ui_size))
                                 .when(unread && !line.muted, |this| {
-                                    this.font_weight(gpui::FontWeight::MEDIUM)
+                                    this.font_weight(kit::EMPHASIS)
                                 })
                                 .text_color(title_color)
                                 .child(SharedString::from(line.name.to_owned())),

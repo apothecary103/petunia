@@ -1,5 +1,6 @@
 pub mod avatar;
 pub mod composer;
+pub mod confirm;
 pub mod conversation;
 pub mod details;
 pub mod editor;

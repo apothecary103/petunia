@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use chrono::{DateTime, Local, NaiveDate};
 use uuid::Uuid;
 
@@ -8,32 +10,25 @@ use crate::data::message::Content;
 /// unbounded column.
 const MAX_RUN: usize = 20;
 
-#[derive(Debug)]
-pub enum Entry<'a> {
+/// One row of the message list. Positions rather than borrows: the list element
+/// renders a row on demand, long after the frame that decided where the rows
+/// were, so a row that held a `&[Message]` could not outlive the loop that
+/// produced it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Row {
     Day(NaiveDate),
     UnreadMarker,
     /// A consecutive stretch from one sender, rendered under a single header.
-    Run(Run<'a>),
+    Run { sender: Uuid, messages: Range<usize> },
     /// Never grouped and never attributed: "disappearing messages on" is not
     /// something a person said.
-    Update(&'a Message),
-}
-
-#[derive(Debug)]
-pub struct Run<'a> {
-    pub sender: Uuid,
-    /// A subslice of the history, never a copy.
-    pub messages: &'a [Message],
+    Update(usize),
 }
 
 /// Splits a thread into day separators, runs and update lines. Pure so the
 /// boundary conditions can be tested without a renderer.
-pub fn entries<'a>(
-    messages: &'a [Message],
-    first_unread: Option<u64>,
-    group_within_ms: u64,
-) -> Vec<Entry<'a>> {
-    let mut entries = Vec::new();
+pub fn rows(messages: &[Message], first_unread: Option<u64>, group_within_ms: u64) -> Vec<Row> {
+    let mut rows = Vec::new();
     let mut day: Option<NaiveDate> = None;
     let mut start = 0;
 
@@ -42,28 +37,28 @@ pub fn entries<'a>(
         let date = local_date(message.timestamp());
 
         if day != Some(date) {
-            entries.push(Entry::Day(date));
+            rows.push(Row::Day(date));
             day = Some(date);
         }
         if first_unread == Some(message.timestamp()) {
-            entries.push(Entry::UnreadMarker);
+            rows.push(Row::UnreadMarker);
         }
 
         if matches!(message.content, Content::Update(_)) {
-            entries.push(Entry::Update(message));
+            rows.push(Row::Update(start));
             start += 1;
             continue;
         }
 
         let end = run_end(messages, start, date, first_unread, group_within_ms);
-        entries.push(Entry::Run(Run {
+        rows.push(Row::Run {
             sender: message.sender(),
-            messages: &messages[start..end],
-        }));
+            messages: start..end,
+        });
         start = end;
     }
 
-    entries
+    rows
 }
 
 /// The index one past the last message that belongs to the run starting at
@@ -126,11 +121,12 @@ mod tests {
         message
     }
 
-    fn runs<'a>(entries: &'a [Entry<'a>]) -> Vec<&'a Run<'a>> {
-        entries
-            .iter()
-            .filter_map(|entry| match entry {
-                Entry::Run(run) => Some(run),
+    /// The runs, as (sender, how many messages) -- which is what every case here
+    /// is actually about.
+    fn runs(rows: &[Row]) -> Vec<(Uuid, usize)> {
+        rows.iter()
+            .filter_map(|row| match row {
+                Row::Run { sender, messages } => Some((*sender, messages.len())),
                 _ => None,
             })
             .collect()
@@ -145,10 +141,7 @@ mod tests {
             message(alice, NOON + 2000),
         ];
 
-        let entries = entries(&messages, None, GROUP_WITHIN);
-
-        assert_eq!(runs(&entries).len(), 1);
-        assert_eq!(runs(&entries)[0].messages.len(), 3);
+        assert_eq!(runs(&rows(&messages, None, GROUP_WITHIN)), [(alice, 3)]);
     }
 
     #[test]
@@ -160,12 +153,10 @@ mod tests {
             message(alice, NOON + 2000),
         ];
 
-        let entries = entries(&messages, None, GROUP_WITHIN);
-        let runs = runs(&entries);
-
-        assert_eq!(runs.len(), 3);
-        assert_eq!(runs[0].sender, alice);
-        assert_eq!(runs[1].sender, bob);
+        assert_eq!(
+            runs(&rows(&messages, None, GROUP_WITHIN)),
+            [(alice, 1), (bob, 1), (alice, 1)]
+        );
     }
 
     #[test]
@@ -176,7 +167,7 @@ mod tests {
             message(alice, NOON + GROUP_WITHIN + 1),
         ];
 
-        assert_eq!(runs(&entries(&messages, None, GROUP_WITHIN)).len(), 2);
+        assert_eq!(runs(&rows(&messages, None, GROUP_WITHIN)).len(), 2);
     }
 
     #[test]
@@ -184,7 +175,7 @@ mod tests {
         let alice = Uuid::new_v4();
         let messages = [message(alice, NOON), message(alice, NOON + GROUP_WITHIN)];
 
-        assert_eq!(runs(&entries(&messages, None, GROUP_WITHIN)).len(), 1);
+        assert_eq!(runs(&rows(&messages, None, GROUP_WITHIN)).len(), 1);
     }
 
     #[test]
@@ -196,14 +187,11 @@ mod tests {
             message(alice, NOON + DAY),
         ];
 
-        let entries = entries(&messages, None, GROUP_WITHIN);
-        let days: Vec<_> = entries
-            .iter()
-            .filter(|entry| matches!(entry, Entry::Day(_)))
-            .collect();
+        let rows = rows(&messages, None, GROUP_WITHIN);
+        let days = rows.iter().filter(|row| matches!(row, Row::Day(_))).count();
 
-        assert_eq!(days.len(), 2);
-        assert!(matches!(entries[0], Entry::Day(_)));
+        assert_eq!(days, 2);
+        assert!(matches!(rows[0], Row::Day(_)));
     }
 
     /// Derived through chrono rather than by hand, so the test holds in any
@@ -229,14 +217,11 @@ mod tests {
             message(alice, midnight + 1000),
         ];
 
-        let entries = entries(&messages, None, GROUP_WITHIN);
+        let rows = rows(&messages, None, GROUP_WITHIN);
 
-        assert_eq!(runs(&entries).len(), 2);
+        assert_eq!(runs(&rows).len(), 2);
         assert_eq!(
-            entries
-                .iter()
-                .filter(|entry| matches!(entry, Entry::Day(_)))
-                .count(),
+            rows.iter().filter(|row| matches!(row, Row::Day(_))).count(),
             2
         );
     }
@@ -250,14 +235,10 @@ mod tests {
             message(alice, NOON + 2000),
         ];
 
-        let entries = entries(&messages, None, GROUP_WITHIN);
+        let rows = rows(&messages, None, GROUP_WITHIN);
 
-        assert_eq!(runs(&entries).len(), 2);
-        assert!(
-            entries
-                .iter()
-                .any(|entry| matches!(entry, Entry::Update(_)))
-        );
+        assert_eq!(runs(&rows).len(), 2);
+        assert!(rows.contains(&Row::Update(1)));
     }
 
     #[test]
@@ -269,15 +250,22 @@ mod tests {
             message(alice, NOON + 2000),
         ];
 
-        let entries = entries(&messages, Some(NOON + 1000), GROUP_WITHIN);
+        let rows = rows(&messages, Some(NOON + 1000), GROUP_WITHIN);
 
-        let marker = entries
+        let marker = rows
             .iter()
-            .position(|entry| matches!(entry, Entry::UnreadMarker))
+            .position(|row| matches!(row, Row::UnreadMarker))
             .expect("marker present");
-        assert!(matches!(entries[marker + 1], Entry::Run(_)));
-        assert_eq!(runs(&entries).len(), 2);
-        assert_eq!(runs(&entries)[1].messages[0].timestamp(), NOON + 1000);
+
+        // The run after the marker starts at the message the marker is for.
+        assert_eq!(
+            rows[marker + 1],
+            Row::Run {
+                sender: alice,
+                messages: 1..3
+            }
+        );
+        assert_eq!(runs(&rows).len(), 2);
     }
 
     #[test]
@@ -285,10 +273,10 @@ mod tests {
         let alice = Uuid::new_v4();
         let messages = [message(alice, NOON)];
 
-        let entries = entries(&messages, Some(NOON), GROUP_WITHIN);
+        let rows = rows(&messages, Some(NOON), GROUP_WITHIN);
 
-        assert!(matches!(entries[0], Entry::Day(_)));
-        assert!(matches!(entries[1], Entry::UnreadMarker));
+        assert!(matches!(rows[0], Row::Day(_)));
+        assert!(matches!(rows[1], Row::UnreadMarker));
     }
 
     #[test]
@@ -298,17 +286,39 @@ mod tests {
             .map(|index| message(alice, NOON + index as u64 * 1000))
             .collect();
 
-        let entries = entries(&messages, None, GROUP_WITHIN);
-        let runs = runs(&entries);
+        assert_eq!(
+            runs(&rows(&messages, None, GROUP_WITHIN)),
+            [(alice, MAX_RUN), (alice, 5)]
+        );
+    }
 
-        assert_eq!(runs.len(), 2);
-        assert_eq!(runs[0].messages.len(), MAX_RUN);
-        assert_eq!(runs[1].messages.len(), 5);
+    /// Every row addresses the history by position, so a range that runs off the
+    /// end would panic in the renderer rather than here.
+    #[test]
+    fn every_row_points_inside_the_history() {
+        let (alice, bob) = (Uuid::new_v4(), Uuid::new_v4());
+        let messages = [
+            message(alice, NOON),
+            update(alice, NOON + 1000),
+            message(bob, NOON + 2000),
+            message(bob, NOON + 3000),
+        ];
+
+        for row in rows(&messages, Some(NOON + 2000), GROUP_WITHIN) {
+            match row {
+                Row::Run { messages: range, .. } => {
+                    assert!(range.start < range.end);
+                    assert!(range.end <= messages.len(), "{range:?}");
+                }
+                Row::Update(index) => assert!(index < messages.len()),
+                Row::Day(_) | Row::UnreadMarker => {}
+            }
+        }
     }
 
     #[test]
-    fn an_empty_thread_has_no_entries() {
-        assert!(entries(&[], None, GROUP_WITHIN).is_empty());
+    fn an_empty_thread_has_no_rows() {
+        assert!(rows(&[], None, GROUP_WITHIN).is_empty());
     }
 
     #[test]
@@ -316,8 +326,8 @@ mod tests {
         let alice = Uuid::new_v4();
         let messages = [message(alice, NOON)];
 
-        let entries = entries(&messages, Some(NOON + 99), GROUP_WITHIN);
+        let rows = rows(&messages, Some(NOON + 99), GROUP_WITHIN);
 
-        assert!(!entries.iter().any(|e| matches!(e, Entry::UnreadMarker)));
+        assert!(!rows.iter().any(|row| matches!(row, Row::UnreadMarker)));
     }
 }

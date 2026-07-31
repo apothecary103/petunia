@@ -91,6 +91,13 @@ pub enum Command {
         thread: Thread,
         flags: crate::data::index::Flags,
     },
+    /// Forgets a conversation: its messages and everything recorded about it.
+    /// Local to this device, like the flags and for the same reason -- Signal's
+    /// own "delete for me" goes through the Storage Service, which presage does
+    /// not expose.
+    DeleteThread {
+        thread: Thread,
+    },
     /// Looks for a phrase, in one conversation or in all of them.
     Search {
         query: String,

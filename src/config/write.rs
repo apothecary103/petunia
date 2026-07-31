@@ -30,6 +30,7 @@ pub fn to_toml(config: &Config) -> String {
     let _ = writeln!(out, "timestamps = {:?}", timestamps(config.messages.timestamps));
     let _ = writeln!(out, "group_within = {}", config.messages.group_within);
     let _ = writeln!(out, "date_separators = {}", config.messages.date_separators);
+    let _ = writeln!(out, "show_own_name = {}", config.messages.show_own_name);
 
     let _ = writeln!(out, "\n[sidebar]");
     let _ = writeln!(out, "width = {:?}", config.sidebar.width);
@@ -122,6 +123,7 @@ mod tests {
                 density: Density::Compact,
                 timestamps: Timestamps::Hover,
                 group_within: 120,
+                show_own_name: true,
                 ..Default::default()
             },
             sidebar: crate::config::Sidebar {
@@ -149,6 +151,7 @@ mod tests {
         assert_eq!(read.messages.density, config.messages.density);
         assert_eq!(read.messages.timestamps, config.messages.timestamps);
         assert_eq!(read.messages.group_within, config.messages.group_within);
+        assert_eq!(read.messages.show_own_name, config.messages.show_own_name);
         assert_eq!(read.sidebar.width, config.sidebar.width);
         assert_eq!(read.sidebar.sort, config.sidebar.sort);
         assert_eq!(read.sidebar.show_preview, config.sidebar.show_preview);

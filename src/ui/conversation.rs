@@ -1,18 +1,21 @@
 use chrono::{Local, NaiveDate};
 use gpui::prelude::*;
-use gpui::{Context, Entity, MouseButton, ScrollHandle, SharedString, Window, div, px};
+use gpui::{
+    Context, Entity, ListAlignment, ListState, MouseButton, SharedString, Window, div, list, px,
+};
+use uuid::Uuid;
 
 use super::avatar::avatar;
 use super::composer::Composer;
 use super::kit;
 use super::message::act::{Act, Dispatch};
 use super::message::content;
-use super::message::group::{self, Entry};
+use super::message::group;
 use super::relative;
 use crate::audio::{Playback, Player};
 use crate::config::Theme;
 use crate::config::messages::{Spacing, Timestamps};
-use crate::data::{Message, MessageId, State, Thread};
+use crate::data::{Member, Message, MessageId, State, Thread};
 use crate::signal::Command;
 use crate::store::{Focus, Store};
 use crate::theme::ActivePalette;
@@ -52,6 +55,12 @@ impl Raise {
 
 impl gpui::EventEmitter<Raise> for Conversation {}
 
+/// How far beyond the window the list measures. A run is tall and its height is
+/// only known once it is built, so a scroll that outruns the measured region
+/// stutters while it catches up; a window's worth of slack is enough that a
+/// flick never does.
+const OVERDRAW: f32 = 800.0;
+
 /// Hands a file to whatever the system opens it with.
 fn open(path: &std::path::Path) {
     if let Err(error) = open::that_detached(path) {
@@ -65,14 +74,21 @@ pub struct Conversation {
     store: Entity<Store>,
     composer: Entity<Composer>,
     player: Player,
-    scroll: ScrollHandle,
+    /// Only the rows on screen are built, so the cost of a scroll frame is the
+    /// height of the window rather than the length of the thread. A plain
+    /// scrolling `div` rebuilt and re-shaped every message in the history on
+    /// every frame of every scroll.
+    list: ListState,
     /// The thread the scroll position belongs to, so switching conversations
     /// starts at the newest message rather than wherever the last one was.
     anchored: Option<Thread>,
-    /// How many messages were on screen last frame. A new one arriving should
-    /// bring the view with it -- but only if you were already at the bottom, or
-    /// reading back through history would yank you away mid-sentence.
+    /// How many rows the list was last told about, and whether the next change
+    /// arrived above what is on screen. The list addresses its scroll position as
+    /// an item and an offset into it, so rows spliced in at the front carry the
+    /// reader with them -- which is why loading older messages no longer needs to
+    /// measure how far it shoved them.
     counted: usize,
+    prepending: bool,
     /// Runs only while something is playing, because a repaint every tenth of a
     /// second for an idle window is not free.
     ticking: Option<gpui::Task<()>>,
@@ -99,20 +115,12 @@ impl Conversation {
         cx.subscribe_in(
             &store,
             window,
-            |this: &mut Self, _, event: &crate::store::StoreEvent, window, cx| {
-                // A page of *older* messages is inserted above what is on
-                // screen, which would otherwise shove the reader down by exactly
-                // the height of what arrived. How tall that is is only knowable
-                // once it has been laid out, so the correction waits a frame.
+            |this: &mut Self, _, event: &crate::store::StoreEvent, _, cx| {
+                // Which end the next rows arrive at. The list keeps the reader
+                // where they are either way, but only if it is told where they
+                // went in.
                 if let crate::store::StoreEvent::History { older: true } = event {
-                    let scroll = this.scroll.clone();
-                    let before = scroll.max_offset().y;
-                    window.on_next_frame(move |_, _| {
-                        let grown = scroll.max_offset().y - before;
-                        let mut offset = scroll.offset();
-                        offset.y -= grown;
-                        scroll.set_offset(offset);
-                    });
+                    this.prepending = true;
                     cx.notify();
                 }
             },
@@ -123,9 +131,12 @@ impl Conversation {
             store,
             composer,
             player,
-            scroll: ScrollHandle::new(),
+            // Bottom-anchored, like every chat log: with nothing scrolled it sits
+            // at the newest message and stays there as messages arrive.
+            list: ListState::new(0, ListAlignment::Bottom, px(OVERDRAW)),
             anchored: None,
             counted: 0,
+            prepending: false,
             ticking: None,
             aging: None,
         }
@@ -290,14 +301,35 @@ impl Conversation {
         .detach();
     }
 
-    /// Whether the list is close enough to the end to count as being at it.
-    /// A threshold rather than an equality: a fractional offset is normal, and
-    /// one pixel of slack should not mean "the reader has scrolled away".
-    fn at_bottom(&self) -> bool {
-        const SLACK: f32 = 96.0;
+    /// Tells the list how many rows there are and, when that has changed, which
+    /// end they arrived at.
+    ///
+    /// The distinction is the whole point: rows spliced in at the front carry the
+    /// reader down with them, so what they were reading stays under the pointer,
+    /// while rows appended at the back leave them where they are -- and leave a
+    /// reader who was at the bottom at the bottom, because that is what a
+    /// bottom-anchored list does with no scroll position of its own.
+    fn reconcile(&mut self, thread: &Thread, count: usize) {
+        if self.anchored.as_ref() != Some(thread) {
+            self.anchored = Some(thread.clone());
+            self.counted = count;
+            self.prepending = false;
+            self.list.reset(count);
+            // A voice note belongs to the conversation it was sent in, so it
+            // does not follow you into the next one.
+            self.player.stop();
+            return;
+        }
 
-        let remaining = f32::from(self.scroll.max_offset().y) + f32::from(self.scroll.offset().y);
-        remaining.abs() <= SLACK
+        let was = std::mem::replace(&mut self.counted, count);
+        let prepending = std::mem::take(&mut self.prepending);
+
+        match count.checked_sub(was) {
+            None => self.list.reset(count),
+            Some(0) => {}
+            Some(added) if prepending => self.list.splice(0..0, added),
+            Some(added) => self.list.splice(was..was, added),
+        }
     }
 
     /// A playing track has to repaint to move; an idle one must not.
@@ -443,7 +475,7 @@ impl Conversation {
 }
 
 impl Render for Conversation {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = cx.palette().clone();
         let act = self.dispatch(cx);
         let playback = self.player.playback();
@@ -476,88 +508,67 @@ impl Render for Conversation {
                 .into_any_element();
         };
 
-        let entries = group::entries(history.messages(), history.first_unread(), group_within_ms);
+        let rows = group::rows(history.messages(), history.first_unread(), group_within_ms);
+        // Row zero is the top of the thread: the button that fetches the previous
+        // page, or nothing once there is nothing behind it. Always a row, even
+        // when it draws nothing, because a row that came and went would shift
+        // every index behind it and take the reader's place with it.
+        let older = history.has_more();
+        let loading = history.is_loading();
 
-        // A conversation opens at its newest message, and stays where it was
-        // put once you have scrolled it yourself.
-        let count = history.messages().len();
-        if self.anchored.as_ref() != Some(&thread) {
-            self.anchored = Some(thread.clone());
-            self.counted = count;
-            self.scroll.scroll_to_bottom();
-            // A voice note belongs to the conversation it was sent in, so it
-            // does not follow you into the next one.
-            self.player.stop();
-        } else if count > self.counted {
-            // Measured before the new message is laid out, which is the whole
-            // point: "were you at the bottom a moment ago", not "are you at the
-            // bottom now that something has been added below you".
-            let follow = self.at_bottom();
-            self.counted = count;
+        self.reconcile(&thread, rows.len() + 1);
 
-            if follow {
-                let scroll = self.scroll.clone();
-                window.on_next_frame(move |_, _| scroll.scroll_to_bottom());
-            }
-        } else {
-            self.counted = count;
-        }
+        let rows = std::rc::Rc::new(rows);
+        let frame = std::rc::Rc::new(Frame {
+            thread: thread.clone(),
+            palette: palette.clone(),
+            highlights: cx.highlights().clone(),
+            spacing,
+            timestamps,
+            max_image,
+            playback,
+            act,
+        });
+        let store = self.store.clone();
+        let target = thread.clone();
+        let this = cx.entity();
 
-        let mut list = kit::measured()
-            .flex()
-            .flex_col()
-            .px(px(spacing.padding_x))
-            .py(px(spacing.padding_y))
-            .gap(px(spacing.between_runs));
-
-        if history.has_more() {
-            let loading = history.is_loading();
-            let target = thread.clone();
-            list = list.child(
-                div()
-                    .id("load-older")
-                    .self_center()
-                    .px_3()
-                    .py_1()
-                    .rounded_full()
-                    .text_size(px(spacing.small))
-                    .text_color(palette.text_muted)
-                    .when(!loading, |this| {
-                        this.hover(|this| this.bg(palette.hover)).on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _, _, cx| {
-                                this.load_older(target.clone(), cx)
-                            }),
-                        )
-                    })
-                    .child(if loading {
-                        "Loading older messages…"
-                    } else {
-                        "Load older messages"
+        let list = list(self.list.clone(), move |index, _window, cx| {
+            let Some(row) = index.checked_sub(1) else {
+                return match older {
+                    true => load_older(loading, &frame.palette, spacing, {
+                        let this = this.clone();
+                        let target = target.clone();
+                        move |_: &gpui::MouseDownEvent, _: &mut Window, cx: &mut gpui::App| {
+                            this.update(cx, |this, cx| this.load_older(target.clone(), cx));
+                        }
                     }),
-            );
-        }
+                    false => div().into_any_element(),
+                };
+            };
 
-        for entry in entries {
-            list = list.child(match entry {
-                Entry::Day(date) => day_separator(date, &palette, spacing),
-                Entry::UnreadMarker => unread_marker(&palette, spacing),
-                Entry::Update(message) => update_line(message, &palette, spacing),
-                Entry::Run(run) => run_block(
-                    &run,
-                    Run {
-                        state,
-                        palette: &palette,
-                        spacing,
-                        timestamps,
-                        max_image,
-                        playback: &playback,
-                        act: &act,
-                    },
-                )
-                .into_any_element(),
-            });
-        }
+            // Read back out of the store rather than captured: a row addresses
+            // the history by position, and the history is the store's.
+            let Some(state) = store.read(cx).state() else {
+                return div().into_any_element();
+            };
+            let Some(history) = state.history(&frame.thread) else {
+                return div().into_any_element();
+            };
+
+            rows.get(row)
+                .and_then(|row| frame.row(row, history.messages(), state))
+                // Each row carries the space above it, since a list has no gap of
+                // its own to set.
+                .map(|row| div().pt(px(spacing.between_runs)).child(row).into_any_element())
+                .unwrap_or_else(|| div().into_any_element())
+        })
+        .flex_1()
+        .w_full()
+        .max_w(px(kit::MEASURE))
+        .mx_auto()
+        .px(px(spacing.padding_x))
+        .py(px(spacing.padding_y));
 
         div()
             .id("conversation")
@@ -576,25 +587,7 @@ impl Render for Conversation {
                         .update(cx, |composer, cx| composer.attach(paths, cx));
                 },
             ))
-            .child(
-                div()
-                    .id("messages")
-                    .track_scroll(&self.scroll)
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .child(
-                        // A short thread sits at the bottom of the window, not
-                        // stranded at the top of an empty one.
-                        div()
-                            .flex()
-                            .flex_col()
-                            .justify_end()
-                            .min_h_full()
-                            .w_full()
-                            .child(list),
-                    ),
-            )
+            .child(div().flex_1().min_h_0().flex().flex_col().child(list))
             .child(self.composer.clone())
             .into_any_element()
     }
@@ -611,32 +604,97 @@ fn empty(palette: &Theme, message: &'static str) -> gpui::Div {
         .child(message)
 }
 
-/// Everything a run of messages needs that is not the messages themselves.
-struct Run<'a> {
-    state: &'a State,
-    palette: &'a Theme,
+/// Everything the rows need that is not the messages themselves. Owned rather
+/// than borrowed: the list builds a row when it lays one out, which is after the
+/// render that decided what the rows were has returned.
+struct Frame {
+    /// The thread it was said in, for what the group says about the sender.
+    thread: Thread,
+    palette: Theme,
+    highlights: std::sync::Arc<gpui_component::highlighter::HighlightTheme>,
     spacing: Spacing,
     timestamps: Timestamps,
     max_image: (f32, f32),
-    playback: &'a Playback,
-    act: &'a Dispatch,
+    playback: Playback,
+    act: Dispatch,
 }
 
-fn run_block(run: &group::Run<'_>, frame: Run<'_>) -> gpui::Div {
-    let Run {
-        state,
+impl Frame {
+    /// One row, or nothing when it addresses a message that is no longer there --
+    /// the rows were worked out against the history as it was, and a delete can
+    /// land between then and the layout that asks for this.
+    fn row(
+        &self,
+        row: &group::Row,
+        messages: &[Message],
+        state: &State,
+    ) -> Option<gpui::AnyElement> {
+        Some(match row {
+            group::Row::Day(date) => day_separator(*date, &self.palette, self.spacing),
+            group::Row::UnreadMarker => unread_marker(&self.palette, self.spacing),
+            group::Row::Update(index) => {
+                update_line(messages.get(*index)?, &self.palette, self.spacing)
+            }
+            group::Row::Run { sender, messages: range } => {
+                let run = messages.get(range.clone())?;
+                if run.is_empty() {
+                    return None;
+                }
+                run_block(*sender, run, state, self).into_any_element()
+            }
+        })
+    }
+}
+
+/// The button that fetches the previous page, which is the top of the list when
+/// there is more behind it.
+fn load_older(
+    loading: bool,
+    palette: &Theme,
+    spacing: Spacing,
+    on_click: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut gpui::App) + 'static,
+) -> gpui::AnyElement {
+    div()
+        .id("load-older")
+        .self_center()
+        .px_3()
+        .py_1()
+        .rounded_full()
+        .text_size(px(spacing.small))
+        .text_color(palette.text_muted)
+        .when(!loading, |this| {
+            this.hover(|this| this.bg(palette.hover))
+                .on_mouse_down(MouseButton::Left, on_click)
+        })
+        .child(if loading {
+            "Loading older messages…"
+        } else {
+            "Load older messages"
+        })
+        .into_any_element()
+}
+
+fn run_block(
+    sender: Uuid,
+    run: &[Message],
+    state: &State,
+    frame: &Frame,
+) -> gpui::Div {
+    let Frame {
+        thread,
         palette,
+        highlights,
         spacing,
         timestamps,
         max_image,
         playback,
         act,
     } = frame;
-
-    let sender = run.sender;
+    let (spacing, timestamps, max_image) = (*spacing, *timestamps, *max_image);
     let name = state.sender_name(sender);
+    let member = state.member(thread, sender);
     let tint = palette.accent_for(sender.as_bytes());
-    let first = run.messages.first();
+    let first = run.first();
     let inspect = {
         let act = act.clone();
         move |_: &gpui::MouseDownEvent, window: &mut Window, cx: &mut gpui::App| {
@@ -659,13 +717,14 @@ fn run_block(run: &group::Run<'_>, frame: Run<'_>) -> gpui::Div {
                 .id("sender")
                 .cursor_pointer()
                 .text_size(px(spacing.body))
-                .font_weight(gpui::FontWeight::MEDIUM)
+                .font_weight(kit::EMPHASIS)
                 .text_color(tint)
                 .hover(|this| this.underline())
                 .on_mouse_down(MouseButton::Left, inspect.clone())
                 .on_mouse_down(MouseButton::Right, menu.clone())
                 .child(SharedString::from(name.clone())),
         )
+        .children(labels(member, palette, spacing))
         .when_some(
             first.filter(|_| timestamps != Timestamps::Never),
             |this, message| {
@@ -678,11 +737,12 @@ fn run_block(run: &group::Run<'_>, frame: Run<'_>) -> gpui::Div {
             },
         );
 
-    let bodies = run.messages.iter().map(|message| {
+    let bodies = run.iter().map(|message| {
         content::Body {
             message,
             state,
             theme: palette,
+            highlights,
             spacing,
             max_image,
             playback,
@@ -720,6 +780,28 @@ fn run_block(run: &group::Run<'_>, frame: Run<'_>) -> gpui::Div {
                 .child(header)
                 .children(bodies),
         )
+}
+
+/// What the group says about whoever is talking: the label they picked for
+/// themselves, then the role the group gave them. Empty outside a group, and
+/// empty for the ordinary members of one, so a chip here always means something.
+fn labels(member: Option<&Member>, palette: &Theme, spacing: Spacing) -> Vec<gpui::Div> {
+    let Some(member) = member else {
+        return Vec::new();
+    };
+    let size = spacing.small - 1.0;
+
+    member
+        .badge()
+        .map(|badge| kit::chip_sized(badge, palette.accent, size))
+        .into_iter()
+        .chain(
+            member
+                .role
+                .label()
+                .map(|role| kit::chip_sized(role, palette.text_dim, size)),
+        )
+        .collect()
 }
 
 fn day_separator(date: NaiveDate, palette: &Theme, spacing: Spacing) -> gpui::AnyElement {

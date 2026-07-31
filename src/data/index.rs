@@ -166,6 +166,30 @@ impl Index {
         self.get(thread).map(|entry| entry.flags.clone()).unwrap_or_default()
     }
 
+    /// Forgets the conversation but keeps the contact. Everything `started` reads
+    /// is cleared, so the sidebar stops listing it, while the person stays
+    /// reachable through the quick switcher -- which is the difference between
+    /// deleting a conversation and deleting someone.
+    ///
+    /// Note to Self is the exception, and stays listed: it is where the account
+    /// itself lives rather than a conversation you chose to have.
+    pub fn forget(&mut self, thread: &Thread) {
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.thread == *thread) {
+            entry.preview = None;
+            entry.unread = 0;
+            entry.mentions = 0;
+            entry.last_activity = 0;
+            entry.flags = Flags {
+                // Not a decision the conversation carried: whether someone is
+                // blocked, or has never been let in, is about them.
+                blocked: entry.flags.blocked,
+                request: entry.flags.request,
+                ..Flags::default()
+            };
+        }
+        self.reorder();
+    }
+
     /// Walks the sidebar order, wrapping at both ends. Archived threads are
     /// skipped so cycling never lands somewhere the sidebar is not showing.
     pub fn cycle(&self, from: Option<&Thread>, forward: bool) -> Option<&Thread> {
@@ -405,6 +429,11 @@ mod tests {
         "Unknown".into()
     }
 
+    /// The threads the sidebar would actually draw.
+    fn listed(index: &Index) -> Vec<Thread> {
+        index.conversations().map(|e| e.thread.clone()).collect()
+    }
+
     #[test]
     fn always_includes_note_to_self() {
         let (index, aci) = index(&[], &[]);
@@ -522,6 +551,98 @@ mod tests {
         index.set_sort(Sort::Name);
 
         assert_eq!(names(&index), ["Alice", "Note to Self", "Zoe"]);
+    }
+
+    /// The point of `forget`: the conversation goes, the contact stays. Deleting
+    /// a chat is not deleting the person, and they have to stay reachable through
+    /// the quick switcher to start another one.
+    #[test]
+    fn forgetting_a_conversation_keeps_the_contact() {
+        let alice = contact("Alice");
+        let thread = Thread::Contact(ContactId::Aci(alice.uuid));
+        let (mut index, _) = index(std::slice::from_ref(&alice), &[]);
+        index.touch(&thread, &message(100, alice.uuid, "hi"), unknown);
+        index.set_flags(
+            &thread,
+            Flags {
+                pinned: true,
+                folder: Some("Work".into()),
+                ..Default::default()
+            },
+        );
+        assert!(index.get(&thread).expect("listed").started());
+
+        index.forget(&thread);
+
+        let entry = index.get(&thread).expect("still a contact");
+        assert!(!entry.started(), "no longer a conversation");
+        assert_eq!(entry.name, "Alice");
+        assert!(entry.preview.is_none());
+        assert_eq!(entry.unread, 0);
+        // The flags went with it, or the emptied conversation would still be
+        // pinned to the top of a list it is no longer in.
+        assert!(!entry.flags.pinned);
+        assert_eq!(entry.flags.folder, None);
+        assert!(!listed(&index).contains(&thread));
+    }
+
+    /// Whether someone is blocked, or has never been let in, is a fact about them
+    /// rather than about the conversation -- so it survives.
+    #[test]
+    fn forgetting_keeps_what_is_true_about_the_person() {
+        let alice = contact("Alice");
+        let thread = Thread::Contact(ContactId::Aci(alice.uuid));
+        let (mut index, _) = index(std::slice::from_ref(&alice), &[]);
+        index.touch(&thread, &message(100, alice.uuid, "hi"), unknown);
+        index.set_flags(
+            &thread,
+            Flags {
+                blocked: true,
+                request: true,
+                pinned: true,
+                ..Default::default()
+            },
+        );
+
+        index.forget(&thread);
+
+        let flags = index.flags(&thread);
+        assert!(flags.blocked);
+        assert!(flags.request);
+        assert!(!flags.pinned);
+    }
+
+    /// Forgetting one conversation must not empty another.
+    #[test]
+    fn forgetting_leaves_every_other_conversation_alone() {
+        let (alice, bob) = (contact("Alice"), contact("Bob"));
+        let (mut index, _) = index(&[alice.clone(), bob.clone()], &[]);
+        let (a, b) = (
+            Thread::Contact(ContactId::Aci(alice.uuid)),
+            Thread::Contact(ContactId::Aci(bob.uuid)),
+        );
+        index.touch(&a, &message(100, alice.uuid, "hi"), unknown);
+        index.touch(&b, &message(200, bob.uuid, "hello"), unknown);
+
+        index.forget(&a);
+
+        assert!(!listed(&index).contains(&a));
+        assert!(listed(&index).contains(&b));
+        assert_eq!(index.get(&b).expect("kept").last_activity, 200);
+    }
+
+    /// Note to Self is where the account lives rather than a conversation you
+    /// chose to have, so emptying it does not take it off the list.
+    #[test]
+    fn forgetting_note_to_self_leaves_it_listed() {
+        let (mut index, aci) = index(&[], &[]);
+        let own = Thread::Contact(ContactId::Aci(aci));
+        index.touch(&own, &message(100, aci, "a note"), unknown);
+
+        index.forget(&own);
+
+        assert!(index.get(&own).expect("listed").started());
+        assert!(index.get(&own).expect("listed").preview.is_none());
     }
 
     #[test]

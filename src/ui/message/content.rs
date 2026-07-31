@@ -1,9 +1,10 @@
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, Div, FontStyle, FontWeight, HighlightStyle, MouseButton, SharedString, StyledText,
+    AnyElement, Div, FontStyle, HighlightStyle, MouseButton, SharedString, StyledText,
     div, px,
 };
 use gpui_component::IconName;
+use gpui_component::highlighter::HighlightTheme;
 
 use super::act::{Act, Dispatch};
 use super::{bar, emoji, format, media};
@@ -22,6 +23,9 @@ pub struct Body<'a> {
     pub message: &'a Message,
     pub state: &'a State,
     pub theme: &'a Theme,
+    /// Derived once when the theme is installed rather than here: building it is
+    /// a round trip through Zed's theme JSON, and this runs per frame.
+    pub highlights: &'a HighlightTheme,
     pub spacing: Spacing,
     pub max_image: (f32, f32),
     pub playback: &'a Playback,
@@ -67,7 +71,14 @@ impl Body<'_> {
                     Some(scale) if ranges.is_empty() => spacing.body * scale,
                     _ => spacing.body,
                 };
-                said.children(prose(&body, &ranges, self.state, theme, size))
+                said.children(prose(
+                    &body,
+                    &ranges,
+                    self.state,
+                    theme,
+                    self.highlights,
+                    size,
+                ))
             }
             Content::Sticker(sticker) => said.child(self.sticker(sticker)),
             Content::Deleted => said.child(
@@ -244,6 +255,7 @@ fn prose(
     ranges: &[Range],
     state: &State,
     theme: &Theme,
+    highlights: &HighlightTheme,
     size: f32,
 ) -> Vec<AnyElement> {
     let mut blocks: Vec<&Range> = ranges
@@ -290,7 +302,12 @@ fn prose(
     let mut at = 0;
     for block in blocks {
         parts.extend(paragraph(at, block.start).flatten());
-        parts.push(code_block(&body[block.start..block.end()], theme, size));
+        parts.push(code_block(
+            &body[block.start..block.end()],
+            theme,
+            highlights,
+            size,
+        ));
         at = block.end();
     }
     parts.extend(paragraph(at, body.len()).flatten());
@@ -300,7 +317,12 @@ fn prose(
 /// Code, in a box, in the monospace font, coloured by what it is. Nothing else
 /// in a message gets a background, which is what makes it read as a block
 /// rather than as a word.
-fn code_block(fenced: &str, theme: &Theme, size: f32) -> AnyElement {
+fn code_block(
+    fenced: &str,
+    theme: &Theme,
+    highlights: &HighlightTheme,
+    size: f32,
+) -> AnyElement {
     let Some((language, code)) = markup::block(fenced) else {
         return div().into_any_element();
     };
@@ -331,7 +353,7 @@ fn code_block(fenced: &str, theme: &Theme, size: f32) -> AnyElement {
                 .text_size(px(size - 1.0))
                 .line_height(px((size - 1.0) * 1.45))
                 .text_color(theme.text)
-                .child(highlighted(code, language, theme)),
+                .child(highlighted(code, language, highlights)),
         )
         .into_any_element()
 }
@@ -340,20 +362,81 @@ fn code_block(fenced: &str, theme: &Theme, size: f32) -> AnyElement {
 /// grammar for the languages people actually paste; anything else parses as
 /// text and comes back one flat span, which is the right answer rather than a
 /// guess dressed up in colour.
-fn highlighted(code: &str, language: &str, theme: &Theme) -> StyledText {
+fn highlighted(code: &str, language: &str, highlights: &HighlightTheme) -> StyledText {
+    let styles = memoized(code, language, highlights);
+    StyledText::new(code.to_owned()).with_highlights(styles.iter().cloned())
+}
+
+type Styles = std::rc::Rc<Vec<(std::ops::Range<usize>, HighlightStyle)>>;
+
+/// A parse costs the better part of a millisecond and the answer never changes,
+/// but a code block on screen is re-rendered on every frame -- so highlighting
+/// one was a millisecond of every frame it was visible, for a result identical to
+/// the last.
+///
+/// Bounded rather than unbounded: a long session scrolling through a thread full
+/// of code would otherwise keep every block it had ever drawn. Cleared wholesale
+/// when the theme changes, since every entry's colours came from it.
+fn memoized(code: &str, language: &str, highlights: &HighlightTheme) -> Styles {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::hash::{Hash, Hasher};
+
+    /// Enough for what is on screen and the overdraw around it, several times
+    /// over.
+    const CAPACITY: usize = 64;
+
+    /// The theme the entries were coloured with, and the entries by language and
+    /// source.
+    type Cache = (u64, HashMap<(String, String), Styles>);
+
+    thread_local! {
+        static CACHE: RefCell<Cache> = RefCell::new((0, HashMap::new()));
+    }
+
+    let theme = {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        highlights.hash(&mut hasher);
+        hasher.finish()
+    };
+
+    CACHE.with(|cache| {
+        let (cached_theme, entries) = &mut *cache.borrow_mut();
+        if *cached_theme != theme {
+            entries.clear();
+            *cached_theme = theme;
+        }
+
+        let key = (language.to_owned(), code.to_owned());
+        if let Some(styles) = entries.get(&key) {
+            return styles.clone();
+        }
+
+        let styles: Styles = std::rc::Rc::new(parse(code, language, highlights));
+        if entries.len() >= CAPACITY {
+            entries.clear();
+        }
+        entries.insert(key, styles.clone());
+        styles
+    })
+}
+
+fn parse(
+    code: &str,
+    language: &str,
+    highlights: &HighlightTheme,
+) -> Vec<(std::ops::Range<usize>, HighlightStyle)> {
     use gpui_component::highlighter::SyntaxHighlighter;
 
     let mut highlighter = SyntaxHighlighter::new(language);
     let rope = gpui_component::input::Rope::from(code);
     highlighter.update(None, &rope, None);
 
-    let styles: Vec<_> = highlighter
-        .styles(&(0..code.len()), &theme.highlights())
+    highlighter
+        .styles(&(0..code.len()), highlights)
         .into_iter()
         .filter(|(range, _)| range.end <= code.len() && code.is_char_boundary(range.start))
-        .collect();
-
-    StyledText::new(code.to_owned()).with_highlights(styles)
+        .collect()
 }
 
 /// Renders the body with Signal's formatting applied. Mentions carry a
@@ -395,7 +478,7 @@ fn highlight(styles: format::Styles, theme: &Theme) -> Option<HighlightStyle> {
     let mut touched = false;
 
     if styles.bold {
-        highlight.font_weight = Some(FontWeight::BOLD);
+        highlight.font_weight = Some(kit::STRONG);
         touched = true;
     }
     if styles.italic {
@@ -621,3 +704,62 @@ fn describe(update: &Update) -> String {
     }
 }
 
+
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn theme() -> HighlightTheme {
+        crate::config::theme::dark().highlights()
+    }
+
+    /// The point of the memo: the second ask is the same answer without the
+    /// parse, because a visible code block is re-rendered every frame.
+    #[test]
+    fn highlighting_the_same_code_twice_parses_once() {
+        let code = "key = \"value\"\n";
+        let theme = theme();
+
+        let first = memoized(code, "toml", &theme);
+        let again = memoized(code, "toml", &theme);
+
+        assert!(std::rc::Rc::ptr_eq(&first, &again));
+        assert_eq!(*first, parse(code, "toml", &theme));
+    }
+
+    /// A theme change has to invalidate everything, or code keeps the colours of
+    /// the theme it was first drawn under.
+    #[test]
+    fn a_new_theme_is_not_served_from_the_old_cache() {
+        let code = "key = \"value\"\n";
+
+        let dark = memoized(code, "toml", &theme());
+        let light = memoized(code, "toml", &crate::config::theme::light().highlights());
+
+        assert!(!std::rc::Rc::ptr_eq(&dark, &light));
+    }
+
+    /// A language with no grammar is not an error: it comes back as one span, so
+    /// the code is still drawn.
+    #[test]
+    fn an_unknown_language_still_yields_text() {
+        let styles = memoized("hai", "nothing-like-this", &theme());
+
+        assert!(styles.iter().all(|(range, _)| range.end <= 3));
+    }
+
+    /// Every range indexes the string that is handed to the renderer, which
+    /// panics rather than truncates if one runs past the end or lands inside a
+    /// character.
+    #[test]
+    fn every_range_is_a_valid_slice_of_the_code() {
+        let code = "héllo = \"wörld\" # ünicode\n";
+
+        for (range, _) in memoized(code, "toml", &theme()).iter() {
+            assert!(code.is_char_boundary(range.start), "{range:?}");
+            assert!(range.end <= code.len(), "{range:?}");
+        }
+    }
+}

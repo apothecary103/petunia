@@ -268,6 +268,18 @@ impl Settings {
                 cx,
                 |config, timestamps| config.messages.timestamps = timestamps,
             )))
+            .child(field("Attribute your messages by name", palette).child(toggle(
+                draft.messages.show_own_name,
+                palette,
+                cx.listener(|this: &mut Self, _, _, cx| {
+                    this.change(
+                        |config| {
+                            config.messages.show_own_name = !config.messages.show_own_name
+                        },
+                        cx,
+                    )
+                }),
+            )))
             .child(field("Day separators", palette).child(toggle(
                 draft.messages.date_separators,
                 palette,

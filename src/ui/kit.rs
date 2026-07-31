@@ -17,6 +17,17 @@ pub fn icon(name: IconName, size: f32, tint: Hsla) -> Icon {
 pub const RADIUS: f32 = 8.0;
 pub const RADIUS_LG: f32 = 12.0;
 
+/// The two weights above regular that macOS actually draws.
+///
+/// gpui asks font-kit for a CSS weight and font-kit matches per CSS Fonts 3.
+/// The system family reports its faces at CoreText's own weights, and the
+/// conversion lands Medium on 530 rather than 500 -- so a request for 500 finds
+/// no exact match, hits the rule that checks 400 first, and rasterises as
+/// Regular. `FontWeight::MEDIUM` is therefore invisible here. Semibold (600) and
+/// Bold (700) land exactly, and are what AppKit itself hands out for emphasis.
+pub const EMPHASIS: gpui::FontWeight = gpui::FontWeight::SEMIBOLD;
+pub const STRONG: gpui::FontWeight = gpui::FontWeight::BOLD;
+
 /// A row that can be picked: quiet by default, filled when it is the one you
 /// are on, outlined so selecting it never shifts the layout.
 pub fn row(id: impl Into<gpui::ElementId>, selected: bool, theme: &Theme) -> Stateful<Div> {
@@ -72,7 +83,7 @@ pub fn heading(icon: Option<IconName>, label: impl Into<SharedString>, theme: &T
                 .min_w_0()
                 .truncate()
                 .text_size(px(theme.typography.ui_size - 3.0))
-                .font_weight(gpui::FontWeight::MEDIUM)
+                .font_weight(EMPHASIS)
                 .text_color(theme.text_muted)
                 .child(SharedString::from(label.to_uppercase())),
         )
@@ -102,12 +113,19 @@ pub fn icon_button(
 /// A small rounded label. Used for counts, states and anything annotating
 /// something else rather than standing alone.
 pub fn chip(label: impl Into<SharedString>, tint: Hsla, theme: &Theme) -> Div {
+    chip_sized(label, tint, theme.typography.ui_size - 4.0)
+}
+
+/// The same chip at a size the caller picks, for the message list -- which is
+/// scaled by density and by `scale`, so a chip drawn there at the interface size
+/// would be the one thing in the run that does not follow.
+pub fn chip_sized(label: impl Into<SharedString>, tint: Hsla, size: f32) -> Div {
     div()
         .flex_none()
         .px_1p5()
         .rounded_full()
         .bg(tinted(tint))
-        .text_size(px(theme.typography.ui_size - 4.0))
+        .text_size(px(size))
         .text_color(tint)
         .child(label.into())
 }
@@ -128,4 +146,78 @@ pub fn measured() -> Div {
 /// A colour at the strength a fill wants rather than the strength text wants.
 pub fn tinted(color: Hsla) -> Hsla {
     Hsla { a: 0.16, ..color }
+}
+
+/// The card a dialog sits in, over a scrim that dims what it is covering.
+/// Clicking the scrim is how a dialog is dismissed, so the card stops the click
+/// from reaching it.
+pub fn dialog(width: f32, theme: &Theme) -> Div {
+    div()
+        .w(px(width))
+        .flex()
+        .flex_col()
+        .gap_3()
+        .p_4()
+        .rounded(px(RADIUS_LG))
+        .bg(theme.elevated)
+        .border_1()
+        .border_color(theme.border)
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+}
+
+pub fn scrim(theme: &Theme) -> Div {
+    div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(Hsla {
+            a: 0.6,
+            ..theme.background
+        })
+}
+
+/// How a button in a dialog reads. `Danger` is filled in the warning colour
+/// rather than the accent, because the accent is what "send" is and a delete must
+/// not look like the safe thing to click.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Intent {
+    Primary,
+    Danger,
+    Quiet,
+}
+
+pub fn button(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<SharedString>,
+    intent: Intent,
+    theme: &Theme,
+    on_click: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    let fill = match intent {
+        Intent::Primary => Some(theme.accent),
+        Intent::Danger => Some(theme.danger),
+        Intent::Quiet => None,
+    };
+
+    div()
+        .id(id)
+        .px_3()
+        .py_1p5()
+        .rounded(px(RADIUS))
+        .cursor_pointer()
+        .when_some(fill, |this, fill| this.bg(fill))
+        .when(fill.is_none(), |this| {
+            this.border_1()
+                .border_color(theme.border)
+                .hover(|this| this.bg(theme.hover))
+        })
+        .text_size(px(theme.typography.ui_size))
+        .text_color(match fill {
+            Some(_) => theme.on_accent,
+            None => theme.text_dim,
+        })
+        .on_mouse_down(MouseButton::Left, on_click)
+        .child(label.into())
 }

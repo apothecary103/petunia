@@ -27,6 +27,10 @@ const DURATIONS: [(&str, u64); 4] = [
 /// cannot hold — it closes on the click that would focus it.
 pub type Create = Rc<dyn Fn(&mut Window, &mut gpui::App)>;
 
+/// What "delete" does, which is ask first. Separate from `Apply` for the same
+/// reason `Create` is: it needs a dialog, not a flag.
+pub type Delete = Rc<dyn Fn(&mut Window, &mut gpui::App)>;
+
 /// The menu for a conversation in the list.
 pub fn items(
     flags: &Flags,
@@ -34,6 +38,7 @@ pub fn items(
     now: u64,
     apply: Apply,
     create: Create,
+    delete: Delete,
 ) -> Vec<Item> {
     let mut items = vec![
         toggle(
@@ -114,6 +119,16 @@ pub fn items(
         );
     }
 
+    // Last, and behind a separator: the one entry here that throws something
+    // away, kept as far as possible from the ones that merely file it. The
+    // ellipsis is the promise that it asks first.
+    items.push(Item::Separator);
+    items.push(
+        Item::new("Delete conversation…", move |window, cx| delete(window, cx))
+            .icon(IconName::Delete)
+            .danger(),
+    );
+
     items
 }
 
@@ -165,6 +180,7 @@ mod tests {
             now,
             Rc::new(|_, _, _| {}),
             Rc::new(|_, _| {}),
+            Rc::new(|_, _| {}),
         )
     }
 
@@ -208,6 +224,46 @@ mod tests {
         let offered = labels(&menu(flags, &[], 1_000));
 
         assert!(offered.contains(&"For an hour".to_string()));
+    }
+
+    /// The ellipsis is a promise that it asks first, and the danger colour is how
+    /// the one destructive entry is told apart from the ones that merely file
+    /// something.
+    #[test]
+    fn deleting_is_offered_last_asks_first_and_is_marked_destructive() {
+        let items = menu(Flags::default(), &[], 0);
+
+        let last = items.last().expect("an entry");
+        assert!(matches!(
+            last,
+            Item::Entry { label, danger: true, .. } if label.ends_with('…')
+        ));
+        assert!(
+            labels(&items).contains(&"Delete conversation…".to_string()),
+            "{:?}",
+            labels(&items)
+        );
+    }
+
+    /// Nothing about a conversation should hide the way to delete it -- least of
+    /// all archiving, which is where the ones you have finished with end up.
+    #[test]
+    fn deleting_is_offered_whatever_state_the_conversation_is_in() {
+        let states = [
+            Flags::default(),
+            Flags { pinned: true, ..Default::default() },
+            Flags { archived: true, ..Default::default() },
+            Flags { muted_until: Some(9_000), ..Default::default() },
+            Flags { folder: Some("Work".into()), ..Default::default() },
+        ];
+
+        for flags in states {
+            assert!(
+                labels(&menu(flags.clone(), &["Work".to_string()], 1_000))
+                    .contains(&"Delete conversation…".to_string()),
+                "{flags:?}"
+            );
+        }
     }
 
     #[test]

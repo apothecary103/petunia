@@ -222,6 +222,21 @@ async fn serve(mut commands: UnboundedReceiver<Command>, mut events: Events) -> 
                         warn!(%error, "failed to record thread flags");
                     }
                 }
+                Some(Command::DeleteThread { thread }) => {
+                    // The list has already dropped it, so a failure here is
+                    // reported rather than silently leaving the two disagreeing
+                    // until the next restart brings the conversation back.
+                    match db.delete_thread(&thread).await {
+                        Ok(messages) => info!(messages, "deleted a conversation"),
+                        Err(error) => {
+                            error!(%error, "failed to delete a conversation");
+                            emit(&mut events, Event::Error(format!(
+                                "could not delete that conversation: {error}"
+                            )))
+                            .await;
+                        }
+                    }
+                }
                 Some(Command::Search { query, within }) => {
                     match db.search(&query, within.as_ref()).await {
                         Ok(hits) => emit(&mut events, Event::Found { query, hits }).await,

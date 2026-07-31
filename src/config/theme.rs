@@ -152,6 +152,11 @@ impl Theme {
             "style": {
                 "editor.background": rgb(self.sunken),
                 "editor.foreground": rgb(self.text),
+                // The editor's own chrome, which the code editor takes from here
+                // and nowhere else. A code block in a message paints its own.
+                "editor.gutter.background": rgb(self.sunken),
+                "editor.active_line.background": rgb(self.hover),
+                "editor.invisible": rgb(self.text_muted),
                 "syntax": syntax,
             },
         });
@@ -698,6 +703,19 @@ mod tests {
 
         assert!(highlights.style("keyword").is_some());
         assert!(highlights.style("string").is_some());
+    }
+
+    /// The code editor takes its chrome from the same place as its syntax, so a
+    /// key that fails to parse leaves it coloured by the library's default.
+    #[test]
+    fn the_highlight_palette_carries_the_editor_chrome() {
+        let theme = dark();
+        let style = theme.highlights().style;
+
+        assert_eq!(style.editor_background, Some(theme.sunken));
+        assert_eq!(style.editor_foreground, Some(theme.text));
+        assert_eq!(style.editor_gutter_background, Some(theme.sunken));
+        assert_eq!(style.editor_active_line, Some(theme.hover));
     }
 
     /// Petunia's own two are neutral greys with no palette of their own, and

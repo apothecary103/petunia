@@ -13,6 +13,8 @@ pub struct Messages {
     /// Seconds. Messages from one sender closer together than this group.
     pub group_within: u64,
     pub date_separators: bool,
+    /// Attribute our own messages by name rather than as "You".
+    pub show_own_name: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -40,6 +42,7 @@ impl Default for Messages {
             timestamps: Timestamps::default(),
             group_within: 300,
             date_separators: true,
+            show_own_name: false,
         }
     }
 }

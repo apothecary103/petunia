@@ -82,35 +82,16 @@ impl Render for Prompt {
         let palette = cx.palette().clone();
         let ready = !self.input.read(cx).value().trim().is_empty();
 
-        div()
+        kit::scrim(&palette)
             .id("prompt")
             .track_focus(&self.focus)
-            .absolute()
-            .inset_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(gpui::Hsla {
-                a: 0.6,
-                ..palette.background
-            })
             .on_action(cx.listener(|_, _: &crate::actions::Cancel, _, cx| cx.emit(Dismissed)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|_, _, _, cx| cx.emit(Dismissed)),
             )
             .child(
-                div()
-                    .w(px(360.0))
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .p_4()
-                    .rounded(px(kit::RADIUS_LG))
-                    .bg(palette.elevated)
-                    .border_1()
-                    .border_color(palette.border)
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                kit::dialog(360.0, &palette)
                     .child(
                         div()
                             .text_size(px(palette.typography.ui_size + 1.0))
@@ -132,50 +113,24 @@ impl Render for Prompt {
                             .flex()
                             .justify_end()
                             .gap_2()
-                            .child(button(
+                            .child(kit::button(
                                 "cancel",
                                 "Cancel",
-                                false,
+                                kit::Intent::Quiet,
                                 &palette,
                                 cx.listener(|_, _, _, cx| cx.emit(Dismissed)),
                             ))
-                            .child(button(
+                            .child(kit::button(
                                 "confirm",
                                 self.confirm.clone(),
-                                ready,
+                                match ready {
+                                    true => kit::Intent::Primary,
+                                    false => kit::Intent::Quiet,
+                                },
                                 &palette,
                                 cx.listener(|this: &mut Self, _, _, cx| this.answer(cx)),
                             )),
                     ),
             )
     }
-}
-
-fn button(
-    id: &'static str,
-    label: impl Into<SharedString>,
-    primary: bool,
-    palette: &crate::config::Theme,
-    on_click: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut gpui::App) + 'static,
-) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .px_3()
-        .py_1p5()
-        .rounded(px(kit::RADIUS))
-        .cursor_pointer()
-        .when(primary, |this| this.bg(palette.accent))
-        .when(!primary, |this| {
-            this.border_1()
-                .border_color(palette.border)
-                .hover(|this| this.bg(palette.hover))
-        })
-        .text_size(px(palette.typography.ui_size))
-        .text_color(if primary {
-            palette.on_accent
-        } else {
-            palette.text_dim
-        })
-        .on_mouse_down(MouseButton::Left, on_click)
-        .child(label.into())
 }

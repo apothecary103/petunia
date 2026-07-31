@@ -180,6 +180,28 @@ impl Store {
             .unwrap_or_default()
     }
 
+    /// Forgets a conversation: off the screen now, off the disk behind it.
+    ///
+    /// Local to this device. Signal's own "delete for me" travels through the
+    /// Storage Service, which presage does not expose, so this cannot reach the
+    /// phone -- and the conversation comes back the moment anyone says anything
+    /// in it, because a new message is a new thread as far as the store is
+    /// concerned.
+    pub fn delete_thread(&mut self, thread: Thread, cx: &mut Context<Self>) {
+        if let Some(state) = self.state.as_mut() {
+            state.index.forget(&thread);
+            // The loaded messages go too. Without this, reopening the contact
+            // from the switcher would show the conversation still sitting in
+            // memory, which reads as the delete having failed.
+            state.histories.remove(&thread);
+        }
+        if self.active.as_ref() == Some(&thread) {
+            self.active = None;
+        }
+        self.send(Command::DeleteThread { thread });
+        cx.notify();
+    }
+
     /// Sends what the composer built, and puts it on screen before the network
     /// has heard of it. The echo carries `Sending`, which the worker replaces
     /// with what actually happened.
@@ -412,16 +434,19 @@ impl Store {
 
     pub fn config_changed(&mut self, config: Arc<Config>, cx: &mut Context<Self>) {
         self.config = config;
-        self.apply_sort();
+        self.apply_config();
         cx.notify();
     }
 
-    /// The sidebar's order comes from the config, so a hot reload has to reach
-    /// the index rather than only the palette.
-    fn apply_sort(&mut self) {
+    /// Preferences the model itself reads: the sidebar's order and what our own
+    /// messages are called. A hot reload has to reach these rather than only the
+    /// palette.
+    fn apply_config(&mut self) {
         let sort = self.config.sidebar.sort;
+        let show_own_name = self.config.messages.show_own_name;
         if let Some(state) = self.state.as_mut() {
             state.index.set_sort(sort);
+            state.show_own_name = show_own_name;
         }
     }
 
@@ -443,7 +468,7 @@ impl Store {
                 self.link_url = None;
                 self.link_failure = None;
                 self.state = Some(State::new(aci));
-                self.apply_sort();
+                self.apply_config();
                 cx.emit(StoreEvent::Linked);
             }
             Event::Error(message) if self.state.is_none() => {

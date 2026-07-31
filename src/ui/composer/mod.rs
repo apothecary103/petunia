@@ -1,11 +1,16 @@
 pub mod stickers;
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
-use gpui::{Context, Div, Entity, MouseButton, SharedString, Subscription, Window, div, px};
+use gpui::{
+    ClipboardEntry, Context, Div, Entity, ImageFormat, MouseButton, SharedString, Subscription,
+    Window, div, px,
+};
 use gpui_component::IconName;
+use gpui_component::input;
 use gpui_component::input::{Input, InputEvent, InputState};
 
 use super::kit;
@@ -123,6 +128,32 @@ impl Composer {
     pub fn attach(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         self.attachments.extend(paths);
         cx.notify();
+    }
+
+    /// Takes from the clipboard whatever the field cannot: a screenshot arrives
+    /// as bytes and a file copied in Finder as a path, and neither is text. Run
+    /// in the capture phase, ahead of the field's own paste, and only claimed
+    /// when something was actually attached -- so pasting text still types it.
+    fn paste(&mut self, _: &input::Paste, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(item) = cx.read_from_clipboard() else {
+            return;
+        };
+
+        let attached: Vec<_> = item
+            .entries()
+            .iter()
+            .flat_map(|entry| match entry {
+                ClipboardEntry::Image(image) => spill(image).into_iter().collect::<Vec<_>>(),
+                ClipboardEntry::ExternalPaths(paths) => paths.paths().to_vec(),
+                ClipboardEntry::String(_) => Vec::new(),
+            })
+            .collect();
+
+        if attached.is_empty() {
+            return;
+        }
+        cx.stop_propagation();
+        self.attach(attached, cx);
     }
 
     /// Escape. Drops the reply or edit first and only then the attachments, so
@@ -397,6 +428,9 @@ impl Render for Composer {
                     this.pick_files(window, cx)
                 }),
             )
+            // Captured rather than bubbled: the field handles Paste and does not
+            // pass it on, so a listener behind it would never see an image.
+            .capture_action(cx.listener(Self::paste))
             .when_some(typing, |this, who| {
                 this.child(
                     div()
@@ -439,6 +473,52 @@ impl Render for Composer {
             .child(field)
             .child(context(&title, &palette))
     }
+}
+
+/// Writes a pasted image where the send path can read it. Everything downstream
+/// takes a path, and the content type Signal is told comes from the extension --
+/// so the file is named for what it holds, and a format no phone will draw is
+/// re-encoded rather than sent as bytes nobody can open.
+///
+/// The temp directory is right: the file only has to outlive the composer, since
+/// the upload adopts a copy into the media cache. The name is the clipboard's own
+/// hash of the bytes, so pasting one screenshot twice writes one file.
+fn spill(image: &gpui::Image) -> Option<PathBuf> {
+    let (extension, bytes) = match image.format {
+        ImageFormat::Png => ("png", Cow::Borrowed(image.bytes.as_slice())),
+        ImageFormat::Jpeg => ("jpg", Cow::Borrowed(image.bytes.as_slice())),
+        ImageFormat::Gif => ("gif", Cow::Borrowed(image.bytes.as_slice())),
+        ImageFormat::Webp => ("webp", Cow::Borrowed(image.bytes.as_slice())),
+        // A vector has no pixels to re-encode until something picks a size. The
+        // markup is on the clipboard as text too, so leaving this alone lets the
+        // field paste that instead of attaching a file Signal has no type for.
+        ImageFormat::Svg => return None,
+        _ => ("png", Cow::Owned(png(&image.bytes)?)),
+    };
+
+    let directory = std::env::temp_dir().join("petunia");
+    std::fs::create_dir_all(&directory).ok()?;
+    let path = directory.join(format!("{:016x}.{extension}", image.id()));
+
+    if !path.exists()
+        && let Err(error) = std::fs::write(&path, bytes.as_ref())
+    {
+        tracing::warn!(%error, "could not save a pasted image");
+        return None;
+    }
+    Some(path)
+}
+
+fn png(bytes: &[u8]) -> Option<Vec<u8>> {
+    let decoded = image::load_from_memory(bytes)
+        .inspect_err(|error| tracing::warn!(%error, "could not read a pasted image"))
+        .ok()?;
+
+    let mut encoded = Vec::new();
+    decoded
+        .write_to(&mut std::io::Cursor::new(&mut encoded), image::ImageFormat::Png)
+        .ok()?;
+    Some(encoded)
 }
 
 fn describe_typing(state: &crate::data::State, thread: &Thread) -> Option<String> {
@@ -607,7 +687,7 @@ fn toolbar(palette: &Theme, cx: &mut Context<Composer>) -> Div {
                 );
 
             match style {
-                Style::Bold => button.font_weight(gpui::FontWeight::BOLD).child("B"),
+                Style::Bold => button.font_weight(kit::STRONG).child("B"),
                 Style::Italic => button.italic().child("I"),
                 Style::Strikethrough => button.line_through().child("S"),
                 Style::Monospace => button
@@ -665,4 +745,76 @@ fn send(
         .text_color(palette.on_accent)
         .on_mouse_down(MouseButton::Left, on_click)
         .child("↑")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn encoded(format: image::ImageFormat) -> Vec<u8> {
+        let image = image::RgbaImage::from_pixel(4, 4, image::Rgba([10, 20, 30, 255]));
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(&mut std::io::Cursor::new(&mut bytes), format)
+            .unwrap();
+        bytes
+    }
+
+    /// Signal is told what an attachment is from its extension, so the name has
+    /// to say what the bytes actually are.
+    #[test]
+    fn a_pasted_png_is_written_as_a_png() {
+        let image = gpui::Image::from_bytes(ImageFormat::Png, encoded(image::ImageFormat::Png));
+
+        let path = spill(&image).expect("written");
+
+        assert_eq!(path.extension().unwrap(), "png");
+        assert_eq!(
+            crate::data::attachment::content_type(&path),
+            "image/png"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), image.bytes);
+    }
+
+    /// A screenshot pasted twice is one file, because the name is the clipboard's
+    /// own hash of the bytes.
+    #[test]
+    fn the_same_image_lands_at_the_same_path() {
+        let bytes = encoded(image::ImageFormat::Png);
+        let once = gpui::Image::from_bytes(ImageFormat::Png, bytes.clone());
+        let twice = gpui::Image::from_bytes(ImageFormat::Png, bytes);
+
+        assert_eq!(spill(&once), spill(&twice));
+    }
+
+    /// A format no phone will draw is re-encoded rather than sent as bytes
+    /// nobody can open.
+    #[test]
+    fn an_exotic_format_is_re_encoded_as_png() {
+        let image = gpui::Image::from_bytes(ImageFormat::Bmp, encoded(image::ImageFormat::Bmp));
+
+        let path = spill(&image).expect("written");
+
+        assert_eq!(path.extension().unwrap(), "png");
+        assert_eq!(
+            image::guess_format(&std::fs::read(&path).unwrap()).unwrap(),
+            image::ImageFormat::Png
+        );
+    }
+
+    /// A vector has no pixels until something picks a size, and the markup is on
+    /// the clipboard as text anyway -- so the field pastes that instead.
+    #[test]
+    fn an_svg_is_left_to_the_text_field() {
+        let image = gpui::Image::from_bytes(ImageFormat::Svg, b"<svg/>".to_vec());
+
+        assert!(spill(&image).is_none());
+    }
+
+    #[test]
+    fn bytes_that_are_not_an_image_are_refused() {
+        let image = gpui::Image::from_bytes(ImageFormat::Tiff, b"not an image".to_vec());
+
+        assert!(spill(&image).is_none());
+    }
 }
