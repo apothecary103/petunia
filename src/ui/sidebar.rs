@@ -40,21 +40,24 @@ impl Render for Sidebar {
         };
 
         let show_preview = store.config.sidebar.show_preview;
-        let sections = [
-            (Section::Pinned, "Pinned"),
-            (Section::Requests, "Requests"),
-            (Section::Chats, "Chats"),
-            (Section::Archived, "Archived"),
-        ];
+        let now = chrono::Utc::now().timestamp_millis() as u64;
+        let sections = state.index.sections();
 
         let mut list = div().flex().flex_col().gap_4().px_2p5().pb_3();
 
-        for (section, label) in sections {
+        for section in sections {
+            let label = match &section {
+                Section::Pinned => "Pinned".to_string(),
+                Section::Requests => "Requests".to_string(),
+                Section::Chats => "Chats".to_string(),
+                Section::Archived => "Archived".to_string(),
+                Section::Folder(name) => name.clone(),
+            };
             // A contact sync lists everyone you have ever known; only threads
             // with something in them belong in a conversation list.
             let entries: Vec<_> = state
                 .index
-                .section(section)
+                .section(section.clone())
                 .filter(|entry| entry.started())
                 .collect();
             if entries.is_empty() {
@@ -65,6 +68,8 @@ impl Render for Sidebar {
                 let thread = entry.thread.clone();
                 let selected = active.as_ref() == Some(&thread);
                 let seed = entry.thread.seed().to_vec();
+
+                let wanted = thread.clone();
 
                 row(
                     &palette,
@@ -80,6 +85,8 @@ impl Render for Sidebar {
                         when: entry.last_activity,
                         unread: entry.unread,
                         mentions: entry.mentions,
+                        muted: entry.flags.muted(now),
+                        pinned: entry.flags.pinned,
                         selected,
                     },
                 )
@@ -87,6 +94,14 @@ impl Render for Sidebar {
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _, _, cx| this.open(thread.clone(), cx)),
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this: &mut Self, event: &gpui::MouseDownEvent, _, cx| {
+                        let thread = wanted.clone();
+                        this.store
+                            .update(cx, |store, cx| store.open_menu(thread, event.position, cx));
+                    }),
                 )
             });
 
@@ -182,12 +197,16 @@ struct Line<'a> {
     when: u64,
     unread: u32,
     mentions: u32,
+    muted: bool,
+    pinned: bool,
     selected: bool,
 }
 
 fn row(palette: &Theme, line: Line<'_>) -> Stateful<Div> {
     let unread = line.unread > 0;
-    let title_color = if unread || line.selected {
+    let title_color = if line.muted {
+        palette.text_dim
+    } else if unread || line.selected {
         palette.text
     } else {
         palette.text_dim
@@ -220,6 +239,13 @@ fn row(palette: &Theme, line: Line<'_>) -> Stateful<Div> {
                                 .text_color(title_color)
                                 .child(SharedString::from(line.name.to_owned())),
                         )
+                        .when(line.pinned, |this| {
+                            this.child(kit::icon(
+                                gpui_component::IconName::Star,
+                                10.0,
+                                palette.text_muted,
+                            ))
+                        })
                         .child(
                             div()
                                 .flex_none()
@@ -247,18 +273,22 @@ fn row(palette: &Theme, line: Line<'_>) -> Stateful<Div> {
                                 .child(SharedString::from(line.preview.unwrap_or_default())),
                         )
                         .when(unread, |this| {
-                            this.child(badge(line.unread, line.mentions, palette))
+                            this.child(badge(line.unread, line.mentions, line.muted, palette))
                         }),
                 ),
         )
 }
 
 /// A dot when there is simply something new, a count once it is worth counting,
-/// and the accent reserved for a mention.
-fn badge(unread: u32, mentions: u32, palette: &Theme) -> Div {
-    let mentioned = mentions > 0;
+/// and the accent reserved for a mention. A muted conversation still counts, but
+/// dimly: Signal's own behaviour, and the difference between "there is something
+/// here" and "look at this".
+fn badge(unread: u32, mentions: u32, muted: bool, palette: &Theme) -> Div {
+    let mentioned = mentions > 0 && !muted;
     let tint = if mentioned {
         palette.accent
+    } else if muted {
+        palette.text_muted
     } else {
         palette.text_dim
     };

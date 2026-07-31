@@ -85,6 +85,12 @@ pub enum Command {
         path: PathBuf,
         timestamp: u64,
     },
+    /// Records what the list has been told about a conversation: pinned,
+    /// archived, muted, foldered. Local to this device.
+    SetFlags {
+        thread: Thread,
+        flags: crate::data::index::Flags,
+    },
     /// Looks for a phrase, in one conversation or in all of them.
     Search {
         query: String,

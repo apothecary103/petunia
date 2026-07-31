@@ -11,22 +11,35 @@ pub enum Sort {
     Name,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Section {
     Pinned,
     Requests,
+    /// A folder the user made. Flat: a conversation is in one or in none, which
+    /// is as much structure as a chat list can carry before it needs a tree and
+    /// a way to manage one.
+    Folder(String),
     Chats,
     Archived,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Flags {
     pub pinned: bool,
     pub archived: bool,
     pub blocked: bool,
     pub request: bool,
+    /// A timestamp, not a duration: "muted for eight hours" has to survive a
+    /// restart, and only an instant does.
     pub muted_until: Option<u64>,
+    pub folder: Option<String>,
+}
+
+impl Flags {
+    pub fn muted(&self, now: u64) -> bool {
+        self.muted_until.is_some_and(|until| until > now)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -52,11 +65,15 @@ pub struct Index {
 }
 
 impl Entry {
+    /// Archived beats everything -- putting something away is a decision about
+    /// where it goes -- then pinned, then a folder, then the request queue.
     pub fn section(&self) -> Section {
         if self.flags.archived {
             Section::Archived
         } else if self.flags.pinned {
             Section::Pinned
+        } else if let Some(folder) = self.flags.folder.clone() {
+            Section::Folder(folder)
         } else if self.flags.request {
             Section::Requests
         } else {
@@ -104,6 +121,49 @@ impl Index {
         self.entries
             .iter()
             .filter(move |entry| entry.section() == section)
+    }
+
+    /// The sections to draw, in order, with folders in between the fixed ones.
+    /// Only the folders that have something in them: an empty folder is a name
+    /// with nothing to show.
+    pub fn sections(&self) -> Vec<Section> {
+        let mut folders: Vec<&str> = self
+            .conversations()
+            .filter(|entry| entry.section() != Section::Archived)
+            .filter_map(|entry| entry.flags.folder.as_deref())
+            .collect();
+        folders.sort_unstable();
+        folders.dedup();
+
+        let mut sections = vec![Section::Pinned, Section::Requests];
+        sections.extend(folders.into_iter().map(|name| Section::Folder(name.to_owned())));
+        sections.extend([Section::Chats, Section::Archived]);
+        sections
+    }
+
+    /// Every folder that exists, for a menu offering to move something into one.
+    pub fn folders(&self) -> Vec<String> {
+        let mut folders: Vec<String> = self
+            .entries
+            .iter()
+            .filter_map(|entry| entry.flags.folder.clone())
+            .collect();
+        folders.sort_unstable();
+        folders.dedup();
+        folders
+    }
+
+    /// Applies what a menu chose, and records it nowhere: persistence is the
+    /// store's business, because the index is not allowed to know about sqlite.
+    pub fn set_flags(&mut self, thread: &Thread, flags: Flags) {
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.thread == *thread) {
+            entry.flags = flags;
+        }
+        self.reorder();
+    }
+
+    pub fn flags(&self, thread: &Thread) -> Flags {
+        self.get(thread).map(|entry| entry.flags.clone()).unwrap_or_default()
     }
 
     /// Walks the sidebar order, wrapping at both ends. Archived threads are
@@ -255,17 +315,6 @@ impl Index {
         }
         entry.sorted = name.to_lowercase();
         entry.name = name;
-        self.reorder();
-    }
-
-    /// Test-only until there is somewhere to persist flags. The sections they
-    /// select are real and ordered here; nothing yet writes a pin or an archive,
-    /// and a setter with no caller would be a control that does nothing.
-    #[cfg(test)]
-    pub fn set_flags(&mut self, thread: &Thread, flags: Flags) {
-        if let Some(entry) = self.entries.iter_mut().find(|e| e.thread == *thread) {
-            entry.flags = flags;
-        }
         self.reorder();
     }
 

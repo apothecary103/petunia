@@ -22,16 +22,25 @@ pub fn with_actions(
     own: bool,
     theme: &Theme,
     act: &Dispatch,
-) -> Div {
+) -> gpui::Stateful<Div> {
     if !message.is_addressable() {
-        return body;
+        return body.id(SharedString::from(format!("body-{}", message.timestamp())));
     }
 
     let group = SharedString::from(format!("message-{}", message.timestamp()));
+    let id = message.id;
+    let raise = act.clone();
 
     div()
+        .id(SharedString::from(format!("body-{}", message.timestamp())))
         .relative()
         .group(group.clone())
+        .on_mouse_down(
+            MouseButton::Right,
+            move |event: &gpui::MouseDownEvent, window, cx| {
+                raise(Act::Menu(id, event.position), window, cx)
+            },
+        )
         .child(body)
         .child(
             div()

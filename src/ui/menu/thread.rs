@@ -1,0 +1,195 @@
+//! What right-clicking a conversation offers.
+
+use std::rc::Rc;
+
+use gpui::Window;
+use gpui_component::IconName;
+
+use super::Item;
+use crate::data::index::Flags;
+
+/// What to do with the flags an entry produces. A callback rather than a store
+/// handle, so building a menu is a pure function of what is true about the
+/// conversation and can be tested as one.
+pub type Apply = Rc<dyn Fn(Flags, &mut Window, &mut gpui::App)>;
+
+/// How long "mute" mutes for. Signal's own choices, and the reason `muted_until`
+/// is an instant: eight hours has to still be eight hours after a restart.
+const DURATIONS: [(&str, u64); 4] = [
+    ("For an hour", 3_600),
+    ("For eight hours", 8 * 3_600),
+    ("For a week", 7 * 24 * 3_600),
+    ("Until I turn it back on", 0),
+];
+
+/// The menu for a conversation in the list.
+pub fn items(flags: &Flags, folders: &[String], now: u64, apply: Apply) -> Vec<Item> {
+    let mut items = vec![
+        toggle(
+            &apply,
+            flags,
+            "Pin",
+            IconName::Star,
+            flags.pinned,
+            |flags| Flags {
+                pinned: !flags.pinned,
+                // Pinning something you had put away is a decision to see it
+                // again, and leaving it archived would mean it stayed hidden.
+                archived: false,
+                ..flags
+            },
+        ),
+        toggle(
+            &apply,
+            flags,
+            "Archive",
+            IconName::Inbox,
+            flags.archived,
+            |flags| Flags {
+                archived: !flags.archived,
+                pinned: false,
+                ..flags
+            },
+        ),
+        Item::Separator,
+    ];
+
+    if flags.muted(now) {
+        items.push(
+            set(&apply, flags, "Unmute", |flags| Flags {
+                muted_until: None,
+                ..flags
+            })
+            .icon(IconName::Bell),
+        );
+    } else {
+        items.push(Item::Label("Mute".into()));
+        for (label, seconds) in DURATIONS {
+            let until = match seconds {
+                // Far enough out to mean "until I say otherwise" without
+                // needing a second way of saying it.
+                0 => u64::MAX,
+                seconds => now + seconds * 1_000,
+            };
+            items.push(set(&apply, flags, label, move |flags| Flags {
+                muted_until: Some(until),
+                ..flags
+            }));
+        }
+    }
+
+    items.push(Item::Separator);
+    items.push(Item::Label("Folder".into()));
+    items.push(
+        set(&apply, flags, "None", |flags| Flags {
+            folder: None,
+            ..flags
+        })
+        .checked(flags.folder.is_none()),
+    );
+    for folder in folders {
+        let name = folder.clone();
+        let chosen = flags.folder.as_deref() == Some(folder.as_str());
+        items.push(
+            set(&apply, flags, folder.clone(), move |flags| Flags {
+                folder: Some(name.clone()),
+                ..flags
+            })
+            .checked(chosen),
+        );
+    }
+
+    items
+}
+
+/// A menu entry that applies whatever the given change makes of the flags.
+fn set(
+    apply: &Apply,
+    flags: &Flags,
+    label: impl Into<gpui::SharedString>,
+    change: impl Fn(Flags) -> Flags + 'static,
+) -> Item {
+    let apply = apply.clone();
+    let flags = flags.clone();
+
+    Item::new(label, move |window: &mut Window, cx: &mut gpui::App| {
+        apply(change(flags.clone()), window, cx)
+    })
+}
+
+fn toggle(
+    apply: &Apply,
+    flags: &Flags,
+    label: &'static str,
+    icon: IconName,
+    on: bool,
+    change: impl Fn(Flags) -> Flags + 'static,
+) -> Item {
+    set(apply, flags, label, change).icon(icon).checked(on)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn labels(items: &[Item]) -> Vec<String> {
+        items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Entry { label, .. } => Some(label.to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// What is offered, which is all these check -- not what it does.
+    fn menu(flags: Flags, folders: &[String], now: u64) -> Vec<Item> {
+        items(&flags, folders, now, Rc::new(|_, _, _| {}))
+    }
+
+    #[test]
+    fn an_unmuted_conversation_offers_durations() {
+        let offered = labels(&menu(Flags::default(), &[], 1_000));
+
+        assert!(offered.contains(&"For an hour".to_string()));
+        assert!(!offered.contains(&"Unmute".to_string()));
+    }
+
+    #[test]
+    fn a_muted_conversation_offers_only_unmute() {
+        let flags = Flags {
+            muted_until: Some(9_000),
+            ..Flags::default()
+        };
+
+        let offered = labels(&menu(flags, &[], 1_000));
+
+        assert!(offered.contains(&"Unmute".to_string()));
+        assert!(!offered.contains(&"For an hour".to_string()));
+    }
+
+    /// A mute that has run out is not a mute, and offering "unmute" for one
+    /// would be a control that does nothing.
+    #[test]
+    fn an_expired_mute_offers_durations_again() {
+        let flags = Flags {
+            muted_until: Some(500),
+            ..Flags::default()
+        };
+
+        let offered = labels(&menu(flags, &[], 1_000));
+
+        assert!(offered.contains(&"For an hour".to_string()));
+    }
+
+    #[test]
+    fn every_folder_is_offered_with_a_way_out() {
+        let folders = vec!["Work".to_string(), "Family".to_string()];
+
+        let offered = labels(&menu(Flags::default(), &folders, 0));
+
+        assert!(offered.contains(&"Work".to_string()));
+        assert!(offered.contains(&"Family".to_string()));
+        assert!(offered.contains(&"None".to_string()));
+    }
+}

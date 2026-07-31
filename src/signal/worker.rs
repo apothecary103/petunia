@@ -101,6 +101,11 @@ async fn serve(mut commands: UnboundedReceiver<Command>, mut events: Events) -> 
     ));
     tokio::task::spawn_local(fetch_previews(db.clone(), aci, events.clone()));
     send_sticker_packs(&manager, &cache, &mut events).await;
+    match db.flags().await {
+        Ok(flags) if flags.is_empty() => {}
+        Ok(flags) => emit(&mut events, Event::Flags(flags)).await,
+        Err(error) => warn!(%error, "failed to load thread flags"),
+    }
     if freshly_linked
         && let Err(error) = manager.request_contacts().await
     {
@@ -212,6 +217,11 @@ async fn serve(mut commands: UnboundedReceiver<Command>, mut events: Events) -> 
                         }
                     }
                 }
+                Some(Command::SetFlags { thread, flags }) => {
+                    if let Err(error) = db.set_flags(&thread, &flags).await {
+                        warn!(%error, "failed to record thread flags");
+                    }
+                }
                 Some(Command::Search { query, within }) => {
                     match db.search(&query, within.as_ref()).await {
                         Ok(hits) => emit(&mut events, Event::Found { query, hits }).await,
@@ -245,6 +255,11 @@ async fn serve(mut commands: UnboundedReceiver<Command>, mut events: Events) -> 
                         Ok(()) => {
                             info!("installed a sticker pack");
                             send_sticker_packs(&manager, &cache, &mut events).await;
+    match db.flags().await {
+        Ok(flags) if flags.is_empty() => {}
+        Ok(flags) => emit(&mut events, Event::Flags(flags)).await,
+        Err(error) => warn!(%error, "failed to load thread flags"),
+    }
                         }
                         Err(error) => {
                             warn!(%error, "failed to install a sticker pack");

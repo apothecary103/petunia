@@ -24,6 +24,34 @@ pub struct Viewing(pub std::path::PathBuf);
 
 impl gpui::EventEmitter<Viewing> for Conversation {}
 
+/// A menu was asked for. The workspace owns it for the same reason it owns the
+/// viewer: a menu opened near the bottom of the column has to be able to flip
+/// above the pointer, which means knowing about more than the column.
+///
+/// The items are in a cell because an event is handed out by reference and
+/// these are closures -- there is nothing to clone them from. Whoever handles it
+/// takes them; a second handler would find an empty menu and draw nothing, which
+/// is the right answer for a menu that has already been raised.
+pub struct Raise {
+    items: std::cell::RefCell<Vec<crate::ui::menu::Item>>,
+    pub at: gpui::Point<gpui::Pixels>,
+}
+
+impl Raise {
+    fn new(items: Vec<crate::ui::menu::Item>, at: gpui::Point<gpui::Pixels>) -> Self {
+        Self {
+            items: std::cell::RefCell::new(items),
+            at,
+        }
+    }
+
+    pub fn take(&self) -> Vec<crate::ui::menu::Item> {
+        self.items.take()
+    }
+}
+
+impl gpui::EventEmitter<Raise> for Conversation {}
+
 /// Hands a file to whatever the system opens it with.
 fn open(path: &std::path::Path) {
     if let Err(error) = open::that_detached(path) {
@@ -183,7 +211,35 @@ impl Conversation {
                 store.send(Command::InstallStickerPack { pack_id, key })
             }),
             Act::Inspect(who) => self.inspect(who, cx),
+            Act::Menu(target, at) => self.open_menu(target, at, cx),
+            Act::MenuFor(who, at) => {
+                let items = crate::ui::menu::message::person(who, &self.dispatch(cx));
+                cx.emit(Raise::new(items, at));
+            }
         }
+    }
+
+    /// The menu for a message, built from the message itself.
+    fn open_menu(
+        &mut self,
+        target: MessageId,
+        at: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let act = self.dispatch(cx);
+        let store = self.store.read(cx);
+        let Some((message, own)) = store.state().and_then(|state| {
+            let message = state
+                .histories
+                .values()
+                .find_map(|history| history.find(&target))?;
+            Some((message, message.sender() == state.aci))
+        }) else {
+            return;
+        };
+
+        let items = crate::ui::menu::message::items(message, own, &act);
+        cx.emit(Raise::new(items, at));
     }
 
     fn copy(&self, target: MessageId, cx: &mut Context<Self>) {
@@ -557,6 +613,12 @@ fn run_block(run: &group::Run<'_>, frame: Run<'_>) -> gpui::Div {
             act(Act::Inspect(sender), window, cx)
         }
     };
+    let menu = {
+        let act = act.clone();
+        move |event: &gpui::MouseDownEvent, window: &mut Window, cx: &mut gpui::App| {
+            act(Act::MenuFor(sender, event.position), window, cx)
+        }
+    };
 
     let header = div()
         .flex()
@@ -570,6 +632,7 @@ fn run_block(run: &group::Run<'_>, frame: Run<'_>) -> gpui::Div {
                 .text_color(tint)
                 .hover(|this| this.underline())
                 .on_mouse_down(MouseButton::Left, inspect.clone())
+                .on_mouse_down(MouseButton::Right, menu.clone())
                 .child(SharedString::from(name.clone())),
         )
         .when_some(
@@ -607,6 +670,7 @@ fn run_block(run: &group::Run<'_>, frame: Run<'_>) -> gpui::Div {
                 .flex_none()
                 .cursor_pointer()
                 .on_mouse_down(MouseButton::Left, inspect)
+                .on_mouse_down(MouseButton::Right, menu)
                 .child(avatar(
                     state.avatar_for(sender),
                     &name,

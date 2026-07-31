@@ -2,11 +2,12 @@ use gpui::prelude::*;
 use gpui::{App, Context, Entity, Focusable as _, SharedString, Subscription, Window, div, px};
 use gpui_component::{ActiveTheme, IconName};
 
-use super::conversation::{Conversation, Viewing};
+use super::conversation::{Conversation, Raise, Viewing};
 use super::details::{self, Details};
 use super::help::{self, Help};
 use super::kit;
 use super::linking::Linking;
+use super::menu::{self, Menu};
 use super::notice::Notices;
 use super::palette::{Dismissed, Switcher};
 use super::search::{self, Scope, Search};
@@ -37,6 +38,7 @@ pub struct Workspace {
     viewer: Option<Entity<Viewer>>,
     help: Option<Entity<Help>>,
     search: Option<Entity<Search>>,
+    menu: Option<Entity<Menu>>,
     /// Always present, and draws nothing until something has gone wrong.
     notices: Entity<Notices>,
     /// What the window is called, so the platform is only told when it changes.
@@ -78,6 +80,7 @@ impl Workspace {
             viewer: None,
             help: None,
             search: None,
+            menu: None,
             notices,
             titled: String::new(),
             _subscriptions: subscriptions,
@@ -108,6 +111,10 @@ impl Workspace {
             this.view_media(event.0.clone(), window, cx)
         })
         .detach();
+        cx.subscribe_in(&conversation, window, |this, _, raise: &Raise, window, cx| {
+            this.raise_menu(raise.take(), raise.at, window, cx);
+        })
+        .detach();
 
         if let Some(thread) = self.session.active.clone() {
             self.store
@@ -132,6 +139,9 @@ impl Workspace {
             StoreEvent::Linked => {
                 self.enter_main(window, cx);
                 cx.notify();
+            }
+            StoreEvent::Menu { thread, at } => {
+                self.open_menu(thread.clone(), *at, window, cx);
             }
             // Clicking a name is a request to see it, so the panel opens
             // itself rather than making you find the toggle.
@@ -172,6 +182,58 @@ impl Workspace {
 
         switcher.update(cx, |switcher, cx| switcher.reset(window, cx));
         cx.notify();
+    }
+
+    /// Shows a menu somebody else built. Whoever raised it knows what belongs on
+    /// it; the workspace only knows where one can fit.
+    fn raise_menu(
+        &mut self,
+        items: Vec<menu::Item>,
+        at: gpui::Point<gpui::Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if items.is_empty() {
+            return;
+        }
+        let raised = cx.new(|cx| Menu::new(items, at, cx));
+
+        cx.subscribe(&raised, |this, _, _: &menu::Dismissed, cx| {
+            this.menu = None;
+            cx.notify();
+        })
+        .detach();
+        window.focus(&raised.read(cx).focus_handle(cx), cx);
+
+        self.menu = Some(raised);
+        cx.notify();
+    }
+
+    /// The menu for a conversation, built from what is true about it now.
+    fn open_menu(
+        &mut self,
+        thread: crate::data::Thread,
+        at: gpui::Point<gpui::Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let store = self.store.clone();
+        let flags = store.read(cx).flags(&thread);
+        let folders = store
+            .read(cx)
+            .state()
+            .map(|state| state.index.folders())
+            .unwrap_or_default();
+        let now = chrono::Utc::now().timestamp_millis() as u64;
+
+        let apply: menu::thread::Apply = {
+            let thread = thread.clone();
+            std::rc::Rc::new(move |flags, _, cx| {
+                store.update(cx, |store, cx| store.set_flags(thread.clone(), flags, cx));
+            })
+        };
+        let items = menu::thread::items(&flags, &folders, now, apply);
+        self.raise_menu(items, at, window, cx);
     }
 
     /// cmd+f searches everywhere; cmd+shift+f searches what is on screen. One
@@ -290,6 +352,11 @@ impl Workspace {
     /// Escape, in the order a person means it: the overlay first, then whatever
     /// the composer is carrying.
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.menu.take().is_some() {
+            window.focus(&self.focus, cx);
+            cx.notify();
+            return;
+        }
         if self.search.take().is_some() {
             window.focus(&self.focus, cx);
             cx.notify();
@@ -512,6 +579,7 @@ impl Render for Workspace {
             .children(self.viewer.clone())
             .children(self.help.clone())
             .children(self.search.clone())
+            .children(self.menu.clone())
             .child(self.notices.clone())
     }
 }

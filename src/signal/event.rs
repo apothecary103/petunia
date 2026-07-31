@@ -51,6 +51,8 @@ pub enum Event {
         thread: Thread,
         count: u32,
     },
+    /// What the list has been told about every conversation, at startup.
+    Flags(Vec<(Thread, crate::data::index::Flags)>),
     /// What a search turned up. Carries the query it answers, so a result that
     /// arrives after the box has moved on can be dropped rather than shown.
     Found {

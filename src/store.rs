@@ -49,6 +49,11 @@ pub enum StoreEvent {
     History { older: bool },
     /// Something was clicked that wants the details panel open.
     Inspecting,
+    /// A right-click asked for a menu, at this point on screen.
+    Menu {
+        thread: Thread,
+        at: gpui::Point<gpui::Pixels>,
+    },
     /// What a search turned up, carrying the query it answers so a late result
     /// cannot replace a newer one.
     Found {
@@ -140,6 +145,39 @@ impl Store {
         // Opening a conversation is not a claim about whose profile you wanted.
         self.focus = None;
         cx.notify();
+    }
+
+    /// Raised rather than handled here: where a menu goes is the workspace's
+    /// business, not the model's.
+    pub fn open_menu(
+        &mut self,
+        thread: Thread,
+        at: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.emit(StoreEvent::Menu { thread, at });
+    }
+
+    /// Records what a menu chose about a conversation, on screen at once and on
+    /// disk behind it.
+    pub fn set_flags(
+        &mut self,
+        thread: Thread,
+        flags: crate::data::index::Flags,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(state) = self.state.as_mut() {
+            state.index.set_flags(&thread, flags.clone());
+        }
+        self.send(Command::SetFlags { thread, flags });
+        cx.notify();
+    }
+
+    pub fn flags(&self, thread: &Thread) -> crate::data::index::Flags {
+        self.state
+            .as_ref()
+            .map(|state| state.index.flags(thread))
+            .unwrap_or_default()
     }
 
     /// Sends what the composer built, and puts it on screen before the network
@@ -427,6 +465,11 @@ impl Store {
             Event::Contacts { contacts, groups } => state.contacts_updated(contacts, groups),
             Event::StickerPacks(packs) => state.sticker_packs = packs,
             Event::Found { query, hits } => cx.emit(StoreEvent::Found { query, hits }),
+            Event::Flags(flags) => {
+                for (thread, flags) in flags {
+                    state.index.set_flags(&thread, flags);
+                }
+            }
             Event::Poster { thread, id, path } => {
                 state.history_mut(&thread).set_poster(&id, path);
             }

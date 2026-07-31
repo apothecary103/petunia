@@ -6,6 +6,7 @@ pub mod help;
 pub mod image;
 pub mod kit;
 pub mod linking;
+pub mod menu;
 pub mod message;
 pub mod notice;
 pub mod palette;

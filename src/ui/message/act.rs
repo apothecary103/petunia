@@ -44,6 +44,10 @@ pub enum Act {
     OpenLink(String),
     /// Opens someone's profile in the details panel.
     Inspect(uuid::Uuid),
+    /// A right-click on a message, at this point on screen.
+    Menu(MessageId, gpui::Point<gpui::Pixels>),
+    /// A right-click on someone's name or picture.
+    MenuFor(uuid::Uuid, gpui::Point<gpui::Pixels>),
 }
 
 pub type Dispatch = Rc<dyn Fn(Act, &mut Window, &mut App)>;

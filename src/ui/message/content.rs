@@ -30,7 +30,7 @@ pub struct Body<'a> {
 }
 
 impl Body<'_> {
-    pub fn render(self) -> Div {
+    pub fn render(self) -> gpui::Stateful<Div> {
         let theme = self.theme;
         let spacing = self.spacing;
         let own = self.message.sender() == self.state.aci;

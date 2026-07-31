@@ -1,5 +1,6 @@
 pub mod avatars;
 pub mod blobs;
+pub mod flags;
 pub mod messages;
 pub mod read;
 pub mod receipts;
@@ -25,6 +26,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/003_read.sql"),
     include_str!("migrations/004_avatars.sql"),
     include_str!("migrations/005_search.sql"),
+    include_str!("migrations/006_flags.sql"),
 ];
 
 #[cfg(test)]
