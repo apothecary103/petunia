@@ -47,6 +47,10 @@ danger = "#f87b8a"
 
 # Sender colours, picked by a stable hash so one person keeps one colour in
 # every conversation and across restarts. Any number of them.
+#
+# Optional, and best left out: leave this off -- as petunia's own dark and light
+# do -- and a colour is generated per person from the whole hue wheel instead, so
+# a group of twenty is twenty colours rather than the same few repeated.
 accents = [
   "#a78bfa",
   "#6ee7a8",

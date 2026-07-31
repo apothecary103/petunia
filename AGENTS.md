@@ -26,7 +26,14 @@ version is gone and its arrangement is not a precedent for anything.
 
 - **Sidebar.** Runs the full height of the window, with the traffic lights
   floating over its own top padding. Small quiet section headers and two-line
-  entries carrying real metadata. Identity sits at the very bottom.
+  entries carrying real metadata. Identity sits at the very bottom. Its right
+  edge is draggable, and dragged in far enough it collapses to a **rail** of
+  avatars — nothing on it is a line of text, since text is the one thing that
+  width has no room for; the badges (unread, typing) go in the corners of the
+  picture instead. The width is a preference in `config.toml`, written on release
+  and set nowhere else — the settings window offers no stepper for it, because two
+  controls for one number is a promise they cannot disagree. Whether it is a rail
+  is session state.
 - **Header.** Belongs to the conversation column, not the whole window — a
   full-width strip leaves a dead band above the sidebar. No rule beneath it;
   the columns are what separate things.
@@ -34,9 +41,20 @@ version is gone and its arrangement is not a precedent for anything.
   *inside* it, right-aligned, and a thin context strip beneath.
 - **Chrome.** Generous vertical rhythm, hairline borders, rounded chips, muted
   secondary text.
-- **Messages.** Discord-style runs: an avatar gutter, one header per run,
-  hanging indent. The one place that departs from the reference, which is not a
-  chat app.
+- **Attachments.** A text file is drawn as its own first lines, highlighted, the
+  way it would read had it been pasted rather than attached — `ui/message/text.rs`
+  decides what counts as text and reads the head of it once. Everything else is
+  the chip in `ui/message/media.rs`.
+- **Messages.** Three layouts, chosen in settings and built from shared parts in
+  `ui/message/run.rs`: **standard**, Discord-style runs with an avatar gutter, one
+  header per run and a hanging indent; **compact**, one line per message with the
+  clock and the name in fixed right-aligned columns, as every IRC client draws it;
+  and **bubbles**, Signal's own, yours on the right. The one place that departs
+  from the reference, which is not a chat app. Independent of `density`, which is
+  how much room a message is given rather than what shape it is.
+- **The reading column** is capped and pinned to the left of its column, not
+  centred. Centring moves every message sideways when the window is resized or a
+  panel opens.
 
 Anything with a visual opinion goes in `ui/kit.rs`, so the look is one
 decision rather than a per-view accident.
@@ -168,6 +186,19 @@ Every one of these has already cost a debugging session.
   read from the `Palette` global; and tree-sitter reparses a code block from
   scratch (~600µs), now memoized in `ui::message::content` on the code, the
   language and the theme.
+- **Sender colours are generated, not picked from a list.** A palette of eight
+  runs out at the ninth person in a group, and eight *muted* colours -- which is
+  what a neutral theme wants -- are eight shades of one idea. `Theme::accent_for`
+  hashes the uuid (FNV-1a; the byte sum it used before only ever read three bits
+  of it) and snaps it to one of twenty-four hues and one of four tones, so two
+  people are either the same colour or a clear fifteen degrees apart. A theme file
+  that lists `accents` still gets exactly those; petunia's own two list none.
+- **Focusing a sheet steals focus from the field inside it.** `window.focus` on an
+  overlay's own handle takes the focus off the text input the overlay just focused,
+  and the result is a search box that looks active and cannot be typed into -- the
+  bug cmd+f had. An overlay with an input focuses the *input* and nothing else;
+  actions still reach the overlay, because dispatch walks up the element tree from
+  whatever holds the focus.
 - **`FontWeight::MEDIUM` draws as Regular on macOS.** gpui hands font-kit a CSS
   weight and font-kit matches per CSS Fonts 3. The system family's faces report
   CoreText's own weights, and the conversion puts Medium at 530 rather than 500 —
@@ -175,6 +206,22 @@ Every one of these has already cost a debugging session.
   and rasterises `.SFNS-Regular`. Semibold (600) and Bold (700) land exactly.
   `kit::EMPHASIS` and `kit::STRONG` are the two weights above regular that macOS
   actually draws; nothing should name a weight directly.
+- **A div only hears a mouse move while it is under the pointer.** Which is the
+  one thing a drag stops being — so a resize written as `on_mouse_move` on an
+  ancestor updates on release and never during, the symptom the sidebar's divider
+  had. The pointer has to be followed at the window level
+  (`Window::on_mouse_event`), reachable from a `canvas`'s paint closure without
+  writing a whole element; `ui::workspace::follow` is the one.
+- **A scroll wheel goes through an overlay on purpose.** `Hitbox::is_hovered` is
+  occluded by whatever is in front, but `should_handle_scroll` is not, so that an
+  overlay does not stop the page under it scrolling. A modal wants the opposite:
+  every full-window sheet calls `occlude`, and `kit::scrim` does it for the ones
+  built on that.
+- **A highlight has no padding.** `HighlightStyle` is a colour over a range of
+  text, so inline code cannot be given a padded rounded box the way markdown draws
+  one. `ui::message::content` pads it with thin spaces *inside* the washed run
+  instead, and the wash is `active` rather than `sunken` — sunken is a shade below
+  the background, which on a dark theme reads as nothing at all.
 
 ## Coding rules
 

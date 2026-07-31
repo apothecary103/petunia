@@ -32,13 +32,21 @@ a linked account.
   what arrives with no ranges is parsed for display. Fenced blocks get a box and
   tree-sitter highlighting in the theme's own syntax palette.
 - **Finding things.** cmd+f over every conversation, cmd+shift+f over the one on
-  screen, cmd+k to jump to a conversation.
+  screen, cmd+k to jump to a conversation. A result shows where it matched, and
+  choosing one opens the conversation, pages back until the message is loaded and
+  lights it.
+- **Forwarding**, to a conversation picked the way the switcher picks one. A new
+  message rather than a marked forward: the flag lives in a part of the protocol
+  presage does not expose.
+- **Message details**, from the right-click menu: the fields worth naming and the
+  whole structure underneath, copyable.
 - **The list.** Pinning, archiving, muting and flat folders, from right-click
   menus; menus on messages and people too. Deleting a conversation asks first and
   clears this device's copy -- Signal's own "delete for me" goes through the
   Storage Service, which presage does not expose, so it cannot reach the phone.
-- **Settings** (cmd+,) over every preference, writing `config.toml` so the file
-  stays authoritative. Keybinding presets: standard, emacs, vim.
+- **Settings** (cmd+,) over every preference, in cards with the theme behind a
+  select rather than thirteen chips, writing `config.toml` so the file stays
+  authoritative. Keybinding presets: standard, emacs, vim.
 - **Themes.** Petunia's two, and all eleven of Zed's, compiled in.
 - **Chrome.** Keyboard sheet (cmd+/), conversation cycling, error notices, hot
   reload, and a translucent sidebar over the desktop on macOS.
@@ -63,10 +71,9 @@ Roughly in the order it would be worth doing.
 - **Notifications.** `[notifications]` is settable and nothing reads it, which
   the settings window says out loud rather than pretending otherwise.
 - **Per-thread drafts** — body and ranges only, never attachment paths.
-- **Draggable panel edges.** `session.json` carries a width for the sidebar and
-  the details panel, and nothing but a hand edit can change either. A narrow
-  window already lends their width back to the conversation; being able to set it
-  is the other half.
+- **A draggable details edge.** The conversation list has one, and dragging it in
+  collapses it to a rail of avatars; the details panel's width is still session
+  state nothing but a hand edit can change.
 - **Jump to a quoted message.** The quote block is deliberately not clickable:
   a target outside the loaded page needs a `Command::LoadAround` that does not
   exist, and a control that silently does nothing is worse than none.

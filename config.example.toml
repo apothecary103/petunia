@@ -22,6 +22,10 @@ theme = "dark"
 scale = 1.0
 
 [messages]
+# How a message is shaped: "standard" (an avatar gutter and one header per run),
+# "compact" (one line per message, IRC style) or "bubbles" (Signal's own, yours
+# on the right). Independent of density, which is how much room it is given.
+layout = "standard"
 # "comfortable" or "compact".
 density = "comfortable"
 # "always", "hover" or "never".
@@ -34,6 +38,9 @@ date_separators = true
 show_own_name = false
 
 [sidebar]
+# Also what dragging the list's right edge sets. Between 180 and 480; dragged
+# narrower than that the list collapses to a rail of avatars, which is remembered
+# separately in session.json rather than as a width.
 width = 240.0
 # "recent" or "name".
 sort = "recent"
