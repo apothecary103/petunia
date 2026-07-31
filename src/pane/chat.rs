@@ -15,6 +15,7 @@ pub struct Chat {
 pub enum Message {
     InputChanged(String),
     Submit,
+    LoadOlder,
 }
 
 impl Chat {
@@ -25,11 +26,23 @@ impl Chat {
         }
     }
 
-    pub fn update(&mut self, message: Message, _state: &State) -> Action {
+    pub fn update(&mut self, message: Message, state: &State) -> Action {
         match message {
             Message::InputChanged(input) => {
                 self.input = input;
                 Action::None
+            }
+            Message::LoadOlder => {
+                let Some(history) = state.history(&self.thread) else {
+                    return Action::None;
+                };
+                if history.is_loading() || !history.has_more() {
+                    return Action::None;
+                }
+                Action::Command(signal::Command::LoadThread {
+                    thread: self.thread.clone(),
+                    before: history.oldest(),
+                })
             }
             Message::Submit => {
                 let body = self.input.trim().to_string();
@@ -51,7 +64,7 @@ impl Chat {
         let history = state.history(&self.thread);
 
         column![
-            message_view::view(history, state),
+            message_view::view(history, state, Message::LoadOlder),
             container(
                 text_input(&format!("Message {title}…"), &self.input)
                     .on_input(Message::InputChanged)
