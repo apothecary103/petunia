@@ -8,7 +8,7 @@ mod thread;
 
 pub use contact::{Contact, Group, contact_name};
 pub use history::History;
-pub use index::Index;
+pub use index::{Index, Section};
 pub use state::State;
 pub use message::{
     Fragment, Message, MessageId, Reaction, Status, classify, pointers, project,

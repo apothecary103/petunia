@@ -7,7 +7,7 @@ mod outgoing;
 mod store;
 mod worker;
 
-pub use command::{Command, Quoted};
+pub use command::Command;
 pub use event::{Connection, Event};
 
 #[derive(Debug, thiserror::Error)]

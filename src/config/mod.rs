@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 
-pub use keys::{Action, Keys};
+pub use keys::Keys;
 pub use messages::Messages;
 pub use theme::Theme;
 

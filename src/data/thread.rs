@@ -41,6 +41,17 @@ pub enum Thread {
     Group([u8; 32]),
 }
 
+impl Thread {
+    /// Stable bytes identifying this thread, for a per-thread colour and for
+    /// element ids that must survive a re-render.
+    pub fn seed(&self) -> &[u8] {
+        match self {
+            Self::Contact(ContactId::Aci(uuid) | ContactId::Pni(uuid)) => uuid.as_bytes(),
+            Self::Group(master_key) => master_key,
+        }
+    }
+}
+
 impl From<&PresageThread> for Thread {
     fn from(thread: &PresageThread) -> Self {
         match thread {

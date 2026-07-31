@@ -3,11 +3,10 @@ use std::sync::Arc;
 use gpui::{Context, EventEmitter};
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{error, warn};
-use uuid::Uuid;
 
 use crate::config::Config;
-use crate::data::State;
-use crate::signal::{self, Command, Connection, Event};
+use crate::data::{self, Fragment, History, State, Thread};
+use crate::signal::{Command, Connection, Event};
 
 /// Everything the views read, and the one way they talk back to the Signal
 /// worker. Views observe this entity rather than owning any of it.
@@ -19,6 +18,8 @@ pub struct Store {
     /// The linking QR, while there is one to show.
     pub link_url: Option<String>,
     pub link_failure: Option<String>,
+    /// The conversation on screen. A message arriving here is read, not unread.
+    active: Option<Thread>,
 }
 
 /// What views react to. A repaint alone is `cx.notify()`; these are the moments
@@ -42,11 +43,37 @@ impl Store {
             commands: None,
             link_url: None,
             link_failure: None,
+            active: None,
         }
     }
 
     pub fn state(&self) -> Option<&State> {
         self.state.as_ref()
+    }
+
+    pub fn active(&self) -> Option<&Thread> {
+        self.active.as_ref()
+    }
+
+    /// Opens a conversation, loading its newest page the first time.
+    pub fn activate(&mut self, thread: Thread, cx: &mut Context<Self>) {
+        if self.active.as_ref() == Some(&thread) {
+            return;
+        }
+
+        let unseen = self
+            .state
+            .as_ref()
+            .is_none_or(|state| state.history(&thread).is_none());
+        if unseen {
+            self.send(Command::load(thread.clone()));
+        }
+        if let Some(state) = self.state.as_mut() {
+            state.index.clear_unread(&thread);
+        }
+
+        self.active = Some(thread);
+        cx.notify();
     }
 
     pub fn connection(&self) -> Connection {
@@ -114,12 +141,21 @@ impl Store {
                 started,
             } => state.set_typing(&thread, sender, started),
             Event::Connection(connection) => state.connection = connection,
+            Event::Attachment { thread, id, blob } => {
+                state.history_mut(&thread).set_blob(&id, blob);
+            }
+            Event::Preview { thread, message } => state.record(&thread, &message),
             Event::History {
                 thread,
                 messages,
                 more,
                 older,
             } => {
+                if !older
+                    && let Some(last) = messages.last().cloned()
+                {
+                    state.record(&thread, &last);
+                }
                 let history = state.history_mut(&thread);
                 if older {
                     history.prepend(messages, more);
@@ -128,23 +164,78 @@ impl Store {
                 }
                 cx.emit(StoreEvent::History { older });
             }
+            Event::MessageStatus { timestamps, status } => {
+                let aci = state.aci;
+                for history in state.histories.values_mut() {
+                    history.apply_status(&timestamps, aci, status);
+                }
+            }
+            Event::Fragment {
+                thread,
+                fragment,
+                order,
+            } => self.fragment(thread, fragment, order),
             Event::Error(message) => {
                 error!(%message, "signal error");
                 cx.emit(StoreEvent::Failed(message));
             }
-            // Fragments, attachments, previews and receipts land in Phase 3 and
-            // 4 alongside the views that render them.
-            other => tracing::debug!(?other, "event not routed yet"),
+            Event::Ready(_) | Event::LinkUrl(_) | Event::Linked { .. } => {}
         }
     }
 
-    /// Our own account id, once linked.
-    pub fn aci(&self) -> Option<Uuid> {
-        self.state.as_ref().map(|state| state.aci)
-    }
-}
+    fn fragment(&mut self, thread: Thread, fragment: Fragment, order: u64) {
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
 
-/// Spawns the Signal worker and forwards its events into the store.
-pub fn bridge(store: gpui::Entity<Store>, cx: &mut gpui::App) {
-    signal::bridge::spawn(store, cx);
+        match fragment {
+            Fragment::Message(message) => self.message(thread, message),
+            Fragment::Edit { target, message } => {
+                state.history_mut(&thread).apply_edit(&target, message, order);
+                self.refresh_preview(&thread);
+            }
+            Fragment::Reaction {
+                target,
+                reaction,
+                remove,
+            } => {
+                state
+                    .history_mut(&thread)
+                    .apply_reaction(&target, reaction, remove);
+            }
+            Fragment::Delete { target } => {
+                state.history_mut(&thread).apply_delete(&target);
+                self.refresh_preview(&thread);
+            }
+            Fragment::Ignored => {}
+        }
+    }
+
+    fn message(&mut self, thread: Thread, message: data::Message) {
+        let active = self.active.clone();
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+
+        state.record(&thread, &message);
+
+        if message.sender() != state.aci && active.as_ref() != Some(&thread) {
+            let mentioned = message.mentions(state.aci);
+            state.index.mark_unread(&thread, mentioned);
+        }
+
+        state.history_mut(&thread).insert(message);
+    }
+
+    /// An edit or a delete changes what the sidebar should say, but only if it
+    /// hit the newest message in the thread.
+    fn refresh_preview(&mut self, thread: &Thread) {
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        if let Some(last) = state.history(thread).and_then(History::last).cloned() {
+            state.record(thread, &last);
+        }
+    }
+
 }
