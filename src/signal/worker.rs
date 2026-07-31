@@ -311,22 +311,21 @@ async fn load_history(
     thread: &Thread,
     aci: Uuid,
 ) -> Result<Vec<data::Message>, Error> {
-    let messages = manager.store().messages(&thread.into(), ..).await?;
-    let mut messages: Vec<_> = messages
-        .filter_map(Result::ok)
-        .filter_map(|content| data::from_content(&content).map(|(_, message)| message))
-        .collect();
-    messages.sort_by_key(|message| message.timestamp);
+    let rows = manager.store().messages(&thread.into(), ..).await?;
+    let mut messages = data::project(rows.filter_map(Result::ok));
 
     let own: Vec<u64> = messages
         .iter()
-        .filter(|message| message.sender == aci)
-        .map(|message| message.timestamp)
+        .filter(|message| message.sender() == aci)
+        .map(|message| message.timestamp())
         .collect();
     let stored = statuses.get(&own).await?;
-    for message in messages.iter_mut().filter(|message| message.sender == aci) {
+    for message in messages
+        .iter_mut()
+        .filter(|message| message.sender() == aci)
+    {
         let status = stored
-            .get(&message.timestamp)
+            .get(&message.timestamp())
             .copied()
             .unwrap_or(data::Status::Sent);
         message.status = Some(if status == data::Status::Sending {
@@ -431,11 +430,8 @@ async fn last_message(
     manager: &RegisteredManager,
     thread: &Thread,
 ) -> Result<Option<data::Message>, Error> {
-    let messages = manager.store().messages(&thread.into(), ..).await?;
-    Ok(messages
-        .filter_map(Result::ok)
-        .filter_map(|content| data::from_content(&content).map(|(_, message)| message))
-        .max_by_key(|message| message.timestamp))
+    let rows = manager.store().messages(&thread.into(), ..).await?;
+    Ok(data::project(rows.filter_map(Result::ok)).pop())
 }
 
 async fn fetch_profile_avatar(

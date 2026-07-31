@@ -87,6 +87,7 @@ fn to_int(status: Status) -> i64 {
         Status::Sent => 2,
         Status::Delivered => 3,
         Status::Read => 4,
+        Status::Viewed => 5,
     }
 }
 
@@ -97,6 +98,7 @@ fn from_int(value: i64) -> Option<Status> {
         2 => Some(Status::Sent),
         3 => Some(Status::Delivered),
         4 => Some(Status::Read),
+        5 => Some(Status::Viewed),
         _ => None,
     }
 }
