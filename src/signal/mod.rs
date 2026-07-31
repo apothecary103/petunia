@@ -1,3 +1,4 @@
+pub mod bridge;
 mod cache;
 mod command;
 mod db;
