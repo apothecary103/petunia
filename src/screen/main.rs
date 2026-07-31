@@ -1,28 +1,19 @@
-use std::collections::{HashMap, HashSet};
-
 use iced::widget::pane_grid::{self, PaneGrid};
-use iced::widget::{button, column, container, image, row, text};
-use iced::{Center, Fill, Shrink};
+use iced::widget::{button, column, container, row, text};
+use iced::{Center, Fill, Shrink, Task};
 use uuid::Uuid;
 
 use crate::config;
-use crate::data::{self, Contact, Group, Thread, contact_name};
-use crate::pane::{Pane, chat};
+use crate::data::{self, State, Thread};
+use crate::pane::{self, Pane};
 use crate::signal;
 use crate::theme;
 use crate::widget::{Element, avatar, sidebar};
 
 pub struct Main {
-    aci: Uuid,
+    state: State,
     panes: pane_grid::State<Pane>,
     focus: pane_grid::Pane,
-    contacts: Vec<Contact>,
-    groups: Vec<Group>,
-    avatars: HashMap<Thread, image::Handle>,
-    previews: HashMap<Thread, data::Message>,
-    unread: HashMap<Thread, u32>,
-    histories: HashMap<Thread, Vec<data::Message>>,
-    loaded: HashSet<Thread>,
     error: Option<String>,
 }
 
@@ -34,7 +25,7 @@ pub enum Message {
     SplitPane(pane_grid::Axis),
     ClosePane,
     MaximizePane,
-    Buffer(pane_grid::Pane, chat::Message),
+    Buffer(pane_grid::Pane, pane::Message),
     OpenThread(Thread),
     DismissError,
 }
@@ -57,48 +48,41 @@ impl Main {
 
         (
             Self {
-                aci,
+                state: State::new(aci),
                 panes,
                 focus,
-                contacts: Vec::new(),
-                groups: Vec::new(),
-                avatars: HashMap::new(),
-                previews: HashMap::new(),
-                unread: HashMap::new(),
-                histories: HashMap::new(),
-                loaded: HashSet::new(),
                 error: None,
             },
             commands,
         )
     }
 
-    pub fn update(&mut self, message: Message) -> Option<signal::Command> {
-        match message {
+    pub fn update(&mut self, message: Message) -> (Task<Message>, Vec<signal::Command>) {
+        let commands = match message {
             Message::PaneClicked(pane) => {
                 self.focus = pane;
-                None
+                Vec::new()
             }
             Message::PaneResized(pane_grid::ResizeEvent { split, ratio }) => {
                 self.panes.resize(split, ratio);
-                None
+                Vec::new()
             }
             Message::PaneDragged(pane_grid::DragEvent::Dropped { pane, target }) => {
                 self.panes.drop(pane, target);
-                None
+                Vec::new()
             }
-            Message::PaneDragged(_) => None,
+            Message::PaneDragged(_) => Vec::new(),
             Message::SplitPane(axis) => {
                 if let Some((pane, _)) = self.panes.split(axis, self.focus, Pane::empty()) {
                     self.focus = pane;
                 }
-                None
+                Vec::new()
             }
             Message::ClosePane => {
                 if let Some((_, sibling)) = self.panes.close(self.focus) {
                     self.focus = sibling;
                 }
-                None
+                Vec::new()
             }
             Message::MaximizePane => {
                 if self.panes.maximized().is_some() {
@@ -106,116 +90,113 @@ impl Main {
                 } else {
                     self.panes.maximize(self.focus);
                 }
-                None
+                Vec::new()
             }
-            Message::OpenThread(thread) => self.open_thread(thread),
             Message::DismissError => {
                 self.error = None;
-                None
+                Vec::new()
             }
-            Message::Buffer(pane, message) => {
-                match self.panes.get_mut(pane)?.update(message) {
-                    chat::Action::None => None,
-                    chat::Action::SendText(body) => {
-                        let thread = self.panes.get(pane)?.thread()?.clone();
-                        let timestamp = chrono::Utc::now().timestamp_millis() as u64;
-                        let message = data::Message {
-                            status: Some(data::Status::Sending),
-                            ..data::Message::plain(
-                                data::MessageId {
-                                    timestamp,
-                                    sender: self.aci,
-                                },
-                                body.clone(),
-                            )
-                        };
-                        self.set_preview(&thread, &message);
-                        self.histories.entry(thread.clone()).or_default().push(message);
-                        Some(signal::Command::SendText {
-                            thread,
-                            body,
-                            timestamp,
-                        })
-                    }
-                }
+            Message::OpenThread(thread) => self.open_thread(thread),
+            Message::Buffer(pane, message) => self.update_pane(pane, message),
+        };
+
+        (Task::none(), commands)
+    }
+
+    fn update_pane(&mut self, pane: pane_grid::Pane, message: pane::Message) -> Vec<signal::Command> {
+        let Some(buffer) = self.panes.get_mut(pane) else {
+            return Vec::new();
+        };
+        match buffer.update(message, &self.state) {
+            pane::Action::None => Vec::new(),
+            pane::Action::Command(command) => {
+                self.echo(&command);
+                vec![command]
             }
         }
     }
 
-    fn open_thread(&mut self, thread: Thread) -> Option<signal::Command> {
-        self.unread.remove(&thread);
+    /// Shows a sent message immediately; the stored row replaces it when the
+    /// thread is next loaded.
+    fn echo(&mut self, command: &signal::Command) {
+        let signal::Command::SendText {
+            thread,
+            body,
+            timestamp,
+        } = command
+        else {
+            return;
+        };
+        let message = data::Message {
+            status: Some(data::Status::Sending),
+            ..data::Message::plain(
+                data::MessageId {
+                    timestamp: *timestamp,
+                    sender: self.state.aci,
+                },
+                body.clone(),
+            )
+        };
+        self.state.record(thread, &message);
+        self.state.history_mut(thread).insert(message);
+    }
+
+    fn open_thread(&mut self, thread: Thread) -> Vec<signal::Command> {
+        self.state.index.clear_unread(&thread);
         if let Some(pane) = self.panes.get_mut(self.focus) {
             *pane = Pane::chat(thread.clone());
         }
-        (!self.loaded.contains(&thread)).then_some(signal::Command::LoadThread(thread))
-    }
-
-    pub fn contacts_updated(&mut self, contacts: Vec<Contact>, groups: Vec<Group>) {
-        self.contacts = contacts;
-        self.groups = groups;
-    }
-
-    pub fn avatar_loaded(&mut self, thread: Thread, bytes: Vec<u8>) {
-        self.avatars.insert(thread, image::Handle::from_bytes(bytes));
-    }
-
-    pub fn preview_loaded(&mut self, thread: Thread, message: data::Message) {
-        self.set_preview(&thread, &message);
-    }
-
-    fn set_preview(&mut self, thread: &Thread, message: &data::Message) {
-        let newer = self
-            .previews
-            .get(thread)
-            .is_none_or(|current| current.timestamp() <= message.timestamp());
-        if newer {
-            self.previews.insert(thread.clone(), message.clone());
+        match self.state.history(&thread) {
+            Some(history) if !history.is_empty() => Vec::new(),
+            _ => vec![signal::Command::LoadThread(thread)],
         }
     }
 
-    pub fn history_loaded(&mut self, thread: Thread, messages: Vec<data::Message>) {
-        self.loaded.insert(thread.clone());
-        let history = self.histories.entry(thread.clone()).or_default();
-        let live = std::mem::replace(history, messages);
-        for message in live {
-            match history.iter_mut().find(|known| known.id == message.id) {
-                Some(existing) => *existing = message,
-                None => history.push(message),
+    pub fn on_signal(&mut self, event: signal::Event) -> Vec<signal::Command> {
+        match event {
+            signal::Event::Contacts { contacts, groups } => {
+                self.state.contacts_updated(contacts, groups);
             }
+            signal::Event::Avatar { thread, bytes } => {
+                self.state
+                    .avatars
+                    .insert(thread, iced::widget::image::Handle::from_bytes(bytes));
+            }
+            signal::Event::Preview { thread, message } => {
+                self.state.record(&thread, &message);
+            }
+            signal::Event::History { thread, messages } => {
+                if let Some(last) = messages.last().cloned() {
+                    self.state.record(&thread, &last);
+                }
+                self.state.history_mut(&thread).merge(messages, false);
+            }
+            signal::Event::Message { thread, message } => self.message_received(thread, message),
+            signal::Event::MessageStatus { timestamps, status } => {
+                let aci = self.state.aci;
+                for history in self.state.histories.values_mut() {
+                    history.apply_status(&timestamps, aci, status);
+                }
+            }
+            signal::Event::Error(error) => self.error = Some(error),
+            signal::Event::Ready(_) | signal::Event::LinkUrl(_) | signal::Event::Linked { .. } => {}
         }
-        history.sort_by_key(|message| message.id);
-        if let Some(last) = history.last().cloned() {
-            self.set_preview(&thread, &last);
-        }
+        Vec::new()
     }
 
-    pub fn message_received(&mut self, thread: Thread, message: data::Message) {
-        self.set_preview(&thread, &message);
+    fn message_received(&mut self, thread: Thread, message: data::Message) {
+        self.state.record(&thread, &message);
+
         let visible = self
             .panes
             .iter()
             .any(|(_, pane)| pane.thread() == Some(&thread));
-        if message.sender() != self.aci && !visible {
-            *self.unread.entry(thread.clone()).or_default() += 1;
+        if message.sender() != self.state.aci && !visible {
+            let mentioned = message.mentions(self.state.aci);
+            self.state.index.mark_unread(&thread, mentioned);
         }
-        self.histories.entry(thread).or_default().push(message);
-    }
 
-    pub fn message_status(&mut self, timestamps: &[u64], status: data::Status) {
-        for history in self.histories.values_mut() {
-            for message in history.iter_mut() {
-                if message.sender() == self.aci
-                    && timestamps.contains(&message.timestamp())
-                    && message.status.is_none_or(|current| current < status)
-                {
-                    message.status = Some(status);
-                }
-            }
-        }
-    }
-
-    pub fn show_error(&mut self, error: String) {
-        self.error = Some(error);
+        self.state.history_mut(&thread).insert(message);
     }
 
     pub fn layout(&self) -> config::Layout {
@@ -225,23 +206,18 @@ impl Main {
     pub fn view(&self) -> Element<'_, Message> {
         let grid = PaneGrid::new(&self.panes, |id, pane, _is_maximized| {
             let focused = id == self.focus;
-            let title = pane
-                .thread()
-                .map(|thread| self.thread_title(thread))
-                .unwrap_or_else(|| "Petunia".into());
-
             let heading: Element<'_, Message> = match pane.thread() {
-                Some(thread) => row![
-                    avatar::view(&title, thread_accent(thread), 20.0, self.avatars.get(thread)),
-                    text(title.clone())
-                        .size(13)
-                        .font(theme::FONT_BOLD)
-                        .height(Shrink),
-                ]
-                .spacing(8)
-                .align_y(Center)
-                .into(),
-                None => text(title.clone())
+                Some(thread) => {
+                    let title = self.state.title(thread);
+                    row![
+                        avatar::view(&title, thread_accent(thread), 20.0, self.state.avatar(thread)),
+                        text(title).size(13).font(theme::FONT_BOLD).height(Shrink),
+                    ]
+                    .spacing(8)
+                    .align_y(Center)
+                    .into()
+                }
+                None => text("Petunia")
                     .size(13)
                     .style(theme::text_dim)
                     .height(Shrink)
@@ -256,7 +232,7 @@ impl Main {
             }
 
             pane_grid::Content::new(
-                pane.view(&self.histories, self.aci, &self.contacts, &title)
+                pane.view(&self.state)
                     .map(move |message| Message::Buffer(id, message)),
             )
             .title_bar(title_bar)
@@ -268,35 +244,13 @@ impl Main {
         .spacing(8);
 
         let content = row![
-            sidebar::view(
-                &self.contacts,
-                &self.groups,
-                &self.avatars,
-                &self.previews,
-                &self.unread,
-                self.aci,
-            )
-            .map(Message::OpenThread),
+            sidebar::view(&self.state).map(Message::OpenThread),
             container(grid.width(Fill).height(Fill)).padding(8),
         ];
 
         match &self.error {
             Some(error) => column![error_banner(error), content].into(),
             None => content.into(),
-        }
-    }
-
-    fn thread_title(&self, thread: &Thread) -> String {
-        match thread {
-            Thread::Contact(contact) => contact_name(&self.contacts, contact.uuid())
-                .map(str::to_string)
-                .unwrap_or_else(|| contact.uuid().to_string()[..8].to_string()),
-            Thread::Group(master_key) => self
-                .groups
-                .iter()
-                .find(|group| group.master_key == *master_key)
-                .map(|group| group.title.clone())
-                .unwrap_or_else(|| "Group".into()),
         }
     }
 }

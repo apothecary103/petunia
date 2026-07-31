@@ -19,8 +19,8 @@ pub struct Message {
     pub id: MessageId,
     pub content: Content,
     pub attachments: Vec<Attachment>,
-    pub quote: Option<Quote>,
-    pub preview: Option<LinkPreview>,
+    pub quote: Option<Box<Quote>>,
+    pub preview: Option<Box<LinkPreview>>,
     pub reactions: Vec<Reaction>,
     pub status: Option<Status>,
     pub edited: Option<u64>,
@@ -31,7 +31,7 @@ pub struct Message {
 #[derive(Debug, Clone)]
 pub enum Content {
     Text { body: String, ranges: Vec<Range> },
-    Sticker(Sticker),
+    Sticker(Box<Sticker>),
     Deleted,
     Update(Update),
 }
@@ -107,6 +107,12 @@ impl Message {
         }
     }
 
+    pub fn mentions(&self, uuid: Uuid) -> bool {
+        self.ranges()
+            .iter()
+            .any(|range| range.style == range::Style::Mention(uuid))
+    }
+
     /// One-line rendering for the sidebar and notifications.
     pub fn summary(&self) -> String {
         match &self.content {
@@ -169,3 +175,4 @@ impl Message {
         }
     }
 }
+

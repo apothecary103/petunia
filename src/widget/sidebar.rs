@@ -1,53 +1,15 @@
-use std::collections::HashMap;
-
-use iced::widget::{button, column, container, image, row, scrollable, text};
+use iced::widget::{button, column, container, row, scrollable, text};
 use iced::{Center, Color, Fill, Shrink};
-use uuid::Uuid;
 
 use super::{Element, avatar};
-use crate::data::{self, Contact, ContactId, Group, Thread, contact_name};
+use crate::data::index::Entry;
+use crate::data::{State, Thread};
 use crate::theme;
 
-pub fn view<'a>(
-    contacts: &'a [Contact],
-    groups: &'a [Group],
-    avatars: &'a HashMap<Thread, image::Handle>,
-    previews: &'a HashMap<Thread, data::Message>,
-    unread: &'a HashMap<Thread, u32>,
-    aci: Uuid,
-) -> Element<'a, Thread> {
+pub fn view(state: &State) -> Element<'_, Thread> {
     let mut items = column![].spacing(2).padding([8, 8]);
 
-    for contact in contacts {
-        let label = if contact.name.is_empty() {
-            short_uuid(contact)
-        } else {
-            contact.name.clone()
-        };
-        let thread = Thread::Contact(ContactId::Aci(contact.uuid));
-        items = items.push(entry(
-            label,
-            theme::accent(contact.uuid.as_bytes()),
-            avatars.get(&thread),
-            preview_text(previews.get(&thread), &thread, aci, contacts),
-            unread.get(&thread).copied().unwrap_or(0),
-            thread,
-        ));
-    }
-
-    for group in groups {
-        let thread = Thread::Group(group.master_key);
-        items = items.push(entry(
-            group.title.clone(),
-            theme::accent(&group.master_key),
-            avatars.get(&thread),
-            preview_text(previews.get(&thread), &thread, aci, contacts),
-            unread.get(&thread).copied().unwrap_or(0),
-            thread,
-        ));
-    }
-
-    if contacts.is_empty() && groups.is_empty() {
+    if state.index.is_empty() {
         items = items.push(
             text("Waiting for contacts to sync…")
                 .size(12)
@@ -55,24 +17,26 @@ pub fn view<'a>(
         );
     }
 
+    for entry in state.index.entries() {
+        items = items.push(thread_entry(entry, state));
+    }
+
     container(scrollable(items.width(Fill)).height(Fill))
         .width(260)
         .into()
 }
 
-fn entry<'a>(
-    label: String,
-    accent: Color,
-    picture: Option<&image::Handle>,
-    preview: String,
-    unread: u32,
-    thread: Thread,
-) -> Element<'a, Thread> {
+fn thread_entry<'a>(entry: &'a Entry, state: &'a State) -> Element<'a, Thread> {
     let mut item = row![
-        avatar::view(&label, accent, 26.0, picture),
+        avatar::view(
+            &entry.name,
+            accent(&entry.thread),
+            26.0,
+            state.avatar(&entry.thread),
+        ),
         column![
-            text(truncate(&label, 22)).size(13).height(Shrink),
-            text(truncate(&preview, 26))
+            text(truncate(&entry.name, 22)).size(13).height(Shrink),
+            text(truncate(&preview(entry, state), 26))
                 .size(11)
                 .style(theme::text_dim)
                 .height(Shrink),
@@ -83,16 +47,16 @@ fn entry<'a>(
     .spacing(8)
     .align_y(Center);
 
-    if unread > 0 {
+    if entry.unread > 0 {
         item = item.push(
-            container(text(unread.to_string()).size(10).font(theme::FONT_BOLD))
+            container(text(entry.unread.to_string()).size(10).font(theme::FONT_BOLD))
                 .padding([2, 5])
                 .style(theme::unread_badge),
         );
     }
 
     button(item)
-        .on_press(thread)
+        .on_press(entry.thread.clone())
         .width(Fill)
         .height(44)
         .padding([4, 6])
@@ -100,23 +64,24 @@ fn entry<'a>(
         .into()
 }
 
-fn preview_text(
-    message: Option<&data::Message>,
-    thread: &Thread,
-    aci: Uuid,
-    contacts: &[Contact],
-) -> String {
-    let Some(message) = message else {
+fn preview(entry: &Entry, state: &State) -> String {
+    let Some(message) = &entry.preview else {
         return String::new();
     };
     let body = message.summary();
-    if message.sender() == aci {
+    if message.sender() == state.aci {
         format!("You: {body}")
-    } else if let Thread::Group(_) = thread {
-        let name = contact_name(contacts, message.sender()).unwrap_or("?");
-        format!("{name}: {body}")
+    } else if let Thread::Group(_) = entry.thread {
+        format!("{}: {body}", state.sender_name(message.sender()))
     } else {
         body
+    }
+}
+
+fn accent(thread: &Thread) -> Color {
+    match thread {
+        Thread::Contact(contact) => theme::accent(contact.uuid().as_bytes()),
+        Thread::Group(master_key) => theme::accent(master_key),
     }
 }
 
@@ -127,8 +92,4 @@ fn truncate(value: &str, max: usize) -> String {
         let cut: String = value.chars().take(max - 1).collect();
         format!("{cut}…")
     }
-}
-
-fn short_uuid(contact: &Contact) -> String {
-    contact.uuid.to_string()[..8].to_string()
 }

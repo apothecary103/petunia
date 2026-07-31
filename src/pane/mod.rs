@@ -1,26 +1,33 @@
 pub mod chat;
 
-use std::collections::HashMap;
-
 use iced::Fill;
 use iced::widget::{column, container, rule, text};
-use uuid::Uuid;
 
 pub use chat::Chat;
 
-use crate::data::{Contact, Message, Thread};
+use crate::data::{State, Thread};
+use crate::signal;
 use crate::theme;
 use crate::widget::Element;
 
-#[derive(Debug, Clone)]
+/// Not `Clone`: `text_editor::Content` is not, and the composer will hold one.
 pub struct Pane {
     pub buffer: Buffer,
 }
 
-#[derive(Debug, Clone)]
 pub enum Buffer {
     Empty,
     Chat(Chat),
+}
+
+#[derive(Debug, Clone)]
+pub enum Message {
+    Chat(chat::Message),
+}
+
+pub enum Action {
+    None,
+    Command(signal::Command),
 }
 
 impl Pane {
@@ -43,21 +50,15 @@ impl Pane {
         }
     }
 
-    pub fn update(&mut self, message: chat::Message) -> chat::Action {
-        match &mut self.buffer {
-            Buffer::Chat(chat) => chat.update(message),
-            Buffer::Empty => chat::Action::None,
+    pub fn update(&mut self, message: Message, state: &State) -> Action {
+        match (&mut self.buffer, message) {
+            (Buffer::Chat(chat), Message::Chat(message)) => chat.update(message, state),
+            (Buffer::Empty, _) => Action::None,
         }
     }
 
-    pub fn view<'a>(
-        &'a self,
-        histories: &'a HashMap<Thread, Vec<Message>>,
-        aci: Uuid,
-        contacts: &'a [Contact],
-        title: &str,
-    ) -> Element<'a, chat::Message> {
-        let body: Element<'a, chat::Message> = match &self.buffer {
+    pub fn view<'a>(&'a self, state: &'a State) -> Element<'a, Message> {
+        let body: Element<'a, Message> = match &self.buffer {
             Buffer::Empty => container(
                 text("Select a chat from the sidebar")
                     .size(13)
@@ -65,13 +66,7 @@ impl Pane {
             )
             .center(Fill)
             .into(),
-            Buffer::Chat(chat) => {
-                let history = histories
-                    .get(&chat.thread)
-                    .map(Vec::as_slice)
-                    .unwrap_or_default();
-                chat.view(history, aci, contacts, title)
-            }
+            Buffer::Chat(chat) => chat.view(state).map(Message::Chat),
         };
         column![rule::horizontal(1).style(theme::separator), body].into()
     }

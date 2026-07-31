@@ -1,0 +1,575 @@
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use super::{Contact, ContactId, Group, Message, Thread};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Sort {
+    #[default]
+    Recent,
+    Name,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Section {
+    Pinned,
+    Requests,
+    Chats,
+    Archived,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Flags {
+    pub pinned: bool,
+    pub archived: bool,
+    pub blocked: bool,
+    pub request: bool,
+    pub muted_until: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Entry {
+    pub thread: Thread,
+    pub name: String,
+    pub preview: Option<Message>,
+    pub unread: u32,
+    pub mentions: u32,
+    pub last_activity: u64,
+    pub flags: Flags,
+    pub note_to_self: bool,
+}
+
+#[derive(Debug, Default)]
+pub struct Index {
+    entries: Vec<Entry>,
+    sort: Sort,
+}
+
+impl Entry {
+    pub fn section(&self) -> Section {
+        if self.flags.archived {
+            Section::Archived
+        } else if self.flags.pinned {
+            Section::Pinned
+        } else if self.flags.request {
+            Section::Requests
+        } else {
+            Section::Chats
+        }
+    }
+
+    pub fn muted(&self, now: u64) -> bool {
+        self.flags.muted_until.is_some_and(|until| until > now)
+    }
+}
+
+impl Index {
+    pub fn entries(&self) -> &[Entry] {
+        &self.entries
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn get(&self, thread: &Thread) -> Option<&Entry> {
+        self.entries.iter().find(|entry| entry.thread == *thread)
+    }
+
+    pub fn name(&self, thread: &Thread) -> Option<&str> {
+        self.get(thread).map(|entry| entry.name.as_str())
+    }
+
+    pub fn section(&self, section: Section) -> impl Iterator<Item = &Entry> {
+        self.entries
+            .iter()
+            .filter(move |entry| entry.section() == section)
+    }
+
+    pub fn filtered<'a>(&'a self, query: &'a str) -> impl Iterator<Item = &'a Entry> + 'a {
+        let needle = query.trim().to_lowercase();
+        self.entries.iter().filter(move |entry| {
+            needle.is_empty()
+                || entry.name.to_lowercase().contains(&needle)
+                || entry
+                    .preview
+                    .as_ref()
+                    .is_some_and(|message| message.summary().to_lowercase().contains(&needle))
+        })
+    }
+
+    pub fn total_unread(&self) -> u32 {
+        self.entries
+            .iter()
+            .filter(|entry| !entry.flags.archived && entry.flags.muted_until.is_none())
+            .map(|entry| entry.unread)
+            .sum()
+    }
+
+    pub fn nth(&self, index: usize) -> Option<&Thread> {
+        self.selectable().nth(index).map(|entry| &entry.thread)
+    }
+
+    /// Walks the sidebar order, wrapping at both ends. Archived threads are
+    /// skipped so cycling never lands somewhere the sidebar is not showing.
+    pub fn cycle(&self, from: Option<&Thread>, forward: bool) -> Option<&Thread> {
+        let threads: Vec<&Thread> = self.selectable().map(|entry| &entry.thread).collect();
+        if threads.is_empty() {
+            return None;
+        }
+
+        let current = from.and_then(|thread| threads.iter().position(|other| *other == thread));
+        let next = match (current, forward) {
+            (Some(index), true) => (index + 1) % threads.len(),
+            (Some(index), false) => (index + threads.len() - 1) % threads.len(),
+            (None, true) => 0,
+            (None, false) => threads.len() - 1,
+        };
+        Some(threads[next])
+    }
+
+    pub fn next_unread(&self, from: Option<&Thread>) -> Option<&Thread> {
+        let mut candidates = self.selectable().filter(|entry| entry.unread > 0);
+        match from {
+            None => candidates.next().map(|entry| &entry.thread),
+            Some(thread) => {
+                let ordered: Vec<&Entry> = candidates.collect();
+                let start = ordered
+                    .iter()
+                    .position(|entry| entry.thread == *thread)
+                    .map(|index| index + 1)
+                    .unwrap_or_default();
+                ordered
+                    .get(start)
+                    .or_else(|| ordered.first())
+                    .map(|entry| &entry.thread)
+            }
+        }
+    }
+
+    pub fn set_sort(&mut self, sort: Sort) {
+        self.sort = sort;
+        self.reorder();
+    }
+
+    /// Rebuilds entries from a contact sync, preserving previews, unread counts
+    /// and flags already learned for threads that survive.
+    pub fn rebuild(&mut self, contacts: &[Contact], groups: &[Group], aci: Uuid) {
+        let mut entries = Vec::with_capacity(contacts.len() + groups.len() + 1);
+
+        let own = Thread::Contact(ContactId::Aci(aci));
+        entries.push(self.carry(own, "Note to Self".into(), true));
+
+        for contact in contacts {
+            if contact.uuid == aci {
+                continue;
+            }
+            let name = if contact.name.is_empty() {
+                short(contact.uuid)
+            } else {
+                contact.name.clone()
+            };
+            entries.push(self.carry(Thread::Contact(ContactId::Aci(contact.uuid)), name, false));
+        }
+
+        for group in groups {
+            let name = if group.title.is_empty() {
+                "Group".into()
+            } else {
+                group.title.clone()
+            };
+            entries.push(self.carry(Thread::Group(group.master_key), name, false));
+        }
+
+        self.entries = entries;
+        self.reorder();
+    }
+
+    /// Records activity for a thread the contact sync has not produced yet, so
+    /// a message from an unknown sender still appears in the sidebar.
+    pub fn touch(&mut self, thread: &Thread, message: &Message, name: impl FnOnce() -> String) {
+        let newer = self
+            .get(thread)
+            .and_then(|entry| entry.preview.as_ref())
+            .is_none_or(|current| current.timestamp() <= message.timestamp());
+
+        match self.entries.iter_mut().find(|e| e.thread == *thread) {
+            Some(entry) => {
+                if newer {
+                    entry.last_activity = message.timestamp();
+                    entry.preview = Some(message.clone());
+                }
+            }
+            None => {
+                self.entries.push(Entry {
+                    thread: thread.clone(),
+                    name: name(),
+                    last_activity: message.timestamp(),
+                    preview: Some(message.clone()),
+                    unread: 0,
+                    mentions: 0,
+                    flags: Flags::default(),
+                    note_to_self: false,
+                });
+            }
+        }
+        self.reorder();
+    }
+
+    pub fn mark_unread(&mut self, thread: &Thread, mentioned: bool) {
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.thread == *thread) {
+            entry.unread += 1;
+            if mentioned {
+                entry.mentions += 1;
+            }
+        }
+    }
+
+    pub fn clear_unread(&mut self, thread: &Thread) {
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.thread == *thread) {
+            entry.unread = 0;
+            entry.mentions = 0;
+        }
+    }
+
+    pub fn set_unread(&mut self, thread: &Thread, unread: u32) {
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.thread == *thread) {
+            entry.unread = unread;
+        }
+    }
+
+    pub fn set_flags(&mut self, thread: &Thread, flags: Flags) {
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.thread == *thread) {
+            entry.flags = flags;
+        }
+        self.reorder();
+    }
+
+    fn selectable(&self) -> impl Iterator<Item = &Entry> {
+        self.entries.iter().filter(|entry| !entry.flags.archived)
+    }
+
+    fn carry(&self, thread: Thread, name: String, note_to_self: bool) -> Entry {
+        match self.get(&thread) {
+            Some(existing) => Entry {
+                name,
+                note_to_self,
+                ..existing.clone()
+            },
+            None => Entry {
+                thread,
+                name,
+                preview: None,
+                unread: 0,
+                mentions: 0,
+                last_activity: 0,
+                flags: Flags::default(),
+                note_to_self,
+            },
+        }
+    }
+
+    fn reorder(&mut self) {
+        match self.sort {
+            Sort::Recent => self.entries.sort_by(|a, b| {
+                b.last_activity
+                    .cmp(&a.last_activity)
+                    .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            }),
+            Sort::Name => self
+                .entries
+                .sort_by_key(|entry| entry.name.to_lowercase()),
+        }
+    }
+}
+
+fn short(uuid: Uuid) -> String {
+    uuid.to_string()[..8].to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::MessageId;
+
+    fn contact(name: &str) -> Contact {
+        Contact {
+            uuid: Uuid::new_v4(),
+            name: name.into(),
+        }
+    }
+
+    fn group(title: &str) -> Group {
+        Group {
+            master_key: [u8::try_from(title.len()).unwrap_or_default(); 32],
+            title: title.into(),
+        }
+    }
+
+    fn message(timestamp: u64, sender: Uuid, body: &str) -> Message {
+        Message::plain(MessageId { timestamp, sender }, body.into())
+    }
+
+    fn index(contacts: &[Contact], groups: &[Group]) -> (Index, Uuid) {
+        let aci = Uuid::new_v4();
+        let mut index = Index::default();
+        index.rebuild(contacts, groups, aci);
+        (index, aci)
+    }
+
+    fn names(index: &Index) -> Vec<&str> {
+        index.entries().iter().map(|e| e.name.as_str()).collect()
+    }
+
+    fn unknown() -> String {
+        "Unknown".into()
+    }
+
+    #[test]
+    fn always_includes_note_to_self() {
+        let (index, aci) = index(&[], &[]);
+        let own = Thread::Contact(ContactId::Aci(aci));
+
+        assert!(index.get(&own).unwrap().note_to_self);
+        assert_eq!(names(&index), ["Note to Self"]);
+    }
+
+    #[test]
+    fn does_not_duplicate_self_from_the_contact_list() {
+        let aci = Uuid::new_v4();
+        let mut index = Index::default();
+        let own = Contact {
+            uuid: aci,
+            name: "Me".into(),
+        };
+
+        index.rebuild(&[own, contact("Alice")], &[], aci);
+
+        assert_eq!(index.entries().len(), 2);
+        assert_eq!(index.get(&Thread::Contact(ContactId::Aci(aci))).unwrap().name, "Note to Self");
+    }
+
+    #[test]
+    fn includes_contacts_and_groups() {
+        let (index, _) = index(&[contact("Alice")], &[group("Devs")]);
+
+        assert_eq!(index.entries().len(), 3);
+        assert!(names(&index).contains(&"Alice"));
+        assert!(names(&index).contains(&"Devs"));
+    }
+
+    #[test]
+    fn falls_back_to_a_short_uuid_for_a_nameless_contact() {
+        let nameless = contact("");
+        let (index, _) = index(std::slice::from_ref(&nameless), &[]);
+
+        assert!(names(&index).contains(&&nameless.uuid.to_string()[..8]));
+    }
+
+    #[test]
+    fn sorts_by_recency_then_name() {
+        let alice = contact("Alice");
+        let bob = contact("Bob");
+        let (mut index, _) = index(&[alice.clone(), bob.clone()], &[]);
+
+        index.touch(
+            &Thread::Contact(ContactId::Aci(bob.uuid)),
+            &message(500, bob.uuid, "later"),
+            unknown,
+        );
+
+        assert_eq!(names(&index)[0], "Bob");
+    }
+
+    #[test]
+    fn sorts_by_name_when_asked() {
+        let (mut index, _) = index(&[contact("Zoe"), contact("Alice")], &[]);
+        index.set_sort(Sort::Name);
+
+        assert_eq!(names(&index), ["Alice", "Note to Self", "Zoe"]);
+    }
+
+    #[test]
+    fn touch_keeps_only_the_newest_preview() {
+        let alice = contact("Alice");
+        let thread = Thread::Contact(ContactId::Aci(alice.uuid));
+        let (mut index, _) = index(std::slice::from_ref(&alice), &[]);
+
+        index.touch(&thread, &message(200, alice.uuid, "newer"), unknown);
+        index.touch(&thread, &message(100, alice.uuid, "older"), unknown);
+
+        let entry = index.get(&thread).unwrap();
+        assert_eq!(entry.preview.as_ref().unwrap().text(), Some("newer"));
+        assert_eq!(entry.last_activity, 200);
+    }
+
+    #[test]
+    fn touch_adds_an_unknown_thread() {
+        let (mut index, _) = index(&[], &[]);
+        let stranger = Uuid::new_v4();
+        let thread = Thread::Contact(ContactId::Aci(stranger));
+
+        index.touch(&thread, &message(100, stranger, "hello"), unknown);
+
+        assert_eq!(index.get(&thread).unwrap().name, "Unknown");
+    }
+
+    #[test]
+    fn rebuild_preserves_unread_and_previews() {
+        let alice = contact("Alice");
+        let thread = Thread::Contact(ContactId::Aci(alice.uuid));
+        let (mut index, aci) = index(std::slice::from_ref(&alice), &[]);
+
+        index.touch(&thread, &message(100, alice.uuid, "hi"), unknown);
+        index.mark_unread(&thread, false);
+        index.rebuild(std::slice::from_ref(&alice), &[], aci);
+
+        let entry = index.get(&thread).unwrap();
+        assert_eq!(entry.unread, 1);
+        assert_eq!(entry.preview.as_ref().unwrap().text(), Some("hi"));
+    }
+
+    #[test]
+    fn assigns_sections_from_flags() {
+        let alice = contact("Alice");
+        let thread = Thread::Contact(ContactId::Aci(alice.uuid));
+        let (mut index, _) = index(&[alice], &[]);
+
+        assert_eq!(index.get(&thread).unwrap().section(), Section::Chats);
+
+        index.set_flags(
+            &thread,
+            Flags {
+                pinned: true,
+                ..Flags::default()
+            },
+        );
+        assert_eq!(index.get(&thread).unwrap().section(), Section::Pinned);
+
+        index.set_flags(
+            &thread,
+            Flags {
+                pinned: true,
+                archived: true,
+                ..Flags::default()
+            },
+        );
+        assert_eq!(index.get(&thread).unwrap().section(), Section::Archived);
+    }
+
+    #[test]
+    fn total_unread_skips_archived_and_muted() {
+        let loud = contact("Loud");
+        let muted = contact("Muted");
+        let archived = contact("Archived");
+        let (mut index, _) = index(&[loud.clone(), muted.clone(), archived.clone()], &[]);
+
+        for who in [&loud, &muted, &archived] {
+            index.mark_unread(&Thread::Contact(ContactId::Aci(who.uuid)), false);
+        }
+        index.set_flags(
+            &Thread::Contact(ContactId::Aci(muted.uuid)),
+            Flags {
+                muted_until: Some(u64::MAX),
+                ..Flags::default()
+            },
+        );
+        index.set_flags(
+            &Thread::Contact(ContactId::Aci(archived.uuid)),
+            Flags {
+                archived: true,
+                ..Flags::default()
+            },
+        );
+
+        assert_eq!(index.total_unread(), 1);
+    }
+
+    #[test]
+    fn cycles_forward_and_backward_with_wrapping() {
+        let (mut index, _) = index(&[contact("Alice"), contact("Bob")], &[]);
+        index.set_sort(Sort::Name);
+
+        let first = index.nth(0).unwrap().clone();
+        let last = index.nth(2).unwrap().clone();
+
+        assert_eq!(index.cycle(Some(&first), true), index.nth(1));
+        assert_eq!(index.cycle(Some(&last), true), Some(&first));
+        assert_eq!(index.cycle(Some(&first), false), Some(&last));
+    }
+
+    #[test]
+    fn cycling_an_empty_index_yields_nothing() {
+        let index = Index::default();
+        assert_eq!(index.cycle(None, true), None);
+    }
+
+    #[test]
+    fn cycling_skips_archived_threads() {
+        let alice = contact("Alice");
+        let (mut index, _) = index(std::slice::from_ref(&alice), &[]);
+        index.set_sort(Sort::Name);
+        index.set_flags(
+            &Thread::Contact(ContactId::Aci(alice.uuid)),
+            Flags {
+                archived: true,
+                ..Flags::default()
+            },
+        );
+
+        let threads: Vec<_> = (0..).map_while(|n| index.nth(n)).collect();
+        assert_eq!(threads.len(), 1);
+        assert!(!index.get(threads[0]).unwrap().flags.archived);
+    }
+
+    #[test]
+    fn filters_by_name_and_preview() {
+        let alice = contact("Alice");
+        let (mut index, _) = index(&[alice.clone(), contact("Bob")], &[]);
+        index.touch(
+            &Thread::Contact(ContactId::Aci(alice.uuid)),
+            &message(100, alice.uuid, "deploy the thing"),
+            unknown,
+        );
+
+        let by_name: Vec<_> = index.filtered("bob").map(|e| e.name.as_str()).collect();
+        let by_preview: Vec<_> = index.filtered("deploy").map(|e| e.name.as_str()).collect();
+
+        assert_eq!(by_name, ["Bob"]);
+        assert_eq!(by_preview, ["Alice"]);
+        assert_eq!(index.filtered("").count(), 3);
+    }
+
+    #[test]
+    fn finds_the_next_unread_thread() {
+        let alice = contact("Alice");
+        let bob = contact("Bob");
+        let (mut index, _) = index(&[alice.clone(), bob.clone()], &[]);
+        index.set_sort(Sort::Name);
+
+        let alice_thread = Thread::Contact(ContactId::Aci(alice.uuid));
+        let bob_thread = Thread::Contact(ContactId::Aci(bob.uuid));
+        index.mark_unread(&alice_thread, false);
+        index.mark_unread(&bob_thread, false);
+
+        assert_eq!(index.next_unread(None), Some(&alice_thread));
+        assert_eq!(index.next_unread(Some(&alice_thread)), Some(&bob_thread));
+        assert_eq!(index.next_unread(Some(&bob_thread)), Some(&alice_thread));
+    }
+
+    #[test]
+    fn clear_unread_resets_mentions_too() {
+        let alice = contact("Alice");
+        let thread = Thread::Contact(ContactId::Aci(alice.uuid));
+        let (mut index, _) = index(&[alice], &[]);
+
+        index.mark_unread(&thread, true);
+        assert_eq!(index.get(&thread).unwrap().mentions, 1);
+
+        index.clear_unread(&thread);
+        assert_eq!(index.get(&thread).unwrap().unread, 0);
+        assert_eq!(index.get(&thread).unwrap().mentions, 0);
+    }
+}

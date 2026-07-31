@@ -72,12 +72,12 @@ impl Petunia {
                 Task::none()
             }
             Message::Main(message) => {
-                if let Screen::Main(main) = &mut self.screen
-                    && let Some(command) = main.update(message)
-                {
-                    self.send(command);
-                }
-                Task::none()
+                let Screen::Main(main) = &mut self.screen else {
+                    return Task::none();
+                };
+                let (task, commands) = main.update(message);
+                self.dispatch(commands);
+                task.map(Message::Main)
             }
         }
     }
@@ -93,47 +93,29 @@ impl Petunia {
             signal::Event::Linked { aci } => {
                 let (main, commands) = screen::Main::new(aci, self.session.layout.as_ref());
                 self.screen = Screen::Main(Box::new(main));
-                for command in commands {
-                    self.send(command);
+                self.dispatch(commands);
+            }
+            signal::Event::Error(error) if matches!(self.screen, Screen::Linking(_)) => {
+                error!(%error, "signal error while linking");
+                if let Screen::Linking(linking) = &mut self.screen {
+                    linking.fail(error);
                 }
             }
-            signal::Event::Contacts { contacts, groups } => {
+            event => {
+                if let signal::Event::Error(error) = &event {
+                    error!(%error, "signal error");
+                }
                 if let Screen::Main(main) = &mut self.screen {
-                    main.contacts_updated(contacts, groups);
+                    let commands = main.on_signal(event);
+                    self.dispatch(commands);
                 }
             }
-            signal::Event::Avatar { thread, bytes } => {
-                if let Screen::Main(main) = &mut self.screen {
-                    main.avatar_loaded(thread, bytes);
-                }
-            }
-            signal::Event::Preview { thread, message } => {
-                if let Screen::Main(main) = &mut self.screen {
-                    main.preview_loaded(thread, message);
-                }
-            }
-            signal::Event::History { thread, messages } => {
-                if let Screen::Main(main) = &mut self.screen {
-                    main.history_loaded(thread, messages);
-                }
-            }
-            signal::Event::Message { thread, message } => {
-                if let Screen::Main(main) = &mut self.screen {
-                    main.message_received(thread, message);
-                }
-            }
-            signal::Event::MessageStatus { timestamps, status } => {
-                if let Screen::Main(main) = &mut self.screen {
-                    main.message_status(&timestamps, status);
-                }
-            }
-            signal::Event::Error(error) => {
-                error!(%error, "signal error");
-                match &mut self.screen {
-                    Screen::Linking(linking) => linking.fail(error),
-                    Screen::Main(main) => main.show_error(error),
-                }
-            }
+        }
+    }
+
+    fn dispatch(&self, commands: Vec<signal::Command>) {
+        for command in commands {
+            self.send(command);
         }
     }
 

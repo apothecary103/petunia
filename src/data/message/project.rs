@@ -216,8 +216,8 @@ fn message(data: &DataMessage, id: MessageId) -> Message {
         .iter()
         .filter_map(attachment::from_pointer)
         .collect();
-    message.quote = data.quote.as_ref().and_then(quote);
-    message.preview = data.preview.first().and_then(preview);
+    message.quote = data.quote.as_ref().and_then(quote).map(Box::new);
+    message.preview = data.preview.first().and_then(preview).map(Box::new);
     message.expires_in = data.expire_timer;
     message.view_once = data.is_view_once();
 
@@ -232,12 +232,12 @@ fn content(data: &DataMessage) -> Content {
     }
 
     if let Some(sticker) = &data.sticker {
-        return Content::Sticker(Sticker {
+        return Content::Sticker(Box::new(Sticker {
             pack_id: sticker.pack_id().to_vec(),
             sticker_id: sticker.sticker_id(),
             emoji: sticker.emoji.clone(),
             image: sticker.data.as_ref().and_then(attachment::from_pointer),
-        });
+        }));
     }
 
     let body = data.body().to_string();
