@@ -62,6 +62,22 @@ impl Cache {
         found(&self.stickers(pack_id), &sticker_id.to_string()).await
     }
 
+    fn posters(&self) -> PathBuf {
+        self.root.join("posters")
+    }
+
+    /// A still from a video, generated here rather than sent: Signal carries no
+    /// thumbnail for video, so without one a clip is a grey rectangle.
+    pub async fn put_poster(&self, id: &Id, bytes: &[u8]) -> Result<PathBuf, Error> {
+        let path = self.posters().join(file(id.as_str(), sniff(bytes)));
+        write(&path, bytes).await?;
+        Ok(path)
+    }
+
+    pub async fn poster(&self, id: &Id) -> Option<PathBuf> {
+        found(&self.posters(), id.as_str()).await
+    }
+
     /// The path bytes land on, named for what they actually are rather than for
     /// what the sender claimed they were.
     fn attachment_path(&self, id: &Id, name: Option<&str>) -> PathBuf {

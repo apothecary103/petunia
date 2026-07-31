@@ -94,7 +94,7 @@ async fn serve(mut commands: UnboundedReceiver<Command>, mut events: Events) -> 
     }
     tokio::task::spawn_local(fetch_avatars(manager.clone(), cache.clone(), events.clone()));
     tokio::task::spawn_local(fetch_profiles(manager.clone(), events.clone()));
-    tokio::task::spawn_local(fetch_previews(db.clone(), events.clone()));
+    tokio::task::spawn_local(fetch_previews(db.clone(), aci, events.clone()));
     send_sticker_packs(&manager, &cache, &mut events).await;
     if freshly_linked
         && let Err(error) = manager.request_contacts().await
@@ -208,7 +208,7 @@ async fn serve(mut commands: UnboundedReceiver<Command>, mut events: Events) -> 
                     }
                 }
                 Some(Command::MarkRead { thread, messages }) => {
-                    mark_read(&mut manager, &mut events, &thread, &messages).await;
+                    mark_read(&mut manager, &db, &mut events, &thread, &messages).await;
                 }
                 Some(Command::Typing { thread, started }) => {
                     let timestamp = now();
@@ -356,7 +356,8 @@ async fn receive_once(
                 }
                 tokio::task::spawn_local(fetch_avatars(manager.clone(), cache.clone(), events.clone()));
                 tokio::task::spawn_local(fetch_profiles(manager.clone(), events.clone()));
-                tokio::task::spawn_local(fetch_previews(db.clone(), events.clone()));
+                let aci = manager.registration_data().service_ids.aci;
+                tokio::task::spawn_local(fetch_previews(db.clone(), aci, events.clone()));
             }
             Received::Content(content) => {
                 debug!(timestamp = content.timestamp(), "received content");
@@ -367,6 +368,30 @@ async fn receive_once(
                     let sender = content.metadata.sender.raw_uuid();
                     let sent_at = content.metadata.timestamp.timestamp_millis() as u64;
                     send_delivery(manager, sender, sent_at).await;
+                }
+
+                // What we read on another device. presage stores the sync and
+                // ignores it, so without this reading on the phone never clears
+                // anything here.
+                if let ContentBody::SynchronizeMessage(sync) = &content.body
+                    && !sync.read.is_empty()
+                {
+                    for read in &sync.read {
+                        let Some(sender) = read
+                            .sender_aci
+                            .as_ref()
+                            .and_then(|aci| aci.parse::<Uuid>().ok())
+                        else {
+                            continue;
+                        };
+                        let thread = Thread::Contact(ContactId::Aci(sender));
+                        let upto = read.timestamp();
+                        if let Err(error) = db.mark_read(&thread, upto).await {
+                            warn!(%error, "failed to record a synced read mark");
+                        }
+                        emit(events, Event::Read { thread, upto }).await;
+                    }
+                    continue;
                 }
 
                 if let ContentBody::TypingMessage(typing) = &content.body {
@@ -542,6 +567,9 @@ async fn hydrate(cache: &Cache, messages: &mut [data::Message]) {
                 if measure && let Some(size) = measured(&path).await {
                     message.set_image_size(&id, size);
                 }
+                if let Some(poster) = cache.poster(&id).await {
+                    message.set_poster(&id, poster);
+                }
                 message.set_blob(&id, attachment::Blob::Cached(path));
             }
         }
@@ -552,6 +580,25 @@ async fn hydrate(cache: &Cache, messages: &mut [data::Message]) {
 /// but a wrong aspect ratio is visible in a way a missing one is not.
 fn wants_measuring(attached: &attachment::Attachment) -> bool {
     matches!(attached.kind, attachment::Kind::Image { size: None, .. })
+}
+
+/// Generates and caches the still a video is shown as. Off the command loop, on
+/// a blocking thread: pulling one frame means opening a decoder.
+async fn poster(cache: &Cache, id: &attachment::Id, path: &Path) -> Option<std::path::PathBuf> {
+    if let Some(existing) = cache.poster(id).await {
+        return Some(existing);
+    }
+    let source = path.to_path_buf();
+    let bytes = tokio::task::spawn_blocking(move || crate::video::poster(&source))
+        .await
+        .ok()
+        .flatten()?;
+
+    cache
+        .put_poster(id, &bytes)
+        .await
+        .inspect_err(|error| warn!(%error, "failed to cache a video poster"))
+        .ok()
 }
 
 /// Reads the header rather than decoding the pixels, so this is a few hundred
@@ -903,6 +950,18 @@ async fn download_all(
                         true => measured(&path).await,
                         false => None,
                     };
+                    // A clip with no still is a grey rectangle, and Signal sends
+                    // no thumbnail for video.
+                    if content_type.starts_with("video/")
+                        && let Some(poster) = poster(&cache, &id, &path).await
+                    {
+                        emit(&mut events, Event::Poster {
+                            thread: thread.clone(),
+                            id: id.clone(),
+                            path: poster,
+                        })
+                        .await;
+                    }
                     emit(
                         &mut events,
                         Event::Attachment {
@@ -944,12 +1003,21 @@ async fn fail(events: &mut Events, thread: &Thread, id: attachment::Id, error: S
 /// presage does neither of.
 async fn mark_read(
     manager: &mut RegisteredManager,
+    db: &Db,
     events: &mut Events,
     thread: &Thread,
     messages: &[(Uuid, u64)],
 ) {
     if messages.is_empty() {
         return;
+    }
+
+    // Written before the receipts go out: what has been read is true of this
+    // device whether or not the network agrees, and it has to survive a restart.
+    if let Some(newest) = messages.iter().map(|(_, timestamp)| *timestamp).max()
+        && let Err(error) = db.mark_read(thread, newest).await
+    {
+        warn!(%error, "failed to record the read mark");
     }
 
     // One receipt per sender, carrying every timestamp of theirs at once.
@@ -977,7 +1045,7 @@ async fn mark_read(
     {
         warn!(%error, "failed to sync read state to our other devices");
     }
-    let _ = (events, thread);
+    let _ = events;
 }
 
 /// Acknowledges receipt of a message the server asked us to confirm. presage
@@ -1137,7 +1205,7 @@ async fn fetch_profiles(mut manager: RegisteredManager, mut events: Events) {
     }
 }
 
-async fn fetch_previews(db: Db, mut events: Events) {
+async fn fetch_previews(db: Db, aci: Uuid, mut events: Events) {
     let threads = match db.previews().await {
         Ok(threads) => threads,
         Err(error) => {
@@ -1145,9 +1213,21 @@ async fn fetch_previews(db: Db, mut events: Events) {
             return;
         }
     };
+    let marks = db.read_marks().await.unwrap_or_default();
+
     for (thread, rows) in threads {
         if let Some(message) = data::project(rows).pop() {
-            emit(&mut events, Event::Preview { thread, message }).await;
+            emit(&mut events, Event::Preview { thread: thread.clone(), message }).await;
+        }
+        // A thread nobody has ever read has no mark, and counting all of its
+        // history as unread would put a four-figure badge on every row.
+        let Some(&upto) = marks.get(&super::db::read::key(&thread)) else {
+            continue;
+        };
+        match db.unread(&thread, aci, upto).await {
+            Ok(0) => {}
+            Ok(count) => emit(&mut events, Event::Unread { thread, count }).await,
+            Err(error) => warn!(%error, "failed to count unread messages"),
         }
     }
 }

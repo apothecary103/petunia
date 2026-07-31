@@ -1,5 +1,6 @@
 pub mod blobs;
 pub mod messages;
+pub mod read;
 pub mod receipts;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool};
@@ -19,6 +20,7 @@ pub struct Db {
 const MIGRATIONS: &[&str] = &[
     include_str!("migrations/001_receipts.sql"),
     include_str!("migrations/002_blobs.sql"),
+    include_str!("migrations/003_read.sql"),
 ];
 
 #[cfg(test)]

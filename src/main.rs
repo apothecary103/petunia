@@ -7,6 +7,7 @@ mod signal;
 mod store;
 mod theme;
 mod ui;
+mod video;
 
 use std::sync::Arc;
 

@@ -43,6 +43,10 @@ pub enum Kind {
     Video {
         size: Option<Size>,
         duration: Option<Duration>,
+        /// A still from the video, generated locally once it is downloaded.
+        /// Signal sends no thumbnail for video, so without one a clip is a grey
+        /// rectangle until you play it.
+        poster: Option<PathBuf>,
     },
     Audio {
         duration: Option<Duration>,
@@ -155,6 +159,7 @@ fn classify(content_type: &str, size: Option<Size>, blurhash: Option<String>) ->
         "video" => Kind::Video {
             size,
             duration: None,
+            poster: None,
         },
         "audio" => Kind::Audio {
             duration: None,

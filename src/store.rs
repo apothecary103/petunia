@@ -394,6 +394,16 @@ impl Store {
         match event {
             Event::Contacts { contacts, groups } => state.contacts_updated(contacts, groups),
             Event::StickerPacks(packs) => state.sticker_packs = packs,
+            Event::Poster { thread, id, path } => {
+                state.history_mut(&thread).set_poster(&id, path);
+            }
+            // Reading elsewhere is still reading, so the badge here goes.
+            Event::Read { thread, upto } => {
+                state.index.clear_unread(&thread);
+                state.history_mut(&thread).mark_unread_from(None);
+                let _ = upto;
+            }
+            Event::Unread { thread, count } => state.index.set_unread(&thread, count),
             Event::Profile { uuid, name } => state.set_profile(uuid, name),
             Event::Avatar { thread, path } => {
                 state.avatars.insert(thread, path);

@@ -135,6 +135,12 @@ impl History {
         }
     }
 
+    pub fn set_poster(&mut self, id: &attachment::Id, path: std::path::PathBuf) {
+        for message in &mut self.messages {
+            message.set_poster(id, path.clone());
+        }
+    }
+
     pub fn apply_delete(&mut self, target: &MessageId) {
         if let Some(index) = self.index_of(target) {
             project::apply_delete(&mut self.messages[index]);

@@ -31,9 +31,14 @@ impl Frame<'_> {
     pub fn render(&self, attached: &Attachment) -> AnyElement {
         match (&attached.kind, &attached.blob) {
             (Kind::Image { size, .. }, Blob::Cached(path)) => self.picture(attached, *size, path),
-            (Kind::Video { size, duration }, Blob::Cached(path)) => {
-                self.video(*size, *duration, path)
-            }
+            (
+                Kind::Video {
+                    size,
+                    duration,
+                    poster,
+                },
+                Blob::Cached(path),
+            ) => self.video(*size, *duration, poster.as_deref(), path),
             (Kind::Audio { waveform, .. }, Blob::Cached(path)) => {
                 self.audio(attached, waveform.as_deref(), path)
             }
@@ -72,6 +77,7 @@ impl Frame<'_> {
         &self,
         size: Option<Size>,
         duration: Option<std::time::Duration>,
+        poster: Option<&Path>,
         path: &Path,
     ) -> AnyElement {
         let theme = self.theme;
@@ -91,6 +97,9 @@ impl Frame<'_> {
             .bg(theme.sunken)
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 act(Act::View(target.clone()), window, cx)
+            })
+            .when_some(poster, |this, poster| {
+                this.child(image::picture(poster, width, height))
             })
             .child(
                 div()

@@ -9,6 +9,7 @@ use gpui_component::IconName;
 use super::{image, kit};
 use crate::config::Theme;
 use crate::theme::ActivePalette;
+use crate::{audio, video};
 
 /// Raised when the viewer wants to go away, so the workspace can drop it rather
 /// than keep a hidden one around.
@@ -29,6 +30,9 @@ pub struct Viewer {
     /// Where the picture has been dragged to, in logical pixels from centred.
     pan: gpui::Point<f32>,
     dragging: Option<gpui::Point<gpui::Pixels>>,
+    /// Present only while the picture on screen is a video, so nothing decodes
+    /// in the background.
+    playing: Option<video::Player>,
     focus: gpui::FocusHandle,
 }
 
@@ -36,14 +40,26 @@ impl Viewer {
     pub fn new(reel: Vec<PathBuf>, showing: &PathBuf, cx: &mut Context<Self>) -> Self {
         let at = reel.iter().position(|path| path == showing).unwrap_or(0);
 
-        Self {
+        let mut viewer = Self {
             reel,
             at,
             zoom: 1.0,
             pan: gpui::point(0.0, 0.0),
             dragging: None,
+            playing: None,
             focus: cx.focus_handle(),
-        }
+        };
+        viewer.open_video();
+        viewer
+    }
+
+    /// A video gets a player; anything else does not, and the previous one is
+    /// dropped so it stops decoding the moment it leaves the screen.
+    fn open_video(&mut self) {
+        self.playing = self
+            .showing()
+            .filter(|path| video::is_video(path))
+            .and_then(|path| video::Player::open(path));
     }
 
     pub fn showing(&self) -> Option<&PathBuf> {
@@ -64,6 +80,7 @@ impl Viewer {
     fn reset(&mut self, cx: &mut Context<Self>) {
         self.zoom = 1.0;
         self.pan = gpui::point(0.0, 0.0);
+        self.open_video();
         cx.notify();
     }
 
@@ -128,7 +145,7 @@ impl gpui::Focusable for Viewer {
 }
 
 impl Render for Viewer {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = cx.palette().clone();
         let Some(path) = self.showing().cloned() else {
             cx.emit(Dismissed);
@@ -208,9 +225,12 @@ impl Render for Viewer {
                             // The viewer is the one place a picture is meant to
                             // be as large as it can be, so the resample target
                             // is the whole stage rather than a message's box.
-                            .child(image::picture(&path, 1600.0 * zoom, 1200.0 * zoom)),
+                            .child(self.face(&path, zoom, window)),
                     ),
             )
+            .when(self.playing.is_some(), |this| {
+                this.child(self.transport(&palette, cx))
+            })
             .when(self.reel.len() > 1, |this| {
                 this.child(self.rail(&palette, cx))
             })
@@ -219,6 +239,180 @@ impl Render for Viewer {
 }
 
 impl Viewer {
+    /// A video draws its current frame into a platform surface; anything else is
+    /// an ordinary picture. A frame that is not there yet leaves the stage dark
+    /// rather than collapsing it, so nothing jumps when the first one arrives.
+    fn face(&mut self, path: &std::path::Path, zoom: f32, window: &mut Window) -> gpui::AnyElement {
+        #[cfg(target_os = "macos")]
+        if let Some(player) = self.playing.as_mut() {
+            // Decoding runs ahead of drawing, so the next frame only exists if
+            // something asks for it.
+            if player.is_playing() {
+                window.request_animation_frame();
+            }
+            if let Some(frame) = player.frame() {
+                return gpui::surface(frame)
+                    .w(px(900.0 * zoom))
+                    .h(px(600.0 * zoom))
+                    .into_any_element();
+            }
+            return div()
+                .w(px(900.0 * zoom))
+                .h(px(600.0 * zoom))
+                .into_any_element();
+        }
+
+        let _ = window;
+        // A video with no player is one the system has no decoder for. Saying so
+        // beats a blank stage, and the hand-off is the only thing left to offer.
+        if video::is_video(path) {
+            return div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_2()
+                .child("This video cannot be played here.")
+                .child(
+                    div()
+                        .id("hand-off")
+                        .cursor_pointer()
+                        .underline()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            {
+                                let path = path.to_path_buf();
+                                move |_, _, _| {
+                                    if let Err(error) = open::that_detached(&path) {
+                                        tracing::warn!(%error, "could not hand the video over");
+                                    }
+                                }
+                            },
+                        )
+                        .child("Open it with the system player"),
+                )
+                .into_any_element();
+        }
+
+        image::picture(path, 1600.0 * zoom, 1200.0 * zoom).into_any_element()
+    }
+
+    /// Play, a bar that scrubs, and the clock. Only drawn when there is a video
+    /// to drive, so it is never a control that does nothing.
+    fn transport(&self, palette: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(player) = self.playing.as_ref() else {
+            return div();
+        };
+        let playing = player.is_playing();
+        let position = player.position();
+        let duration = player.duration();
+        let fraction = duration
+            .map(|duration| {
+                (position.as_secs_f32() / duration.as_secs_f32().max(0.001)).clamp(0.0, 1.0)
+            })
+            .unwrap_or(0.0);
+
+        let bounds: std::rc::Rc<std::cell::Cell<gpui::Bounds<gpui::Pixels>>> =
+            std::rc::Rc::new(std::cell::Cell::new(gpui::Bounds::default()));
+        let measured = bounds.clone();
+
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap_3()
+            .px_4()
+            .py_2p5()
+            .child(
+                div()
+                    .id("video-play")
+                    .size(px(32.0))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .cursor_pointer()
+                    .bg(palette.accent)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            if let Some(player) = this.playing.as_ref() {
+                                player.toggle();
+                            }
+                            cx.notify();
+                        }),
+                    )
+                    .child(kit::icon(
+                        if playing {
+                            IconName::Pause
+                        } else {
+                            IconName::Play
+                        },
+                        14.0,
+                        palette.on_accent,
+                    )),
+            )
+            .child(
+                div()
+                    .id("video-scrub")
+                    .relative()
+                    .flex_1()
+                    .min_w_0()
+                    .h(px(18.0))
+                    .flex()
+                    .items_center()
+                    .cursor_pointer()
+                    .child(
+                        gpui::canvas(move |at, _, _| measured.set(at), |_, _: (), _, _| {})
+                            .absolute()
+                            .size_full(),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                            let at = bounds.get();
+                            if at.size.width <= px(0.0) {
+                                return;
+                            }
+                            let fraction =
+                                ((event.position.x - at.origin.x) / at.size.width).clamp(0.0, 1.0);
+                            if let Some(player) = this.playing.as_ref() {
+                                player.seek(fraction);
+                            }
+                            cx.notify();
+                        }),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .h(px(4.0))
+                            .rounded_full()
+                            .bg(palette.border_focus)
+                            .child(
+                                div()
+                                    .w(gpui::relative(fraction))
+                                    .h_full()
+                                    .rounded_full()
+                                    .bg(palette.accent),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(palette.typography.ui_size - 2.0))
+                    .text_color(palette.text_muted)
+                    .child(SharedString::from(match duration {
+                        Some(duration) => format!(
+                            "{} / {}",
+                            audio::clock(position),
+                            audio::clock(duration)
+                        ),
+                        None => audio::clock(position),
+                    })),
+            )
+    }
+
     fn chrome(
         &self,
         position: &str,

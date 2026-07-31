@@ -134,6 +134,17 @@ impl Message {
         }
     }
 
+    /// Records the still generated for a video once it is on disk.
+    pub fn set_poster(&mut self, id: &attachment::Id, path: std::path::PathBuf) {
+        for attached in self.attachments_mut() {
+            if attached.id == *id
+                && let attachment::Kind::Video { poster, .. } = &mut attached.kind
+            {
+                *poster = Some(path.clone());
+            }
+        }
+    }
+
     /// Every attachment on the message, including the ones hanging off a quote,
     /// a link preview or a sticker.
     pub fn attachment_refs(&self) -> impl Iterator<Item = &Attachment> {

@@ -39,6 +39,24 @@ pub enum Event {
         /// from the file's header rather than by decoding it.
         measured: Option<attachment::Size>,
     },
+    /// A thread has been read up to this point on another device, so its unread
+    /// count here is stale.
+    Read {
+        thread: Thread,
+        upto: u64,
+    },
+    /// How many messages a thread has that arrived after its read mark. Sent
+    /// once at startup, so unread counts survive a restart.
+    Unread {
+        thread: Thread,
+        count: u32,
+    },
+    /// A still generated for a downloaded video.
+    Poster {
+        thread: Thread,
+        id: attachment::Id,
+        path: PathBuf,
+    },
     /// Every installed sticker pack, with each sticker's bytes already written
     /// into the media cache.
     StickerPacks(Vec<crate::data::stickers::Pack>),
