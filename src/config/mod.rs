@@ -39,6 +39,12 @@ pub struct Sidebar {
     pub width: f32,
     pub sort: Sort,
     pub show_preview: bool,
+    /// Lets the desktop behind the window show through the conversation list,
+    /// blurred, as the system's own sidebars do. macOS only: gpui's blur is a
+    /// vibrancy view behind the *whole* window, so the effect is really "the
+    /// list is translucent and everything else is not", and there is nothing
+    /// behind the window to blur anywhere else.
+    pub translucent: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -126,7 +132,16 @@ impl Default for Sidebar {
             width: 240.0,
             sort: Sort::Recent,
             show_preview: true,
+            translucent: cfg!(target_os = "macos"),
         }
+    }
+}
+
+impl Sidebar {
+    /// Whether to actually draw it translucent. Asking for it where it cannot
+    /// work would leave a window with a see-through hole in it.
+    pub fn blurred(&self) -> bool {
+        self.translucent && cfg!(target_os = "macos")
     }
 }
 
@@ -201,10 +216,30 @@ fn describe(error: &toml::de::Error) -> String {
     }
 }
 
+/// Where `config.toml` and `themes/` live.
+///
+/// On macOS `dirs::config_dir()` is `~/Library/Application Support`, which is
+/// where an application keeps its own state -- not where a person keeps a file
+/// they are expected to edit. Zed, whose themes petunia ships, uses `~/.config`
+/// there; so does everything else with a hand-written config, and so does every
+/// line of documentation here. The old location is still read when that is
+/// where the file already is, so nobody's settings disappear.
 pub fn dir() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("petunia")
+    let native = dirs::config_dir().map(|dir| dir.join("petunia"));
+
+    if cfg!(target_os = "macos")
+        && let Some(preferred) = dirs::home_dir().map(|home| home.join(".config").join("petunia"))
+    {
+        if preferred.join("config.toml").exists() {
+            return preferred;
+        }
+        if let Some(native) = native.filter(|dir| dir.join("config.toml").exists()) {
+            return native;
+        }
+        return preferred;
+    }
+
+    native.unwrap_or_else(|| PathBuf::from("."))
 }
 
 pub fn config_path() -> PathBuf {

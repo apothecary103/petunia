@@ -567,6 +567,7 @@ impl Render for Workspace {
                             .min_w_0()
                             .flex()
                             .flex_col()
+                            .bg(palette.background)
                             .child(self.header(&title, &palette, cx))
                             .child(div().flex_1().min_h_0().child(conversation.clone())),
                     )
@@ -585,10 +586,14 @@ impl Render for Workspace {
             }
         };
 
+        let translucent = self.store.read(cx).config.sidebar.blurred();
+
         div()
             .track_focus(&self.focus)
             .size_full()
-            .bg(palette.background)
+            // Left unpainted when the list is translucent: a background here
+            // would cover the vibrancy layer the whole effect depends on.
+            .when(!translucent, |this| this.bg(palette.background))
             .text_color(palette.text)
             .on_action(cx.listener(|this, _: &actions::ToggleSidebar, _, cx| {
                 this.toggle_sidebar(cx)

@@ -36,8 +36,10 @@ impl Render for Sidebar {
         let store = self.store.read(cx);
         let active = store.active().cloned();
 
+        let translucent = store.config.sidebar.blurred();
+
         let Some(state) = store.state() else {
-            return shell(&palette, div());
+            return shell(&palette, translucent, div());
         };
 
         let show_preview = store.config.sidebar.show_preview;
@@ -137,6 +139,7 @@ impl Render for Sidebar {
 
         shell(
             &palette,
+            translucent,
             div()
                 .flex().flex_col()
                 .size_full()
@@ -197,11 +200,22 @@ fn identity(
         ))
 }
 
-fn shell(palette: &Theme, body: Div) -> Div {
+fn shell(palette: &Theme, translucent: bool, body: Div) -> Div {
+    // Thick rather than thin: at full strength the vibrancy layer is a wash of
+    // whatever is behind the window, and names stop being readable against it.
+    let backing = match translucent {
+        true => gpui::Hsla {
+            a: 0.62,
+            ..palette.surface
+        },
+        false => palette.surface,
+    };
+
     div()
         .size_full()
-        .flex().flex_col()
-        .bg(palette.surface)
+        .flex()
+        .flex_col()
+        .bg(backing)
         .text_color(palette.text)
         .child(body)
 }

@@ -313,6 +313,28 @@ impl Settings {
                     )
                 }),
             )))
+            .when(cfg!(target_os = "macos"), |this| {
+                this.child(field("Blur the desktop behind it", palette).child(toggle(
+                    draft.sidebar.translucent,
+                    palette,
+                    cx.listener(|this: &mut Self, _, _, cx| {
+                        this.change(
+                            |config| config.sidebar.translucent = !config.sidebar.translucent,
+                            cx,
+                        )
+                    }),
+                )))
+            })
+            .child(
+                div()
+                    .pb_2()
+                    .text_size(px(palette.typography.ui_size - 2.0))
+                    .text_color(palette.text_muted)
+                    .child(match cfg!(target_os = "macos") {
+                        true => "Takes effect on restart: the blur is a property of the window.",
+                        false => "",
+                    }),
+            )
             .child(field("Width", palette).child(stepper(
                 format!("{:.0}", draft.sidebar.width),
                 palette,

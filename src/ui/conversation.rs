@@ -69,6 +69,10 @@ pub struct Conversation {
     /// The thread the scroll position belongs to, so switching conversations
     /// starts at the newest message rather than wherever the last one was.
     anchored: Option<Thread>,
+    /// How many messages were on screen last frame. A new one arriving should
+    /// bring the view with it -- but only if you were already at the bottom, or
+    /// reading back through history would yank you away mid-sentence.
+    counted: usize,
     /// Runs only while something is playing, because a repaint every tenth of a
     /// second for an idle window is not free.
     ticking: Option<gpui::Task<()>>,
@@ -121,6 +125,7 @@ impl Conversation {
             player,
             scroll: ScrollHandle::new(),
             anchored: None,
+            counted: 0,
             ticking: None,
             aging: None,
         }
@@ -285,6 +290,16 @@ impl Conversation {
         .detach();
     }
 
+    /// Whether the list is close enough to the end to count as being at it.
+    /// A threshold rather than an equality: a fractional offset is normal, and
+    /// one pixel of slack should not mean "the reader has scrolled away".
+    fn at_bottom(&self) -> bool {
+        const SLACK: f32 = 96.0;
+
+        let remaining = f32::from(self.scroll.max_offset().y) + f32::from(self.scroll.offset().y);
+        remaining.abs() <= SLACK
+    }
+
     /// A playing track has to repaint to move; an idle one must not.
     fn follow_playback(&mut self, cx: &mut Context<Self>) {
         if self.ticking.is_some() {
@@ -428,7 +443,7 @@ impl Conversation {
 }
 
 impl Render for Conversation {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = cx.palette().clone();
         let act = self.dispatch(cx);
         let playback = self.player.playback();
@@ -465,12 +480,27 @@ impl Render for Conversation {
 
         // A conversation opens at its newest message, and stays where it was
         // put once you have scrolled it yourself.
+        let count = history.messages().len();
         if self.anchored.as_ref() != Some(&thread) {
             self.anchored = Some(thread.clone());
+            self.counted = count;
             self.scroll.scroll_to_bottom();
             // A voice note belongs to the conversation it was sent in, so it
             // does not follow you into the next one.
             self.player.stop();
+        } else if count > self.counted {
+            // Measured before the new message is laid out, which is the whole
+            // point: "were you at the bottom a moment ago", not "are you at the
+            // bottom now that something has been added below you".
+            let follow = self.at_bottom();
+            self.counted = count;
+
+            if follow {
+                let scroll = self.scroll.clone();
+                window.on_next_frame(move |_, _| scroll.scroll_to_bottom());
+            }
+        } else {
+            self.counted = count;
         }
 
         let mut list = kit::measured()

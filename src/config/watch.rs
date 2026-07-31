@@ -42,13 +42,22 @@ pub fn changes() -> Option<(impl Watcher, Receiver<()>)> {
 
 /// Waits for the writes to stop arriving before reporting a change, because one
 /// save often lands as several events.
-pub async fn settle(receiver: &mut Receiver<()>) {
+///
+/// Timed on gpui's executor rather than tokio's. This runs on the UI side,
+/// where there is no tokio runtime -- `tokio::time::timeout` panics outright,
+/// which nothing noticed until the settings window started writing the file and
+/// the watcher fired for the first time.
+pub async fn settle(receiver: &mut Receiver<()>, executor: &gpui::BackgroundExecutor) {
     const DEBOUNCE: Duration = Duration::from_millis(250);
 
     loop {
-        match tokio::time::timeout(DEBOUNCE, receiver.next()).await {
-            Ok(Some(())) => continue,
-            Ok(None) | Err(_) => return,
+        let next = receiver.next();
+        let deadline = executor.timer(DEBOUNCE);
+        futures::pin_mut!(next, deadline);
+
+        match futures::future::select(next, deadline).await {
+            futures::future::Either::Left((Some(()), _)) => continue,
+            _ => return,
         }
     }
 }

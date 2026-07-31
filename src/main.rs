@@ -36,11 +36,12 @@ fn main() {
         install(&loaded, cx);
 
         let config = Arc::new(loaded.config);
-        let store = cx.new(|_| Store::new(config));
+        let store = cx.new(|_| Store::new(config.clone()));
         let player = audio::Player::start();
         signal::bridge::spawn(store.clone(), cx);
         watch_config(store.clone(), cx);
 
+        let blurred = config.sidebar.blurred();
         let session = Session::load();
         let bounds = Bounds::centered(
             None,
@@ -59,6 +60,14 @@ fn main() {
                     traffic_light_position: Some(point(px(14.0), px(14.0))),
                 }),
                 window_min_size: Some(size(px(560.0), px(420.0))),
+                // Whole-window, because that is the only granularity there is:
+                // a vibrancy layer goes behind everything, and what shows
+                // through it is whatever is drawn translucent on top. Only the
+                // conversation list is.
+                window_background: match blurred {
+                    true => gpui::WindowBackgroundAppearance::Blurred,
+                    false => gpui::WindowBackgroundAppearance::Opaque,
+                },
                 ..Default::default()
             },
             |window, cx| {
@@ -104,7 +113,7 @@ fn watch_config(store: gpui::Entity<Store>, cx: &mut App) {
             if changes.next().await.is_none() {
                 break;
             }
-            config::watch::settle(&mut changes).await;
+            config::watch::settle(&mut changes, cx.background_executor()).await;
 
             let loaded = config::load();
             cx.update(|cx| {

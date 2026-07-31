@@ -35,6 +35,7 @@ pub fn to_toml(config: &Config) -> String {
     let _ = writeln!(out, "width = {:?}", config.sidebar.width);
     let _ = writeln!(out, "sort = {:?}", sort(config.sidebar.sort));
     let _ = writeln!(out, "show_preview = {}", config.sidebar.show_preview);
+    let _ = writeln!(out, "translucent = {}", config.sidebar.translucent);
 
     let _ = writeln!(out, "\n[media]");
     let media = &config.media;
@@ -127,6 +128,7 @@ mod tests {
                 width: 320.0,
                 sort: Sort::Name,
                 show_preview: false,
+                translucent: false,
             },
             media: crate::config::Media {
                 auto_download_video: false,
@@ -150,6 +152,7 @@ mod tests {
         assert_eq!(read.sidebar.width, config.sidebar.width);
         assert_eq!(read.sidebar.sort, config.sidebar.sort);
         assert_eq!(read.sidebar.show_preview, config.sidebar.show_preview);
+        assert_eq!(read.sidebar.translucent, config.sidebar.translucent);
         assert_eq!(read.media.auto_download_video, config.media.auto_download_video);
         assert_eq!(read.media.cache_limit, config.media.cache_limit);
         assert_eq!(read.notifications.groups, config.notifications.groups);

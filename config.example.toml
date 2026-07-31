@@ -1,8 +1,9 @@
 # Petunia configuration.
 #
-# Copy to ~/.config/petunia/config.toml. Every key is optional; anything you
-# leave out keeps its default. A typo is reported in the app rather than being
-# silently ignored, so an unknown key is an error, not a no-op.
+# Copy to ~/.config/petunia/config.toml -- on every platform, macOS included.
+# Every key is optional; anything you leave out keeps its default. A typo is
+# reported in the app rather than being silently ignored, so an unknown key is
+# an error, not a no-op.
 #
 # The file is watched: saving it applies the change immediately.
 
@@ -34,6 +35,10 @@ width = 240.0
 # "recent" or "name".
 sort = "recent"
 show_preview = true
+# Lets the desktop show through the conversation list, blurred, as the system's
+# own sidebars do. macOS only, and takes effect on restart: the blur is a
+# property of the window, not of the list.
+translucent = true
 
 [media]
 # Fetched without asking. Signal's CDN expires attachments after a few weeks,
