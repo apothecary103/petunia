@@ -1,20 +1,44 @@
 use chrono::{DateTime, Local};
-use iced::Fill;
 use iced::widget::text::Span;
-use iced::widget::{column, rich_text, scrollable};
+use iced::widget::{button, center, column, rich_text, scrollable, text};
+use iced::{Fill, Shrink};
 
 use super::Element;
 use crate::data::{History, Message, State, Status};
 use crate::theme;
 
-pub fn view<'a, M: 'a>(history: Option<&'a History>, state: &'a State) -> Element<'a, M> {
+pub fn view<'a, M: 'a + Clone>(
+    history: Option<&'a History>,
+    state: &'a State,
+    load_older: M,
+) -> Element<'a, M> {
     let messages = history.map(History::messages).unwrap_or_default();
-    let rows = messages.iter().map(|message| line(message, state));
+    let mut rows = column![].spacing(5).padding([10, 12]).width(Fill);
 
-    scrollable(column(rows).spacing(5).padding([10, 12]).width(Fill))
-        .anchor_bottom()
-        .height(Fill)
-        .into()
+    if let Some(history) = history
+        && history.has_more()
+    {
+        rows = rows.push(older_button(history.is_loading(), load_older));
+    }
+
+    for message in messages {
+        rows = rows.push(line(message, state));
+    }
+
+    scrollable(rows).anchor_bottom().height(Fill).into()
+}
+
+fn older_button<'a, M: 'a + Clone>(loading: bool, load_older: M) -> Element<'a, M> {
+    let label = if loading {
+        "loading older messages…"
+    } else {
+        "load older messages"
+    };
+    let mut control = button(text(label).size(11).height(Shrink)).style(theme::pane_control);
+    if !loading {
+        control = control.on_press(load_older);
+    }
+    center(control).height(Shrink).into()
 }
 
 fn line<'a, M: 'a>(message: &'a Message, state: &'a State) -> Element<'a, M> {
