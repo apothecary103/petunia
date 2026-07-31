@@ -26,7 +26,6 @@ dirs = "6"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
 open = "5.4.0"
 toml = "1.1.4"
 notify = "8.2.0"

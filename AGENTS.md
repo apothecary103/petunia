@@ -49,7 +49,14 @@ decision rather than a per-view accident.
 - `src/config/` — `config.toml`, themes, and keybindings.
 - `src/store.rs` — the one entity views observe, and the only way they talk back
   to the worker.
+- `src/audio.rs`, `src/video.rs` — playback. Each owns its output device on a
+  thread the UI does not touch, and neither imports gpui.
 - `src/ui/` — everything gpui.
+
+Every control drawn on a message reports through one closure
+(`ui::message::act::Act`), which the conversation answers in a single match.
+Adding a control is a variant and an arm, not another callback threaded through
+four call sites.
 
 ## Building
 
@@ -79,6 +86,25 @@ Every one of these has already cost a debugging session.
   is clickable a second or two before `Event::Ready`; `Store` queues and flushes.
 - **`max_w`/`max_h` on an image is not enough.** An image's natural size is its
   pixel size, so the fitted size is computed from the pointer's dimensions.
+- **`clear_key_bindings` clears everyone's.** `actions::bind` wipes the whole
+  keymap, including what `gpui_component::init` installs for its own text input.
+  The library therefore has to be initialised *after* it, and the theme after
+  that, because `init` seeds its own palette. `main::install` is the one place
+  that order lives.
+- **gpui minifies an image in one bilinear tap.** It uploads at the source's
+  pixel size and samples with no mipmaps, so a 640px avatar in a 34pt circle
+  aliases hard — this is the "pixelated on a retina display" symptom. Never call
+  `img()` directly; `ui::image::picture`/`cropped` resample to the device pixels
+  the element actually occupies.
+- **A layout closure does not know how wide it ended up.** Anything that turns a
+  click into a fraction of an element — the waveform, the video scrubber — needs
+  a `canvas` behind it to record the bounds it was laid out at.
+- **presage reads an attachment whole** before it can verify the digest, so
+  there is no byte count to report while one downloads. `Blob::Downloading`
+  carries no fraction and the bar slides rather than fills.
+- **Two crates wrap `CVPixelBuffer`.** gpui's `surface` takes `core-video`'s;
+  AVFoundation's bindings produce `objc2-core-video`'s. Same pointer, so the
+  conversion is a cast under a create rule (`video.rs`).
 
 ## Coding rules
 
