@@ -30,6 +30,7 @@ rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] 
 open = "5.4.0"
 toml = "1.1.4"
 notify = "8.2.0"
+rodio = { version = "0.22.2", default-features = false, features = ["playback", "symphonia-all"] }
 
 [patch.crates-io]
 curve25519-dalek = { git = "https://github.com/signalapp/curve25519-dalek", tag = "signal-curve25519-4.1.3" }
