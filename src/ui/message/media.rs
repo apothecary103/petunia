@@ -91,7 +91,7 @@ impl Frame<'_> {
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 act(Act::View(target.clone()), window, cx)
             })
-            .child(image::picture(path, width, height))
+            .child(image::picture(path, width, height).rounded(px(kit::RADIUS)))
             .into_any_element()
     }
 
@@ -123,7 +123,7 @@ impl Frame<'_> {
                 act(Act::View(target.clone()), window, cx)
             })
             .when_some(poster, |this, poster| {
-                this.child(image::picture(poster, width, height))
+                this.child(image::picture(poster, width, height).rounded(px(kit::RADIUS)))
             })
             .child(
                 div()
