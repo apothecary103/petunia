@@ -1,0 +1,83 @@
+# Petunia configuration.
+#
+# Copy to ~/.config/petunia/config.toml. Every key is optional; anything you
+# leave out keeps its default. A typo is reported in the app rather than being
+# silently ignored, so an unknown key is an error, not a no-op.
+#
+# The file is watched: saving it applies the change immediately. The one
+# exception is the font family, which iced fixes before the window opens.
+
+# "mocha" (dark, default) or "latte" (light). Any other name is read from
+# ~/.config/petunia/themes/<name>.toml.
+theme = "mocha"
+
+# Multiplies every length in the interface, on top of whatever scaling your
+# display already does. Raise it if everything looks too small. Clamped to
+# 0.5 - 3.0, so a slip cannot leave a window you can no longer read.
+scale = 1.0
+
+[messages]
+# "grouped" gives each run of messages an avatar and a header, like Discord.
+# "irc" packs one message per line. Toggle per pane with cmd+t.
+layout = "grouped"
+# "comfortable" or "compact".
+density = "comfortable"
+# "always", "hover" or "never".
+timestamps = "always"
+# Seconds. Messages from one sender closer together than this are grouped.
+group_within = 300
+date_separators = true
+
+[sidebar]
+width = 240.0
+# "recent" or "name".
+sort = "recent"
+show_preview = true
+
+[media]
+# Fetched without asking. Signal's CDN expires attachments after a few weeks,
+# so anything not downloaded while it is fresh is gone for good.
+auto_download_images = true
+auto_download_audio = true
+auto_download_video = false
+# Megabytes. Anything larger waits for you to ask.
+auto_download_limit = 8
+# Megabytes of cached media to keep before the oldest is dropped.
+cache_limit = 2048
+# Inline pictures are scaled down to fit inside both of these, keeping their
+# aspect ratio, and are never scaled up.
+image_max_width = 400.0
+image_max_height = 300.0
+
+[notifications]
+enabled = true
+show_content = true
+show_sender = true
+# "all", "mentions" or "none".
+groups = "all"
+
+# Rebinding one key leaves the rest alone. "cmd" is the command key on macOS and
+# control elsewhere, so one file works on both. Set a binding to "none" to
+# remove it. Press cmd+/ in the app for the current list.
+[keys]
+# quick-switcher = "cmd+k"
+# focus-composer = "cmd+l"
+# next-pane = "cmd+]"
+# previous-pane = "cmd+["
+# split-vertical = "cmd+d"
+# split-horizontal = "cmd+shift+d"
+# close-pane = "cmd+w"
+# maximize-pane = "cmd+m"
+# toggle-layout = "cmd+t"
+# toggle-sidebar = "cmd+b"
+# scroll-up = "pageup"
+# scroll-down = "pagedown"
+# scroll-to-top = "cmd+home"
+# scroll-to-bottom = "cmd+end"
+# next-unread = "cmd+j"
+# mark-read = "cmd+shift+r"
+# reply-to-last = "cmd+r"
+# edit-last = "cmd+e"
+# attach-file = "cmd+u"
+# cancel = "escape"
+# help = "cmd+/"
