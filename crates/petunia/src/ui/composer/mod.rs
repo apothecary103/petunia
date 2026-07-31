@@ -27,12 +27,40 @@ use crate::theme::ActivePalette;
 /// the receiving side ages an indicator out after fifteen.
 const TYPING_INTERVAL: Duration = Duration::from_secs(10);
 
+/// What the card keeps clear at every edge. One number rather than a horizontal
+/// and a vertical, because the controls are square and sitting the same distance
+/// from the bottom as from the right is what makes the corner look right.
+const CARD_PADDING: f32 = 8.0;
+
+/// How big every control inside the card is. `kit::icon_button`'s size, since
+/// two of the four are icon buttons and a row of squares that are nearly the
+/// same size reads as a mistake rather than as a hierarchy.
+const CONTROL: f32 = 26.0;
+
 /// What this message is doing besides being sent: answering one, or replacing
 /// one. Both are cancelled by Escape.
 #[derive(Debug, Clone)]
 pub enum Intent {
     Reply { target: MessageId, summary: String },
     Edit { target: MessageId },
+}
+
+/// What was typed in a conversation and not sent. Everything the field is
+/// carrying, because all of it was meant for the conversation it was written in
+/// -- a reply banner and a file picked out are as much part of the message as
+/// the words are, and following the reader into the next conversation is how one
+/// of them ends up in the wrong window.
+#[derive(Debug, Default)]
+struct Draft {
+    body: String,
+    intent: Option<Intent>,
+    attachments: Vec<PathBuf>,
+}
+
+impl Draft {
+    fn is_empty(&self) -> bool {
+        self.body.trim().is_empty() && self.intent.is_none() && self.attachments.is_empty()
+    }
 }
 
 /// The composer card. A rounded panel floating over the conversation with its
@@ -43,6 +71,12 @@ pub struct Composer {
     input: Entity<InputState>,
     intent: Option<Intent>,
     attachments: Vec<PathBuf>,
+    /// Every conversation's unsent message but the one in the field, which is
+    /// held by the field itself until the reader leaves it.
+    drafts: std::collections::HashMap<Thread, Draft>,
+    /// Whose draft the field is holding, so a change of conversation knows where
+    /// to put it away.
+    holding: Option<Thread>,
     formatting: bool,
     /// Which pack the sticker picker is showing, or `None` when it is closed.
     stickers: Option<stickers::Showing>,
@@ -54,7 +88,12 @@ pub struct Composer {
 }
 
 impl Composer {
-    pub fn new(store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        store: Entity<Store>,
+        kept: Vec<(Thread, String)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let input = cx.new(|cx| {
             InputState::new(window, cx)
                 .multi_line(true)
@@ -73,13 +112,30 @@ impl Composer {
                 cx.notify();
                 let _ = this;
             }),
+            // The field belongs to whichever conversation is open, so the store
+            // saying which one that is now is when the drafts change hands.
+            cx.observe_in(&store, window, Self::follow_active),
         ];
+
+        let drafts = kept
+            .into_iter()
+            .filter(|(_, body)| !body.trim().is_empty())
+            .map(|(thread, body)| {
+                let draft = Draft {
+                    body,
+                    ..Draft::default()
+                };
+                (thread, draft)
+            })
+            .collect();
 
         Self {
             store,
             input,
             intent: None,
             attachments: Vec::new(),
+            drafts,
+            holding: None,
             formatting: false,
             stickers: None,
             sticker_query,
@@ -90,6 +146,61 @@ impl Composer {
 
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.input.update(cx, |input, cx| input.focus(window, cx));
+    }
+
+    /// Puts the open conversation's draft in the field, and whatever was in the
+    /// field away under the conversation it was written for.
+    fn follow_active(&mut self, _store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) {
+        let active = self.store.read(cx).active().cloned();
+        if active == self.holding {
+            return;
+        }
+
+        if let Some(left) = self.holding.take() {
+            let draft = Draft {
+                body: self.input.read(cx).value().to_string(),
+                intent: self.intent.take(),
+                attachments: std::mem::take(&mut self.attachments),
+            };
+            // Nobody should be watching a typing indicator for a field that is
+            // no longer in front of the person who filled it.
+            self.stop_typing(&left, cx);
+            match draft.is_empty() {
+                true => self.drafts.remove(&left),
+                false => self.drafts.insert(left, draft),
+            };
+        }
+
+        let draft = active
+            .as_ref()
+            .and_then(|thread| self.drafts.remove(thread))
+            .unwrap_or_default();
+        self.holding = active;
+        self.intent = draft.intent;
+        self.attachments = draft.attachments;
+        // A picker is about the message being written, so it does not follow the
+        // reader into the next conversation either.
+        self.stickers = None;
+        self.input
+            .update(cx, |input, cx| input.set_value(draft.body, window, cx));
+        cx.notify();
+    }
+
+    /// Every unsent body, the one in the field included. Kept across launches,
+    /// which is why it is the words and nothing else: an attachment is a path,
+    /// and the reply it answers may not be loaded next time.
+    pub fn drafts(&self, cx: &gpui::App) -> Vec<(Thread, String)> {
+        let held = self
+            .holding
+            .clone()
+            .map(|thread| (thread, self.input.read(cx).value().to_string()));
+
+        self.drafts
+            .iter()
+            .map(|(thread, draft)| (thread.clone(), draft.body.clone()))
+            .chain(held)
+            .filter(|(_, body)| !body.trim().is_empty())
+            .collect()
     }
 
     pub fn is_empty(&self, cx: &gpui::App) -> bool {
@@ -346,8 +457,7 @@ impl Render for Composer {
             .flex()
             .items_end()
             .gap_1p5()
-            .px_2()
-            .py_1p5()
+            .p(px(CARD_PADDING))
             .rounded(px(kit::RADIUS_LG))
             .bg(palette.elevated)
             .border_1()
@@ -356,21 +466,36 @@ impl Render for Composer {
                 div()
                     .flex_1()
                     .min_w_0()
+                    .flex()
+                    .items_center()
+                    // As tall as the controls beside it, so one line of text is
+                    // centred on them rather than sitting on the floor of the
+                    // card while they sit in the middle of theirs.
+                    .min_h(px(CONTROL))
                     // Sized down for its padding, not its text: the field's own
                     // vertical padding is most of what made the card tall, and
                     // small and medium draw the same size of type.
+                    //
+                    // And then stripped of that padding entirely. The library
+                    // insets a small field by eight across and two down, which
+                    // is the card's own padding again on one side only -- so the
+                    // words started sixteen pixels in while the send button sat
+                    // eight from the other edge, and their baselines were two
+                    // apart. The card is what holds the padding here.
                     .child(
                         Input::new(&self.input)
                             .appearance(false)
                             .bordered(false)
-                            .small(),
+                            .small()
+                            .px_0()
+                            .py_0(),
                     ),
             )
             .child(
                 div()
                     .id("formatting")
                     .flex_none()
-                    .size(px(24.0))
+                    .size(px(CONTROL))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -397,7 +522,7 @@ impl Render for Composer {
                 div()
                     .id("stickers")
                     .flex_none()
-                    .size(px(24.0))
+                    .size(px(CONTROL))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -439,7 +564,7 @@ impl Render for Composer {
                 cx.listener(|this, _, window, cx| this.submit(window, cx)),
             ));
 
-        kit::measured()
+        kit::column()
             .flex()
             .flex_col()
             .gap_1()
@@ -757,7 +882,7 @@ fn send(
     div()
         .id("send")
         .flex_none()
-        .size(px(26.0))
+        .size(px(CONTROL))
         .flex()
         .items_center()
         .justify_center()

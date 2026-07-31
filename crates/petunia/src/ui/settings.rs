@@ -32,8 +32,57 @@ type Click = Box<dyn Fn(&MouseDownEvent, &mut Window, &mut App)>;
 /// What one row of a select offers, and what picking it does.
 type Option_ = (SharedString, bool, Click);
 
+/// Which page of preferences is showing. One at a time: the window was one
+/// column of six stacked sections, which meant scrolling past everything to
+/// reach the keyboard and no way to tell how much of it there was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Appearance,
+    Messages,
+    List,
+    Media,
+    Notifications,
+    Keyboard,
+}
+
+impl Tab {
+    const EVERY: [Tab; 6] = [
+        Tab::Appearance,
+        Tab::Messages,
+        Tab::List,
+        Tab::Media,
+        Tab::Notifications,
+        Tab::Keyboard,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Tab::Appearance => "Appearance",
+            Tab::Messages => "Messages",
+            Tab::List => "Conversations",
+            Tab::Media => "Media",
+            Tab::Notifications => "Notifications",
+            Tab::Keyboard => "Keyboard",
+        }
+    }
+
+    fn icon(self) -> gpui_component::IconName {
+        use gpui_component::IconName;
+
+        match self {
+            Tab::Appearance => IconName::Palette,
+            Tab::Messages => IconName::GalleryVerticalEnd,
+            Tab::List => IconName::PanelLeft,
+            Tab::Media => IconName::Frame,
+            Tab::Notifications => IconName::Bell,
+            Tab::Keyboard => IconName::SquareTerminal,
+        }
+    }
+}
+
 pub struct Settings {
     store: Entity<Store>,
+    tab: Tab,
     /// What the file will say. Edited here and written on every change, so the
     /// window never holds an opinion the file does not.
     draft: Config,
@@ -64,11 +113,20 @@ impl Settings {
         let draft = (*store.read(cx).config).clone();
         Self {
             store,
+            tab: Tab::Appearance,
             draft,
             open: None,
             failed: None,
             focus: cx.focus_handle(),
         }
+    }
+
+    /// Moving to another page closes whatever select was open on the one being
+    /// left, which would otherwise reappear over the new page's rows.
+    fn show(&mut self, tab: Tab, cx: &mut Context<Self>) {
+        self.tab = tab;
+        self.open = None;
+        cx.notify();
     }
 
     /// Applies a change and writes it. The watcher reloads the file, which is
@@ -139,8 +197,11 @@ impl Render for Settings {
             .child(
                 div()
                     .id("sheet")
-                    .w(px(620.0))
-                    .max_h(px(680.0))
+                    .w(px(720.0))
+                    // Fixed rather than fitted: pages differ in length, and a
+                    // sheet that resized as they were picked would move the rail
+                    // the picking is done with.
+                    .h(px(560.0))
                     .flex()
                     .flex_col()
                     .rounded(px(kit::RADIUS_LG))
@@ -162,18 +223,40 @@ impl Render for Settings {
                     .child(self.header(&palette, cx))
                     .child(
                         div()
-                            .id("settings-body")
                             .flex_1()
                             .min_h_0()
-                            .overflow_y_scroll()
-                            .px_5()
-                            .pb_5()
-                            .child(self.appearance(&draft, &palette, cx))
-                            .child(self.messages(&draft, &palette, cx))
-                            .child(self.list(&draft, &palette, cx))
-                            .child(self.media(&draft, &palette, cx))
-                            .child(self.notifications(&draft, &palette, cx))
-                            .child(self.keys(&draft, &palette, cx)),
+                            .flex()
+                            .child(self.rail(&palette, cx))
+                            .child(
+                                div()
+                                    .id("settings-body")
+                                    .flex_1()
+                                    .min_w_0()
+                                    .min_h_0()
+                                    .overflow_y_scroll()
+                                    .px_5()
+                                    .pb_5()
+                                    .child(match self.tab {
+                                        Tab::Appearance => {
+                                            self.appearance(&draft, &palette, cx).into_any_element()
+                                        }
+                                        Tab::Messages => {
+                                            self.messages(&draft, &palette, cx).into_any_element()
+                                        }
+                                        Tab::List => {
+                                            self.list(&draft, &palette, cx).into_any_element()
+                                        }
+                                        Tab::Media => {
+                                            self.media(&draft, &palette, cx).into_any_element()
+                                        }
+                                        Tab::Notifications => self
+                                            .notifications(&draft, &palette, cx)
+                                            .into_any_element(),
+                                        Tab::Keyboard => {
+                                            self.keys(&draft, &palette, cx).into_any_element()
+                                        }
+                                    }),
+                            ),
                     )
                     .when_some(self.failed.clone(), |this, failed| {
                         this.child(
@@ -192,6 +275,57 @@ impl Render for Settings {
 }
 
 impl Settings {
+    /// The pages, down the left edge. The same shape the conversation list uses,
+    /// because it is the same gesture: one of a short list, and the one you are
+    /// on is filled.
+    fn rail(&self, palette: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let showing = self.tab;
+
+        div()
+            .flex_none()
+            .w(px(176.0))
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .p(px(kit::LIST_PADDING))
+            .border_r_1()
+            .border_color(palette.border)
+            .children(Tab::EVERY.map(|tab| {
+                kit::row(
+                    SharedString::from(format!("tab-{}", tab.label())),
+                    tab == showing,
+                    palette,
+                )
+                .items_center()
+                .py_1p5()
+                .cursor_pointer()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this: &mut Self, _, _, cx| this.show(tab, cx)),
+                )
+                .child(kit::icon(
+                    tab.icon(),
+                    14.0,
+                    match tab == showing {
+                        true => palette.text,
+                        false => palette.text_muted,
+                    },
+                ))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(palette.typography.ui_size))
+                        .text_color(match tab == showing {
+                            true => palette.text,
+                            false => palette.text_dim,
+                        })
+                        .child(tab.label()),
+                )
+            }))
+    }
+
     fn header(&self, palette: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
@@ -285,6 +419,18 @@ impl Settings {
                         }),
                     ))
                     .into_any_element(),
+                // What shape a message is drawn in is what it looks like, not
+                // what it says, so it belongs beside the theme rather than with
+                // the preferences about the messages themselves.
+                described("Message layout", draft.messages.layout.describe(), palette)
+                    .child(choices(
+                        Layout::every().map(|layout| (layout.label(), layout)),
+                        draft.messages.layout,
+                        palette,
+                        cx,
+                        |config, layout| config.messages.layout = layout,
+                    ))
+                    .into_any_element(),
             ],
             None,
         )
@@ -296,21 +442,10 @@ impl Settings {
         palette: &Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let layouts = Layout::every().map(|layout| (layout.label(), layout));
-
         group(
             "Messages",
             palette,
             vec![
-                described("Layout", draft.messages.layout.describe(), palette)
-                    .child(choices(
-                        layouts,
-                        draft.messages.layout,
-                        palette,
-                        cx,
-                        |config, layout| config.messages.layout = layout,
-                    ))
-                    .into_any_element(),
                 field("Density", palette)
                     .child(choices(
                         [
@@ -848,6 +983,12 @@ fn select(
                     .w(px(190.0))
                     .max_h(px(240.0))
                     .overflow_y_scroll()
+                    // gpui lets a scroll wheel through an overlay on purpose, so
+                    // that a sheet does not stop the page under it scrolling.
+                    // Here that is exactly wrong: a list of thirteen themes has
+                    // its own scroll, and turning the wheel over it moved the
+                    // settings page behind instead -- taking the list with it.
+                    .occlude()
                     .flex()
                     .flex_col()
                     .gap_0p5()

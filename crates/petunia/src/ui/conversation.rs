@@ -1,7 +1,7 @@
 use chrono::{Local, NaiveDate};
 use gpui::prelude::*;
 use gpui::{
-    Context, Entity, ListAlignment, ListState, MouseButton, SharedString, Window, div, list, px,
+    Context, Entity, ListAlignment, ListState, SharedString, Window, div, list, px,
 };
 
 use super::composer::Composer;
@@ -136,6 +136,7 @@ impl Conversation {
     pub fn new(
         store: Entity<Store>,
         player: Player,
+        drafts: Vec<(Thread, String)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -165,7 +166,7 @@ impl Conversation {
             },
         )
         .detach();
-        let composer = cx.new(|cx| Composer::new(store.clone(), window, cx));
+        let composer = cx.new(|cx| Composer::new(store.clone(), drafts, window, cx));
         Self {
             store,
             composer,
@@ -662,16 +663,26 @@ impl Render for Conversation {
 
         let list = list(self.list.clone(), move |index, _window, cx| {
             let Some(row) = index.checked_sub(1) else {
-                return match older {
-                    true => load_older(loading, &frame.palette, spacing, {
-                        let this = this.clone();
-                        let target = target.clone();
-                        move |_: &gpui::MouseDownEvent, _: &mut Window, cx: &mut gpui::App| {
-                            this.update(cx, |this, cx| this.load_older(target.clone(), cx));
-                        }
-                    }),
-                    false => div().into_any_element(),
-                };
+                if !older {
+                    return div().into_any_element();
+                }
+                // The top of the thread being built is the top of the thread
+                // being approached: `list` only builds what is on screen and the
+                // overdraw around it, so this row is the reader arriving. Asking
+                // for the page here is what makes reading backwards continuous
+                // rather than a button to find every screenful.
+                //
+                // Deferred, because this runs inside the layout that is asking
+                // for the row, and the load mutates the very history it is
+                // reading.
+                if !loading {
+                    let this = this.clone();
+                    let target = target.clone();
+                    cx.defer(move |cx| {
+                        this.update(cx, |this, cx| this.load_older(target.clone(), cx));
+                    });
+                }
+                return loading_older(&frame.palette, spacing);
             };
 
             // Read back out of the store rather than captured: a row addresses
@@ -716,7 +727,7 @@ impl Render for Conversation {
                 },
             ))
             .child(
-                kit::measured()
+                kit::column()
                     .flex_1()
                     .min_h_0()
                     .flex()
@@ -801,31 +812,17 @@ impl Frame {
     }
 }
 
-/// The button that fetches the previous page, which is the top of the list when
-/// there is more behind it.
-fn load_older(
-    loading: bool,
-    palette: &Theme,
-    spacing: Spacing,
-    on_click: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut gpui::App) + 'static,
-) -> gpui::AnyElement {
+/// The top of the list while there is more behind it. It says what is happening
+/// and is not a control: reaching it is what asks for the page, so a button here
+/// would be a second way to ask for something already on its way.
+fn loading_older(palette: &Theme, spacing: Spacing) -> gpui::AnyElement {
     div()
-        .id("load-older")
         .self_center()
         .px_3()
         .py_1()
-        .rounded_full()
         .text_size(px(spacing.small))
         .text_color(palette.text_muted)
-        .when(!loading, |this| {
-            this.hover(|this| this.bg(palette.hover))
-                .on_mouse_down(MouseButton::Left, on_click)
-        })
-        .child(if loading {
-            "Loading older messages…"
-        } else {
-            "Load older messages"
-        })
+        .child("Loading older messages…")
         .into_any_element()
 }
 

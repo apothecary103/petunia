@@ -23,4 +23,5 @@ pub mod switcher;
 pub mod themes;
 pub mod vibrancy;
 pub mod viewer;
+pub mod wash;
 pub mod workspace;

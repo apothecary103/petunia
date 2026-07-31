@@ -26,8 +26,28 @@ actions!(
         Help,
         Settings,
         ThemePicker,
+        Quit,
+        Hide,
+        HideOthers,
+        Minimize,
+        Zoom,
     ]
 );
+
+/// The chords the menu bar needs that are not preferences.
+///
+/// Quitting and hiding are the platform's, not petunia's: a config file that
+/// could rebind cmd+q would be a config file that could take it away, and the
+/// menu item beside it would then be describing a key that does nothing. Bound
+/// after the configured ones so they are the last word.
+fn platform_bindings() -> Vec<KeyBinding> {
+    vec![
+        KeyBinding::new("cmd-q", Quit, None),
+        KeyBinding::new("cmd-h", Hide, None),
+        KeyBinding::new("cmd-alt-h", HideOthers, None),
+        KeyBinding::new("cmd-m", Minimize, None),
+    ]
+}
 
 /// Installs the configured chords into gpui's keymap. Called at startup and
 /// again on every hot reload, which replaces the previous bindings.
@@ -47,6 +67,7 @@ pub fn bind(keys: &Keys, cx: &mut App) {
             }
         })
         .map(|(keystroke, action)| binding(&keystroke, action))
+        .chain(platform_bindings())
         .collect::<Vec<_>>();
 
     cx.bind_keys(bindings);

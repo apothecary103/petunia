@@ -84,8 +84,12 @@ impl Frame<'_> {
 
     /// Sized explicitly rather than capped: an image's natural size is its pixel
     /// size, and a maximum alone leaves the layout to guess the other axis.
+    ///
+    /// The shape comes from the file rather than from what the sender said it
+    /// was, which is what a picture drawn with margin around it is: see
+    /// `image::shape`.
     fn picture(&self, attached: &Attachment, size: Option<Size>, path: &Path) -> AnyElement {
-        let (width, height) = fit(size, self.max_image);
+        let (width, height) = fit(image::shape(path).or(size), self.max_image);
         let act = self.act.clone();
         let target = path.to_path_buf();
 
@@ -114,7 +118,10 @@ impl Frame<'_> {
         path: &Path,
     ) -> AnyElement {
         let theme = self.theme;
-        let (width, height) = fit(size, self.max_image);
+        // The poster is the frame actually on screen, and it was generated here
+        // from the clip itself, so it is a better answer than the declaration --
+        // which for video is missing more often than not.
+        let (width, height) = fit(poster.and_then(image::shape).or(size), self.max_image);
         let act = self.act.clone();
         let target = path.to_path_buf();
 

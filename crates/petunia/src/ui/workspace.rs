@@ -133,7 +133,8 @@ impl Workspace {
             // Remembered as it happens, written once on the way out: a drag
             // reports every frame, and the session file is not a log.
             cx.observe_window_bounds(window, |this, window, _| this.remember_size(window)),
-            cx.on_app_quit(|this, _| {
+            cx.on_app_quit(|this: &mut Self, cx: &mut Context<Self>| {
+                this.session.drafts = this.drafts(cx);
                 this.session.save();
                 async {}
             }),
@@ -175,8 +176,9 @@ impl Workspace {
     fn enter_main(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let rail = self.session.sidebar.rail;
         let sidebar = cx.new(|cx| Sidebar::new(self.store.clone(), rail, cx));
+        let drafts = std::mem::take(&mut self.session.drafts);
         let conversation = cx.new(|cx| {
-            Conversation::new(self.store.clone(), self.player.clone(), window, cx)
+            Conversation::new(self.store.clone(), self.player.clone(), drafts, window, cx)
         });
         let details = cx.new(|cx| Details::new(self.store.clone(), cx));
         cx.subscribe_in(&details, window, |this, _, event: &details::Viewing, window, cx| {
@@ -267,15 +269,27 @@ impl Workspace {
 
         let switcher = self.switcher.get_or_insert_with(|| {
             let switcher = cx.new(|cx| Switcher::new(self.store.clone(), cx));
-            cx.subscribe(&switcher, |this, _, _: &Dismissed, cx| {
+            cx.subscribe_in(&switcher, window, |this, _, _: &Dismissed, window, cx| {
                 this.switcher = None;
-                cx.notify();
+                this.dismissed(window, cx);
             })
             .detach();
             switcher
         });
 
         switcher.update(cx, |switcher, cx| switcher.reset(window, cx));
+        cx.notify();
+    }
+
+    /// Takes the focus back when an overlay goes away.
+    ///
+    /// Actions dispatch along the focus path, so a sheet that closes while the
+    /// focus is still inside it leaves the window with nothing focused at all --
+    /// and then no keybinding fires anywhere. Escape always came back through
+    /// here; choosing a search result, picking a theme and clicking the scrim did
+    /// not, which is why a picker used once stopped answering its own shortcut.
+    fn dismissed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus, cx);
         cx.notify();
     }
 
@@ -293,9 +307,9 @@ impl Workspace {
         }
         let raised = cx.new(|cx| Menu::new(items, at, cx));
 
-        cx.subscribe(&raised, |this, _, _: &menu::Dismissed, cx| {
+        cx.subscribe_in(&raised, window, |this, _, _: &menu::Dismissed, window, cx| {
             this.menu = None;
-            cx.notify();
+            this.dismissed(window, cx);
         })
         .detach();
         window.focus(&raised.read(cx).focus_handle(cx), cx);
@@ -308,9 +322,9 @@ impl Workspace {
     fn open_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let editor = cx.new(|cx| Editor::new(window, cx));
 
-        cx.subscribe(&editor, |this, _, _: &editor::Dismissed, cx| {
+        cx.subscribe_in(&editor, window, |this, _, _: &editor::Dismissed, window, cx| {
             this.editor = None;
-            cx.notify();
+            this.dismissed(window, cx);
         })
         .detach();
         editor.update(cx, |editor, cx| editor.take_focus(window, cx));
@@ -324,8 +338,9 @@ impl Workspace {
     fn open_themes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let picker = self.themes.get_or_insert_with(|| {
             let picker = cx.new(|cx| Themes::new(self.store.clone(), cx));
-            cx.subscribe(&picker, |this, _, _: &themes::Dismissed, cx| {
+            cx.subscribe_in(&picker, window, |this, _, _: &themes::Dismissed, window, cx| {
                 this.close_themes(cx);
+                this.dismissed(window, cx);
             })
             .detach();
             picker
@@ -361,9 +376,9 @@ impl Workspace {
             .settings
             .get_or_insert_with(|| {
                 let settings = cx.new(|cx| Settings::new(self.store.clone(), cx));
-                cx.subscribe(&settings, |this, _, _: &settings::Dismissed, cx| {
+                cx.subscribe_in(&settings, window, |this, _, _: &settings::Dismissed, window, cx| {
                     this.settings = None;
-                    cx.notify();
+                    this.dismissed(window, cx);
                 })
                 .detach();
                 cx.subscribe_in(
@@ -452,9 +467,9 @@ impl Workspace {
             )
         });
 
-        cx.subscribe(&confirm, |this, _, _: &confirm::Dismissed, cx| {
+        cx.subscribe_in(&confirm, window, |this, _, _: &confirm::Dismissed, window, cx| {
             this.confirm = None;
-            cx.notify();
+            this.dismissed(window, cx);
         })
         .detach();
         cx.subscribe(&confirm, move |this, _, _: &confirm::Confirmed, cx| {
@@ -479,9 +494,9 @@ impl Workspace {
             Prompt::new("New folder", "Work, Family, …", "Create", window, cx)
         });
 
-        cx.subscribe(&prompt, |this, _, _: &prompt::Dismissed, cx| {
+        cx.subscribe_in(&prompt, window, |this, _, _: &prompt::Dismissed, window, cx| {
             this.prompt = None;
-            cx.notify();
+            this.dismissed(window, cx);
         })
         .detach();
         cx.subscribe(&prompt, move |this, _, named: &prompt::Answered, cx| {
@@ -517,9 +532,9 @@ impl Workspace {
 
         let picker = cx.new(|cx| Forward::new(self.store.clone(), target, summary, cx));
 
-        cx.subscribe(&picker, |this, _, _: &forward::Dismissed, cx| {
+        cx.subscribe_in(&picker, window, |this, _, _: &forward::Dismissed, window, cx| {
             this.forward = None;
-            cx.notify();
+            this.dismissed(window, cx);
         })
         .detach();
         cx.subscribe(&picker, |this, _, picked: &forward::Picked, cx| {
@@ -556,9 +571,9 @@ impl Workspace {
 
         let sheet = cx.new(|cx| Raw::new(&message, &sender, cx));
 
-        cx.subscribe(&sheet, |this, _, _: &raw::Dismissed, cx| {
+        cx.subscribe_in(&sheet, window, |this, _, _: &raw::Dismissed, window, cx| {
             this.raw = None;
-            cx.notify();
+            this.dismissed(window, cx);
         })
         .detach();
 
@@ -578,9 +593,9 @@ impl Workspace {
             let store = self.store.clone();
             let search = cx.new(|cx| Search::new(store, scope.clone(), window, cx));
 
-            cx.subscribe(&search, |this, _, _: &search::Dismissed, cx| {
+            cx.subscribe_in(&search, window, |this, _, _: &search::Dismissed, window, cx| {
                 this.search = None;
-                cx.notify();
+                this.dismissed(window, cx);
             })
             .detach();
             cx.subscribe_in(
@@ -626,9 +641,9 @@ impl Workspace {
         let reel = self.thread_media(cx);
         let viewer = cx.new(|cx| Viewer::new(reel, &path, cx));
 
-        cx.subscribe(&viewer, |this, _, _: &viewer::Dismissed, cx| {
+        cx.subscribe_in(&viewer, window, |this, _, _: &viewer::Dismissed, window, cx| {
             this.viewer = None;
-            cx.notify();
+            this.dismissed(window, cx);
         })
         .detach();
         window.focus(&viewer.read(cx).focus_handle(cx), cx);
@@ -668,9 +683,9 @@ impl Workspace {
         let bindings = self.store.read(cx).config.keys.listing();
         let help = cx.new(|cx| Help::new(bindings, cx));
 
-        cx.subscribe(&help, |this, _, _: &help::Dismissed, cx| {
+        cx.subscribe_in(&help, window, |this, _, _: &help::Dismissed, window, cx| {
             this.help = None;
-            cx.notify();
+            this.dismissed(window, cx);
         })
         .detach();
         window.focus(&help.read(cx).focus_handle(cx), cx);
@@ -767,6 +782,16 @@ impl Workspace {
                 .update(cx, |composer, cx| composer.cancel(window, cx));
         });
         cx.notify();
+    }
+
+    /// Every conversation's unsent message, for the session file. Read on the
+    /// way out rather than kept in step: a draft changes on every keystroke and
+    /// the session file is not a log.
+    fn drafts(&self, cx: &App) -> Vec<(petunia_data::Thread, String)> {
+        let Some(conversation) = self.conversation() else {
+            return Vec::new();
+        };
+        conversation.read(cx).composer().read(cx).drafts(cx)
     }
 
     fn with_conversation(
@@ -1043,6 +1068,14 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|this, _: &actions::ToggleDetails, _, cx| {
                 this.toggle_details(cx)
+            }))
+            // The window's own two menu items. They need a window and the
+            // application does not have one, so they are answered here.
+            .on_action(cx.listener(|_, _: &actions::Minimize, window: &mut Window, _| {
+                window.minimize_window()
+            }))
+            .on_action(cx.listener(|_, _: &actions::Zoom, window: &mut Window, _| {
+                window.zoom_window()
             }))
             .on_action(cx.listener(|this, _: &actions::QuickSwitcher, window, cx| {
                 this.open_switcher(window, cx)

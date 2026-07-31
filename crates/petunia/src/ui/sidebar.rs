@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use gpui::prelude::*;
-use gpui::{Context, Div, Entity, MouseButton, SharedString, Stateful, Window, div, px};
+use gpui::{Context, Div, Entity, Hsla, MouseButton, SharedString, Stateful, Window, div, px};
 use gpui_component::IconName;
 
 use super::avatar::avatar;
@@ -11,6 +11,10 @@ use petunia_config::Theme;
 use petunia_data::{Section, Thread};
 use crate::store::Store;
 use crate::theme::ActivePalette;
+
+/// How large a face is in the list. One value for the rows and the identity, so
+/// the column has one rhythm rather than two.
+const FACE: f32 = 34.0;
 
 /// The conversation list: quiet section headers, two-line entries carrying the
 /// name, time and preview, and the account's identity pinned to the bottom.
@@ -204,10 +208,10 @@ fn identity(
             state.avatar_for(state.aci),
             &name,
             state.aci.as_bytes(),
-            30.0,
+            FACE,
             palette,
         ),
-        30.0,
+        FACE,
         state.connection,
         palette,
     );
@@ -277,25 +281,31 @@ fn identity(
         .into_any_element()
 }
 
-/// Whether messages are flowing, as a dot on the corner of the picture — the
-/// badge every chat client draws, cut into the avatar by a ring in the colour of
-/// what is behind it rather than merely sitting beside it.
+/// Whether messages are flowing, as a badge on the corner of the picture.
+///
+/// Discord's own geometry, to the proportion: the dot is five sixteenths of the
+/// picture, its edge flush with the bottom-right of the box, and the gap around
+/// it is a hole punched in the avatar rather than a ring drawn beside it. Its
+/// *shape* is the state as much as its colour is -- a disc while messages flow,
+/// a crescent while the connection is coming back, a hollow ring before it is up
+/// -- so the three are told apart by more than a hue.
 fn presence(
     picture: gpui::AnyElement,
     size: f32,
     connection: petunia_data::Connection,
     palette: &Theme,
 ) -> Div {
+    /// Discord's ten pixels of dot and two of gap, on a thirty-two pixel avatar.
+    const DOT: f32 = 10.0 / 32.0;
+    const GAP: f32 = 2.0 / 32.0;
+
     let tint = match connection {
         petunia_data::Connection::Connected => palette.success,
         petunia_data::Connection::Reconnecting => palette.warning,
         petunia_data::Connection::Connecting => palette.text_muted,
     };
-    // Two fifths of the picture, which is the proportion Discord draws and the
-    // smallest that reads as a state rather than as a speck, and the ring that
-    // cuts it in.
-    let dot = (size * 0.4).round();
-    let ring = (dot / 4.0).max(2.0).round();
+    let dot = (size * DOT).round().max(8.0);
+    let gap = (size * GAP).round().max(1.0);
 
     div()
         .flex_none()
@@ -303,19 +313,53 @@ fn presence(
         .size(px(size))
         .child(picture)
         .child(
+            // The hole, which is the picture's own colour: the dot sits centred
+            // in it, so its edge lands on the corner of the box the way the
+            // avatar's own curve does.
             div()
                 .absolute()
-                // In the corner of the picture's box, which for a circle puts
-                // the dot's centre inside the disc: the ring is then what eats
-                // into it rather than the colour.
-                .bottom_0()
-                .right_0()
-                .size(px(dot))
+                .bottom(px(-gap))
+                .right(px(-gap))
+                .size(px(dot + gap * 2.0))
                 .rounded_full()
-                .bg(tint)
-                .border(px(ring))
-                .border_color(palette.surface),
+                .bg(palette.surface)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(shape(connection, dot, tint, palette.surface)),
         )
+}
+
+/// The badge itself: a disc, or a disc with a bite out of it. The bite is drawn
+/// in the colour of the hole around the dot, which is what makes it read as
+/// absent rather than as a second colour.
+fn shape(connection: petunia_data::Connection, dot: f32, tint: Hsla, behind: Hsla) -> Div {
+    let bite = |size: f32, offset: f32| {
+        div()
+            .absolute()
+            .top(px(offset))
+            .left(px(offset))
+            .size(px(size))
+            .rounded_full()
+            .bg(behind)
+    };
+
+    let disc = div()
+        .relative()
+        .flex_none()
+        .size(px(dot))
+        .rounded_full()
+        .bg(tint);
+
+    match connection {
+        petunia_data::Connection::Connected => disc,
+        // A crescent pointing away from the corner, which is Discord's idle.
+        petunia_data::Connection::Reconnecting => {
+            disc.child(bite(dot * 0.62, -dot * 0.12))
+        }
+        // A ring, which is Discord's offline.
+        petunia_data::Connection::Connecting => disc.child(bite(dot * 0.5, dot * 0.25)),
+    }
 }
 
 fn shell(palette: &Theme, translucent: bool, body: Div) -> Div {
@@ -360,7 +404,7 @@ struct Line<'a> {
 /// One conversation on the collapsed rail: the picture, and the two things worth
 /// knowing without a line of text. Nothing that would be truncated to nothing.
 fn pip(palette: &Theme, line: Line<'_>) -> Stateful<Div> {
-    const EDGE: f32 = 38.0;
+    const EDGE: f32 = FACE + 8.0;
 
     let tint = if line.mentions > 0 && !line.muted {
         palette.accent
@@ -454,7 +498,7 @@ fn row(palette: &Theme, line: Line<'_>) -> Stateful<Div> {
         .child(
             div()
                 .pt_0p5()
-                .child(avatar(line.picture, line.name, line.seed, 30.0, palette)),
+                .child(avatar(line.picture, line.name, line.seed, FACE, palette)),
         )
         .child(
             div()

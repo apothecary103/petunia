@@ -23,6 +23,30 @@ use petunia_media::audio::Playback;
 /// a paragraph, narrow enough that the side it is on is still obvious.
 const BUBBLE: f32 = 0.78;
 
+/// Whether a message is given a bubble: everything except a sticker and a
+/// message that is nothing but pictures. A caption does not change that -- it
+/// belongs to the picture and is drawn under it either way -- but a quote or a
+/// link card does, because those are the message talking rather than showing.
+fn bubbled(message: &Message) -> bool {
+    use petunia_data::attachment::Kind;
+    use petunia_data::message::Content;
+
+    if matches!(message.content, Content::Sticker(_)) {
+        return false;
+    }
+    let wordless = match &message.content {
+        Content::Text { body, .. } => body.trim().is_empty(),
+        _ => false,
+    };
+    let pictures = !message.attachments.is_empty()
+        && message
+            .attachments
+            .iter()
+            .all(|attached| matches!(attached.kind, Kind::Image { .. } | Kind::Video { .. }));
+
+    !(wordless && pictures && message.quote.is_none() && message.preview.is_none())
+}
+
 /// Everything one run draws.
 pub struct Run<'a> {
     pub sender: Uuid,
@@ -130,11 +154,10 @@ impl Run<'_> {
             .gap(px(self.spacing.within_run))
             .when(own, |this| this.items_end())
             .children(self.header(!own))
-            .children(
-                self.messages
-                    .iter()
-                    .map(|message| self.bubble(own, self.body(message))),
-            );
+            .children(self.messages.iter().map(|message| match bubbled(message) {
+                true => self.bubble(own, self.body(message)).into_any_element(),
+                false => self.body(message).into_any_element(),
+            }));
 
         div()
             .flex()
@@ -148,6 +171,9 @@ impl Run<'_> {
             .child(side)
     }
 
+    /// A bubble around a picture is a second frame around a frame, and a sticker
+    /// is drawn on nothing at all -- Signal puts neither in one. So the bubble is
+    /// for what it was invented for: words.
     fn bubble(&self, own: bool, body: impl IntoElement) -> Div {
         div()
             .max_w(relative(BUBBLE))

@@ -1,6 +1,7 @@
 mod actions;
 mod assets;
 mod bridge;
+mod menus;
 mod session;
 mod store;
 mod theme;
@@ -34,6 +35,12 @@ fn main() {
     app.run(|cx: &mut App| {
         let loaded = config::load();
         install(&loaded, cx);
+        // The three items a menu bar offers that belong to the application rather
+        // than to a window, so they are answered here and nowhere else.
+        cx.on_action(|_: &actions::Quit, cx| cx.quit());
+        cx.on_action(|_: &actions::Hide, cx| cx.hide());
+        cx.on_action(|_: &actions::HideOthers, cx| cx.hide_other_apps());
+        menus::install(cx);
 
         let config = Arc::new(loaded.config);
         let store = cx.new(|_| Store::new(config.clone()));

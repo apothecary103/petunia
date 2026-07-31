@@ -456,18 +456,30 @@ fn parse(
         .collect()
 }
 
-/// Renders the body with Signal's formatting applied. Mentions carry a
-/// placeholder in the body, so the name is substituted before highlighting and
-/// the offsets are recomputed against the text actually drawn.
 /// A thin space, which is what inline code is padded with. A normal space would
 /// look like a space in the sentence.
 const PAD: char = '\u{2009}';
 
-fn styled(body: &str, ranges: &[Range], state: &State, theme: &Theme) -> StyledText {
+/// How round inline code is. Discord's own three, which on a box the height of
+/// one line is the difference between a chip and a lozenge.
+const INLINE_RADIUS: f32 = 3.0;
+
+/// Renders the body with Signal's formatting applied. Mentions carry a
+/// placeholder in the body, so the name is substituted before highlighting and
+/// the offsets are recomputed against the text actually drawn.
+///
+/// Inline code comes back with a box behind it rather than a wash, drawn the way
+/// Discord draws it: the block's fill, a fifth of an em of padding on every side,
+/// rounded off, and no border -- a hairline around something the width of one
+/// word reads as a box somebody forgot to fill. The block keeps its own, because
+/// a box that size is a box. See `ui::wash` for why none of this can be a
+/// highlight.
+fn styled(body: &str, ranges: &[Range], state: &State, theme: &Theme) -> crate::ui::wash::Wash {
     let segments = format::segments(body, ranges);
     let mut text = String::new();
     let mut highlights = Vec::new();
     let mut mono = Vec::new();
+    let mut boxed = Vec::new();
 
     for segment in segments {
         let styles = segment.styles;
@@ -504,15 +516,21 @@ fn styled(body: &str, ranges: &[Range], state: &State, theme: &Theme) -> StyledT
         // rather than becoming a row of elements that wrap at their own edges.
         if styles.monospace && !styles.spoiler {
             mono.push((start..text.len(), theme.typography.mono.clone().into()));
+            boxed.push(start..text.len());
         }
         if let Some(highlight) = highlight(styles, theme) {
             highlights.push((start..text.len(), highlight));
         }
     }
 
-    StyledText::new(text)
-        .with_highlights(highlights)
-        .with_font_family_overrides(mono)
+    crate::ui::wash::wash(
+        StyledText::new(text)
+            .with_highlights(highlights)
+            .with_font_family_overrides(mono),
+        boxed,
+        theme.sunken,
+        INLINE_RADIUS,
+    )
 }
 
 fn highlight(styles: format::Styles, theme: &Theme) -> Option<HighlightStyle> {
@@ -534,13 +552,9 @@ fn highlight(styles: format::Styles, theme: &Theme) -> Option<HighlightStyle> {
         });
         touched = true;
     }
-    if styles.monospace {
-        // `active`, not `sunken`: sunken is a shade *below* the background, which
-        // on a dark theme is five values off black and reads as nothing at all.
-        // A wash has to be visible against both the conversation and a bubble.
-        highlight.background_color = Some(theme.active);
-        touched = true;
-    }
+    // No background for monospace: the box behind it is painted by `ui::wash`,
+    // which is the only way to get the corners and the hairline a highlight has
+    // no room for.
     if styles.spoiler {
         // Same colour as the block it draws, so nothing shows through until a
         // reveal replaces the text.

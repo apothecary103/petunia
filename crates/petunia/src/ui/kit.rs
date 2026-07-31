@@ -207,15 +207,15 @@ pub fn typing(size: f32, tint: Hsla, id: impl Into<SharedString>) -> gpui::Anima
         )
 }
 
-/// The reading column. Prose that runs the full width of a wide window is
-/// unreadable, so the conversation is capped.
-pub const MEASURE: f32 = 760.0;
-
-/// Capped and pinned to the left edge of its column rather than centred.
-/// Centring means every message moves sideways as the window is resized or a
-/// panel opens, and a conversation you are reading should stay where it is.
-pub fn measured() -> Div {
-    div().w_full().max_w(px(MEASURE))
+/// The conversation column, which is the whole of the space between the panels.
+///
+/// It was capped at a reading measure, the way prose is set. A chat log is not
+/// prose: a wide window is a window somebody made wide, and the messages in it
+/// carry pictures, code and quotes that a narrow column only makes worse. Left
+/// alone it also never moves sideways, which is what a cap centred in its column
+/// would have done every time a panel opened.
+pub fn column() -> Div {
+    div().w_full()
 }
 
 /// A colour at the strength a fill wants rather than the strength text wants.

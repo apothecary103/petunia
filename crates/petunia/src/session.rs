@@ -18,6 +18,11 @@ pub struct Session {
     pub sidebar: SidebarState,
     #[serde(default = "details")]
     pub details: PanelState,
+    /// What was typed in each conversation and not sent. The body only: an
+    /// attachment is a path, and a path that has moved by the next launch is a
+    /// message that cannot be sent.
+    #[serde(default)]
+    pub drafts: Vec<(Thread, String)>,
 }
 
 /// Closed until asked for: an empty panel taking a fifth of the window is worse
@@ -63,6 +68,7 @@ impl Default for Session {
             active: None,
             sidebar: SidebarState::default(),
             details: details(),
+            drafts: Vec::new(),
         }
     }
 }
@@ -157,6 +163,33 @@ mod tests {
         assert!(restored.details.open);
         assert_eq!(restored.details.width, 320.0);
         assert!(restored.sidebar.rail);
+    }
+
+    /// A draft belongs to the conversation it was written in, and outlives the
+    /// launch it was written during.
+    #[test]
+    fn round_trips_a_draft_per_conversation() {
+        let session = Session {
+            drafts: vec![
+                (Thread::Group([1u8; 32]), "half a thought".into()),
+                (Thread::Group([2u8; 32]), "and another".into()),
+            ],
+            ..Session::default()
+        };
+
+        let json = serde_json::to_string(&session).unwrap();
+        let restored: Session = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.drafts, session.drafts);
+    }
+
+    /// A session written before drafts existed has none, rather than failing to
+    /// load at all.
+    #[test]
+    fn a_session_from_before_drafts_still_loads() {
+        let session: Session = serde_json::from_str(r#"{ "active": null }"#).unwrap();
+
+        assert!(session.drafts.is_empty());
     }
 
     /// A session written before the rail existed carried the list's width here.

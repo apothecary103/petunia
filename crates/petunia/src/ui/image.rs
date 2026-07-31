@@ -30,6 +30,20 @@ pub struct Request {
     /// is resampled twice.
     width: u32,
     height: u32,
+    fit: Fit,
+}
+
+/// Which way the box is honoured. `Contain` is the whole picture inside it;
+/// `Cover` fills it and lets the element crop what hangs over.
+///
+/// The distinction is not cosmetic: resampling to *fit* and then drawing with
+/// `ObjectFit::Cover` hands the GPU an image smaller than the box in one axis and
+/// asks it to enlarge it, which is how a wide photograph became a blurry square
+/// thumbnail. The crop has to be decided before the resample, not after.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Fit {
+    Contain,
+    Cover,
 }
 
 impl Asset for Scaled {
@@ -92,14 +106,20 @@ fn resample_all(frames: image::Frames<'_>, request: &Request) -> Vec<Frame> {
         .collect()
 }
 
-/// Scales to fit the requested box at the source's own aspect ratio, and never
+/// Scales to the requested box at the source's own aspect ratio, and never
 /// scales up — enlarging a small image on the CPU only wastes memory, since the
 /// GPU's bilinear filter does the same job for free.
 fn resample(source: RgbaImage, request: &Request) -> RgbaImage {
     let (width, height) = source.dimensions();
-    let scale = (request.width as f32 / width as f32)
-        .min(request.height as f32 / height as f32)
-        .min(1.0);
+    let across = request.width as f32 / width as f32;
+    let down = request.height as f32 / height as f32;
+    let scale = match request.fit {
+        Fit::Contain => across.min(down),
+        // The larger ratio, so the shorter axis reaches the box and the longer
+        // one overhangs to be cropped.
+        Fit::Cover => across.max(down),
+    }
+    .min(1.0);
 
     let mut resized = if scale < 1.0 {
         let target = |value: u32| ((value as f32 * scale).round() as u32).max(1);
@@ -115,12 +135,55 @@ fn resample(source: RgbaImage, request: &Request) -> RgbaImage {
     resized
 }
 
+/// The shape the file on disk actually is.
+///
+/// What a message is drawn at cannot come from the sender's declaration. It is
+/// often absent -- and always absent for a picture of our own, until the thread
+/// is reloaded and the cache measures it -- in which case the box falls back to
+/// the whole of `image_max_*`, a 4:3 rectangle nothing but a 4:3 picture fills.
+/// It can also simply disagree with the bytes: a photograph off a phone is stored
+/// landscape with an EXIF rotation, and Signal declares the *rotated* dimensions,
+/// so a portrait box gets drawn around a landscape picture. Either way the
+/// difference appears as margin inside the element, because a contained picture
+/// centres itself in whatever box it was given.
+///
+/// A header read is a few hundred bytes however large the picture is, but a
+/// visible row is rebuilt every frame, so the answer is kept -- including the
+/// failure, so a file that is not an image is not re-read forever.
+pub fn shape(path: &Path) -> Option<petunia_data::attachment::Size> {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    /// Enough for what is on screen and the overdraw around it, several times
+    /// over.
+    const CAPACITY: usize = 256;
+
+    thread_local! {
+        static SHAPES: RefCell<HashMap<PathBuf, Option<petunia_data::attachment::Size>>> =
+            RefCell::new(HashMap::new());
+    }
+
+    SHAPES.with(|shapes| {
+        let mut shapes = shapes.borrow_mut();
+        if let Some(shape) = shapes.get(path) {
+            return *shape;
+        }
+
+        let shape = petunia_data::attachment::dimensions(path);
+        if shapes.len() >= CAPACITY {
+            shapes.clear();
+        }
+        shapes.insert(path.to_path_buf(), shape);
+        shape
+    })
+}
+
 /// A picture drawn at exactly this size, resampled for the display it lands on.
 /// Both axes are given because an image's natural size is its pixel size, and
 /// letting the layout infer one from the other is how a screenshot ends up
 /// thousands of units wide.
 pub fn picture(path: impl AsRef<Path>, width: f32, height: f32) -> Img {
-    sized(path.as_ref().to_path_buf(), width, height)
+    sized(path.as_ref().to_path_buf(), width, height, Fit::Contain)
         .w(px(width))
         .h(px(height))
         .object_fit(ObjectFit::Contain)
@@ -128,7 +191,7 @@ pub fn picture(path: impl AsRef<Path>, width: f32, height: f32) -> Img {
 
 /// A picture filling a square and cropped to it, for avatars and thumbnails.
 pub fn cropped(path: impl AsRef<Path>, edge: f32) -> Img {
-    sized(path.as_ref().to_path_buf(), edge, edge)
+    sized(path.as_ref().to_path_buf(), edge, edge, Fit::Cover)
         .size(px(edge))
         .object_fit(ObjectFit::Cover)
 }
@@ -136,7 +199,7 @@ pub fn cropped(path: impl AsRef<Path>, edge: f32) -> Img {
 /// The scale factor is only knowable inside a window, so the request is built
 /// per frame rather than at construction. Requests are cheap; the resampled
 /// result behind them is cached by the asset system.
-fn sized(path: PathBuf, width: f32, height: f32) -> Img {
+fn sized(path: PathBuf, width: f32, height: f32, fit: Fit) -> Img {
     img(move |window: &mut Window, cx: &mut App| {
         let scale = window.scale_factor().max(1.0);
         let device = |value: f32| ((value * scale).ceil() as u32).max(1);
@@ -145,6 +208,7 @@ fn sized(path: PathBuf, width: f32, height: f32) -> Img {
             path: path.clone(),
             width: device(width),
             height: device(height),
+            fit,
         };
         window.use_asset::<Scaled>(&request, cx)
     })
@@ -168,6 +232,14 @@ mod tests {
             path: path.to_path_buf(),
             width,
             height,
+            fit: Fit::Contain,
+        }
+    }
+
+    fn covering(path: &Path, edge: u32) -> Request {
+        Request {
+            fit: Fit::Cover,
+            ..request(path, edge, edge)
         }
     }
 
@@ -198,6 +270,20 @@ mod tests {
 
         assert_eq!(decoded.size(0).width.0, 400);
         assert_eq!(decoded.size(0).height.0, 200);
+    }
+
+    /// A thumbnail is cropped, so the box has to be *filled* before the element
+    /// crops it. Resampled to fit instead, a wide photograph arrives shorter than
+    /// the square it is drawn in and the GPU enlarges it to cover — which is what
+    /// made the shared-media grid blurry.
+    #[test]
+    fn a_cropped_thumbnail_fills_the_box() {
+        let (_dir, path) = write(&png(800, 400));
+
+        let decoded = decode(&covering(&path, 100)).unwrap();
+
+        assert_eq!(decoded.size(0).width.0, 200);
+        assert_eq!(decoded.size(0).height.0, 100);
     }
 
     /// Enlarging on the CPU costs memory and buys nothing the GPU's own filter

@@ -22,6 +22,18 @@ impl gpui::EventEmitter<Dismissed> for Viewer {}
 /// black screen around it.
 const ZOOM: std::ops::RangeInclusive<f32> = 0.2..=8.0;
 
+/// How much of the window the panel takes. A picture wants room, but taking the
+/// whole screen loses the conversation it came from — and a sheet that covers
+/// every edge is indistinguishable from the application having changed mode.
+const PANEL: f32 = 0.86;
+
+/// What the panel spends on its own chrome: the strip of controls above the
+/// picture, and the rail and transport below it. Subtracted from the panel to get
+/// the box a picture is resampled for, since the stage's real size is not
+/// knowable until after it has been laid out.
+const CHROME: f32 = super::workspace::TITLE_BAR + 24.0;
+const RAIL: f32 = 72.0;
+
 pub struct Viewer {
     /// Everything of this kind in the thread, so left and right walk it.
     reel: Vec<PathBuf>,
@@ -158,20 +170,36 @@ impl Render for Viewer {
         let position = format!("{} of {}", self.at + 1, self.reel.len());
         let zoom = self.zoom;
         let pan = self.pan;
+        let railed = self.reel.len() > 1;
+        // A picture has to be resampled for a box, and the stage's own size is
+        // not known until it has been laid out. The window is the measurement
+        // there is here, and the panel is a fraction of it.
+        let viewport = window.viewport_size();
+        let stage = (
+            (f32::from(viewport.width) * PANEL - 24.0).max(120.0),
+            (f32::from(viewport.height) * PANEL
+                - CHROME
+                - if railed { RAIL } else { 0.0 }
+                - if self.playing.is_some() { RAIL } else { 0.0 })
+                .max(120.0),
+        );
 
-        div()
-            .id("viewer")
-            .track_focus(&self.focus)
-            .absolute()
-            .inset_0()
-            .occlude()
+        let panel = div()
+            .id("viewer-panel")
+            .relative()
+            .w(gpui::relative(PANEL))
+            .h(gpui::relative(PANEL))
             .flex()
             .flex_col()
-            .bg(gpui::Hsla {
-                a: 0.94,
-                ..palette.background
-            })
-            .on_action(cx.listener(|_, _: &crate::actions::Cancel, _, cx| cx.emit(Dismissed)))
+            .overflow_hidden()
+            .rounded(px(kit::RADIUS_LG))
+            .bg(palette.background)
+            .border_1()
+            .border_color(palette.border)
+            .shadow_lg()
+            // The scrim behind closes on a click, so the panel stops one from
+            // reaching it.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
                 let delta = f32::from(event.delta.pixel_delta(px(20.0)).y);
                 this.scale_by(1.0 + delta / 400.0, cx);
@@ -230,15 +258,35 @@ impl Render for Viewer {
                             // The viewer is the one place a picture is meant to
                             // be as large as it can be, so the resample target
                             // is the whole stage rather than a message's box.
-                            .child(self.face(&path, zoom, window)),
+                            .child(self.face(&path, stage, zoom, window)),
                     ),
             )
             .when(self.playing.is_some(), |this| {
                 this.child(self.transport(&palette, cx))
             })
-            .when(self.reel.len() > 1, |this| {
-                this.child(self.rail(&palette, cx))
+            .when(railed, |this| this.child(self.rail(&palette, cx)));
+
+        div()
+            .id("viewer")
+            .track_focus(&self.focus)
+            .absolute()
+            .inset_0()
+            .occlude()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(gpui::Hsla {
+                a: 0.72,
+                ..palette.background
             })
+            // Clicking beside the panel closes it, the way every other sheet
+            // here is dismissed.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _, _, cx| cx.emit(Dismissed)),
+            )
+            .on_action(cx.listener(|_, _: &crate::actions::Cancel, _, cx| cx.emit(Dismissed)))
+            .child(panel)
             .into_any_element()
     }
 }
@@ -247,7 +295,13 @@ impl Viewer {
     /// A video draws its current frame into a platform surface; anything else is
     /// an ordinary picture. A frame that is not there yet leaves the stage dark
     /// rather than collapsing it, so nothing jumps when the first one arrives.
-    fn face(&mut self, path: &std::path::Path, zoom: f32, window: &mut Window) -> gpui::AnyElement {
+    fn face(
+        &mut self,
+        path: &std::path::Path,
+        stage: (f32, f32),
+        zoom: f32,
+        window: &mut Window,
+    ) -> gpui::AnyElement {
         #[cfg(target_os = "macos")]
         if let Some(player) = self.playing.as_mut() {
             // Unconditionally, not only while playing. AVFoundation loads the
@@ -266,9 +320,9 @@ impl Viewer {
                         width: size.0 as u32,
                         height: size.1 as u32,
                     }),
-                    (1100.0 * zoom, 700.0 * zoom),
+                    (stage.0 * zoom, stage.1 * zoom),
                 ),
-                None => (900.0 * zoom, 560.0 * zoom),
+                None => (stage.0 * zoom, stage.1 * zoom),
             };
 
             return match player.frame() {
@@ -311,7 +365,7 @@ impl Viewer {
                 .into_any_element();
         }
 
-        image::picture(path, 1600.0 * zoom, 1200.0 * zoom).into_any_element()
+        image::picture(path, stage.0 * zoom, stage.1 * zoom).into_any_element()
     }
 
     /// Play, a bar that scrubs, and the clock. Only drawn when there is a video

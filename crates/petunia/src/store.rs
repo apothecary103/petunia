@@ -589,6 +589,7 @@ impl Store {
                 thread,
                 messages,
                 more,
+                covered,
                 older,
             } => {
                 if !older
@@ -598,9 +599,9 @@ impl Store {
                 }
                 let history = state.history_mut(&thread);
                 if older {
-                    history.prepend(messages, more);
+                    history.prepend(messages, more, covered);
                 } else {
-                    history.merge(messages, more);
+                    history.merge(messages, more, covered);
                 }
                 cx.emit(StoreEvent::History { older });
                 // Opening a thread marks it read, but on the first open there is
