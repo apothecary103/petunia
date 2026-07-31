@@ -4,7 +4,7 @@ pub mod range;
 
 use uuid::Uuid;
 
-pub use project::{Fragment, classify, pointers, project, receipt_from_content};
+pub use project::{Fragment, Wanted, classify, pointers, project, receipt_from_content};
 pub use range::Range;
 
 use super::attachment::{self, Attachment};

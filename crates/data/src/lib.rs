@@ -11,7 +11,7 @@ pub use contact::{Contact, Group, Member};
 pub use history::History;
 pub use index::{Index, Section};
 pub use message::{
-    Fragment, Message, MessageId, Reaction, Status, classify, pointers, project,
+    Fragment, Message, MessageId, Reaction, Status, Wanted, classify, pointers, project,
     receipt_from_content,
 };
 pub use state::{Connection, State};

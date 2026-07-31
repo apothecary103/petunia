@@ -118,11 +118,27 @@ pub fn apply_delete(message: &mut Message) {
     message.reactions.clear();
 }
 
+/// One thing worth fetching, and whether waiting to be asked for it is an
+/// option.
+pub struct Wanted {
+    pub id: attachment::Id,
+    pub pointer: AttachmentPointer,
+    /// A sticker *is* the message rather than something hanging off it, and
+    /// Signal does not reliably declare one as an image -- a pack is announced as
+    /// `image/webp` and the individual stickers arrive with whatever the sender's
+    /// client felt like, `application/octet-stream` included. Left to the
+    /// content type these were never fetched, and a sticker with no bytes draws
+    /// as the pack's emoji, which is the "stickers sometimes do not show up"
+    /// symptom. There is no control to ask for one with, either: clicking a
+    /// sticker offers its pack.
+    pub essential: bool,
+}
+
 /// Every downloadable pointer a stored row carries, paired with the id the UI
 /// knows it by. The pointers themselves are never handed to the UI -- they are
 /// bulky, protocol-shaped and expire -- so the worker re-reads them from the
 /// store when a download is asked for.
-pub fn pointers(envelope: &Envelope) -> Vec<(attachment::Id, AttachmentPointer)> {
+pub fn pointers(envelope: &Envelope) -> Vec<Wanted> {
     let Some(body) = body(&envelope.body) else {
         return Vec::new();
     };
@@ -146,10 +162,14 @@ pub fn pointers(envelope: &Envelope) -> Vec<(attachment::Id, AttachmentPointer)>
         .iter()
         .chain(quote)
         .chain(preview)
-        .chain(sticker)
-        .filter_map(|pointer| {
-            let id = attachment::from_pointer(pointer)?.id;
-            Some((id, pointer.clone()))
+        .map(|pointer| (pointer, false))
+        .chain(sticker.map(|pointer| (pointer, true)))
+        .filter_map(|(pointer, essential)| {
+            Some(Wanted {
+                id: attachment::from_pointer(pointer)?.id,
+                pointer: pointer.clone(),
+                essential,
+            })
         })
         .collect()
 }
@@ -624,6 +644,41 @@ mod tests {
         let (_, message) = from_content(&content).unwrap();
         assert!(matches!(message.content, Content::Sticker(_)));
         assert_eq!(message.summary(), "🎉 Sticker");
+    }
+
+    /// A sticker arrives declaring whatever the sender's client felt like, so
+    /// the decision to fetch it cannot rest on the content type -- and a sticker
+    /// with no bytes draws as the pack's emoji instead of the picture.
+    #[test]
+    fn a_stickers_own_image_is_fetched_whatever_it_declares() {
+        let content = Envelope::from_body(
+            DataMessage {
+                timestamp: Some(1),
+                sticker: Some(data_message::Sticker {
+                    pack_id: Some(vec![9]),
+                    sticker_id: Some(3),
+                    data: Some(AttachmentPointer {
+                        content_type: Some("application/octet-stream".into()),
+                        digest: Some(vec![0xab, 0xcd]),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                attachments: vec![AttachmentPointer {
+                    content_type: Some("application/pdf".into()),
+                    digest: Some(vec![0x01, 0x02]),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            metadata(Uuid::new_v4(), 1),
+        );
+
+        let wanted = pointers(&content);
+
+        assert_eq!(wanted.len(), 2);
+        assert!(!wanted[0].essential, "an attached file waits to be asked for");
+        assert!(wanted[1].essential, "the sticker is the message");
     }
 
     #[test]

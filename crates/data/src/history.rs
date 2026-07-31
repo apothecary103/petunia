@@ -60,7 +60,13 @@ impl History {
 
     /// Merges a freshly loaded page over what is already held, so that the
     /// optimistic rows written on send are not lost when history arrives.
-    pub fn merge(&mut self, page: Vec<Message>, more: bool) {
+    ///
+    /// `covered` is the oldest row the page reached, which is not the same as its
+    /// oldest *message*: a reaction, an edit and a delete are all stored rows
+    /// that project onto a message already in the page rather than adding one. A
+    /// page of nothing but those would leave the next request asking from exactly
+    /// where this one did, and reading backwards would stop dead there.
+    pub fn merge(&mut self, page: Vec<Message>, more: bool, covered: Option<u64>) {
         let live = std::mem::replace(&mut self.messages, page);
         for message in live {
             match self.index_of(&message.id) {
@@ -71,10 +77,10 @@ impl History {
         self.sort();
         self.more = more;
         self.loading = false;
-        self.oldest = self.messages.first().map(Message::timestamp);
+        self.reached(covered);
     }
 
-    pub fn prepend(&mut self, older: Vec<Message>, more: bool) {
+    pub fn prepend(&mut self, older: Vec<Message>, more: bool, covered: Option<u64>) {
         for message in older {
             if self.index_of(&message.id).is_none() {
                 self.messages.push(message);
@@ -83,7 +89,17 @@ impl History {
         self.sort();
         self.more = more;
         self.loading = false;
-        self.oldest = self.messages.first().map(Message::timestamp);
+        self.reached(covered);
+    }
+
+    /// How far back the thread has been read, which is what the next page asks
+    /// from: the oldest row of any page loaded, or the oldest message when a page
+    /// said nothing about the rows it covered.
+    fn reached(&mut self, covered: Option<u64>) {
+        self.oldest = [covered, self.messages.first().map(Message::timestamp)]
+            .into_iter()
+            .flatten()
+            .min();
     }
 
     pub fn insert(&mut self, message: Message) {
@@ -223,7 +239,7 @@ mod tests {
         let mut history = History::default();
         history.insert(message(300, sender, "optimistic"));
 
-        history.merge(vec![message(100, sender, "stored")], false);
+        history.merge(vec![message(100, sender, "stored")], false, Some(100));
 
         assert_eq!(bodies(&history), ["stored", "optimistic"]);
     }
@@ -238,7 +254,7 @@ mod tests {
 
         let mut stored = message(100, sender, "hi");
         stored.status = Some(Status::Sent);
-        history.merge(vec![stored], false);
+        history.merge(vec![stored], false, Some(100));
 
         assert_eq!(history.messages()[0].status, Some(Status::Read));
     }
@@ -249,7 +265,7 @@ mod tests {
         let mut history = History::default();
         history.set_loading(true);
 
-        history.merge(vec![message(100, sender, "a")], true);
+        history.merge(vec![message(100, sender, "a")], true, Some(100));
 
         assert!(history.has_more());
         assert!(!history.is_loading());
@@ -260,16 +276,34 @@ mod tests {
     fn prepend_adds_older_messages_without_duplicating() {
         let sender = Uuid::new_v4();
         let mut history = History::default();
-        history.merge(vec![message(200, sender, "b")], true);
+        history.merge(vec![message(200, sender, "b")], true, Some(200));
 
         history.prepend(
             vec![message(100, sender, "a"), message(200, sender, "b")],
             false,
+            Some(100),
         );
 
         assert_eq!(bodies(&history), ["a", "b"]);
         assert!(!history.has_more());
         assert_eq!(history.oldest(), Some(100));
+    }
+
+    /// A page of rows that are all reactions or edits adds no message, and its
+    /// oldest row is still how far back the thread has been read. Deriving that
+    /// from the messages instead left the next request asking from exactly where
+    /// this one did -- which, once the list asks for the page by itself, is a
+    /// request repeated for as long as the top of the thread is on screen.
+    #[test]
+    fn a_page_that_added_no_message_still_moves_the_mark_back() {
+        let sender = Uuid::new_v4();
+        let mut history = History::default();
+        history.merge(vec![message(200, sender, "b")], true, Some(200));
+
+        history.prepend(Vec::new(), true, Some(120));
+
+        assert_eq!(history.oldest(), Some(120));
+        assert!(history.has_more());
     }
 
     #[test]
