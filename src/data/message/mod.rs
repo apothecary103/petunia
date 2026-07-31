@@ -3,10 +3,10 @@ pub mod range;
 
 use uuid::Uuid;
 
-pub use project::{from_content, project, receipt_from_content};
+pub use project::{Fragment, classify, pointers, project, receipt_from_content};
 pub use range::Range;
 
-use super::attachment::Attachment;
+use super::attachment::{self, Attachment};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MessageId {
@@ -103,6 +103,53 @@ impl Message {
             Content::Text { ranges, .. } => ranges,
             _ => &[],
         }
+    }
+
+    /// Attachments live in four places on a message, and the same digest can
+    /// appear in more than one, so every match is updated.
+    pub fn set_blob(&mut self, id: &attachment::Id, blob: attachment::Blob) -> bool {
+        let mut found = false;
+        for attached in self.attachments_mut() {
+            if attached.id == *id {
+                attached.blob = blob.clone();
+                found = true;
+            }
+        }
+        found
+    }
+
+    /// Every attachment on the message, including the ones hanging off a quote,
+    /// a link preview or a sticker.
+    pub fn attachment_refs(&self) -> impl Iterator<Item = &Attachment> {
+        let sticker = match &self.content {
+            Content::Sticker(sticker) => sticker.image.as_ref(),
+            _ => None,
+        };
+
+        self.attachments
+            .iter()
+            .chain(self.quote.as_ref().and_then(|quote| quote.thumbnail.as_ref()))
+            .chain(self.preview.as_ref().and_then(|preview| preview.image.as_ref()))
+            .chain(sticker)
+    }
+
+    fn attachments_mut(&mut self) -> impl Iterator<Item = &mut Attachment> {
+        let sticker = match &mut self.content {
+            Content::Sticker(sticker) => sticker.image.as_mut(),
+            _ => None,
+        };
+
+        self.attachments
+            .iter_mut()
+            .chain(self.quote.as_mut().and_then(|quote| quote.thumbnail.as_mut()))
+            .chain(self.preview.as_mut().and_then(|preview| preview.image.as_mut()))
+            .chain(sticker)
+    }
+
+    /// Whether a reply, reaction or edit can target this. A tombstone and a
+    /// system line are neither.
+    pub fn is_addressable(&self) -> bool {
+        !matches!(self.content, Content::Deleted | Content::Update(_))
     }
 
     pub fn mentions(&self, uuid: Uuid) -> bool {

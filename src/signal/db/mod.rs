@@ -1,3 +1,4 @@
+pub mod blobs;
 pub mod messages;
 pub mod receipts;
 
@@ -15,7 +16,15 @@ pub struct Db {
 }
 
 /// Appended to, never edited: each entry is one schema version.
-const MIGRATIONS: &[&str] = &[include_str!("migrations/001_receipts.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("migrations/001_receipts.sql"),
+    include_str!("migrations/002_blobs.sql"),
+];
+
+#[cfg(test)]
+fn latest_version() -> i64 {
+    MIGRATIONS.len() as i64
+}
 
 impl Db {
     pub async fn open() -> Result<Self, Error> {
@@ -34,6 +43,12 @@ impl Db {
     }
 
     async fn migrate(&self) -> Result<(), Error> {
+        self.migrate_upto(MIGRATIONS.len()).await
+    }
+
+    /// Bounded so a test can build a database at an older version and then
+    /// migrate it forward, the way an existing install does.
+    async fn migrate_upto(&self, upto: usize) -> Result<(), Error> {
         sqlx::query("CREATE TABLE IF NOT EXISTS petunia_schema (version INTEGER NOT NULL)")
             .execute(&self.pool)
             .await?;
@@ -44,7 +59,7 @@ impl Db {
             .map(|row| row.get(0))
             .unwrap_or_default();
 
-        for (index, step) in MIGRATIONS.iter().enumerate().skip(applied as usize) {
+        for (index, step) in MIGRATIONS[..upto].iter().enumerate().skip(applied as usize) {
             let version = index as i64 + 1;
             let mut tx = self.pool.begin().await?;
             sqlx::raw_sql(*step).execute(&mut *tx).await?;

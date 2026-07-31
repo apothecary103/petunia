@@ -63,11 +63,29 @@ impl Entry {
     pub fn muted(&self, now: u64) -> bool {
         self.flags.muted_until.is_some_and(|until| until > now)
     }
+
+    /// Whether there is a conversation here, as opposed to merely a contact. The
+    /// contact store holds everyone the account has ever synced, and most of them
+    /// have never exchanged a message and carry no profile name -- listing them
+    /// fills the sidebar with uuid fragments. They stay reachable through the
+    /// quick switcher, which is where starting a new conversation belongs.
+    pub fn started(&self) -> bool {
+        // Unread as well as preview: a thread that is owed attention must be
+        // listed even if its preview never made it here.
+        self.preview.is_some() || self.unread > 0 || self.note_to_self
+    }
 }
 
 impl Index {
+    /// Every known thread, conversation or not. Use `conversations` for anything
+    /// that lists; this is for searching.
     pub fn entries(&self) -> &[Entry] {
         &self.entries
+    }
+
+    /// What the sidebar shows: threads with something in them.
+    pub fn conversations(&self) -> impl Iterator<Item = &Entry> {
+        self.entries.iter().filter(|entry| entry.started())
     }
 
     pub fn is_empty(&self) -> bool {
@@ -227,6 +245,10 @@ impl Index {
         }
     }
 
+    pub fn unread(&self, thread: &Thread) -> u32 {
+        self.get(thread).map_or(0, |entry| entry.unread)
+    }
+
     pub fn clear_unread(&mut self, thread: &Thread) {
         if let Some(entry) = self.entries.iter_mut().find(|e| e.thread == *thread) {
             entry.unread = 0;
@@ -240,6 +262,15 @@ impl Index {
         }
     }
 
+    /// Names arrive after the entry does -- a profile fetch is a round trip -- so
+    /// an entry's name has to be replaceable in place.
+    pub fn set_name(&mut self, thread: &Thread, name: String) {
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.thread == *thread) {
+            entry.name = name;
+        }
+        self.reorder();
+    }
+
     pub fn set_flags(&mut self, thread: &Thread, flags: Flags) {
         if let Some(entry) = self.entries.iter_mut().find(|e| e.thread == *thread) {
             entry.flags = flags;
@@ -247,8 +278,10 @@ impl Index {
         self.reorder();
     }
 
+    /// What the keyboard walks: exactly what the sidebar lists, so cycling never
+    /// lands somewhere the eye cannot follow.
     fn selectable(&self) -> impl Iterator<Item = &Entry> {
-        self.entries.iter().filter(|entry| !entry.flags.archived)
+        self.conversations().filter(|entry| !entry.flags.archived)
     }
 
     fn carry(&self, thread: Thread, name: String, note_to_self: bool) -> Entry {
@@ -366,6 +399,61 @@ mod tests {
         let (index, _) = index(std::slice::from_ref(&nameless), &[]);
 
         assert!(names(&index).contains(&&nameless.uuid.to_string()[..8]));
+    }
+
+    /// A synced contact with no messages is not a conversation. The store holds
+    /// hundreds of them, most with no name, and listing them made the sidebar a
+    /// wall of uuid fragments.
+    #[test]
+    fn only_threads_with_messages_are_conversations() {
+        let alice = contact("Alice");
+        let thread = Thread::Contact(ContactId::Aci(alice.uuid));
+        let (mut index, _) = index(&[alice.clone(), contact("")], &[group("Devs")]);
+
+        assert_eq!(index.conversations().count(), 1, "note to self only");
+
+        index.touch(&thread, &message(100, alice.uuid, "hi"), unknown);
+
+        let listed: Vec<_> = index.conversations().map(|e| e.name.as_str()).collect();
+        assert_eq!(listed, ["Alice", "Note to Self"]);
+    }
+
+    /// Note to Self is always there to be written in, even before it has anything
+    /// in it -- it is the one thread you can start without finding anyone.
+    #[test]
+    fn note_to_self_counts_as_a_conversation_while_empty() {
+        let (index, aci) = index(&[], &[]);
+
+        assert!(
+            index
+                .get(&Thread::Contact(ContactId::Aci(aci)))
+                .unwrap()
+                .started()
+        );
+    }
+
+    /// The switcher searches everything, so an unlisted contact is still one
+    /// keystroke away.
+    #[test]
+    fn every_contact_is_still_searchable() {
+        let (index, _) = index(&[contact("Alice")], &[]);
+
+        assert_eq!(index.entries().len(), 2);
+        assert_eq!(index.filtered("alice").count(), 1);
+    }
+
+    #[test]
+    fn cycling_skips_threads_the_sidebar_does_not_list() {
+        let alice = contact("Alice");
+        let thread = Thread::Contact(ContactId::Aci(alice.uuid));
+        let (mut index, aci) = index(&[alice.clone(), contact("Bob")], &[]);
+        index.touch(&thread, &message(100, alice.uuid, "hi"), unknown);
+
+        let walked: Vec<_> = (0..).map_while(|n| index.nth(n)).cloned().collect();
+
+        assert_eq!(walked.len(), 2);
+        assert!(walked.contains(&thread));
+        assert!(walked.contains(&Thread::Contact(ContactId::Aci(aci))));
     }
 
     #[test]
@@ -489,7 +577,15 @@ mod tests {
 
     #[test]
     fn cycles_forward_and_backward_with_wrapping() {
-        let (mut index, _) = index(&[contact("Alice"), contact("Bob")], &[]);
+        let (alice, bob) = (contact("Alice"), contact("Bob"));
+        let (mut index, _) = index(&[alice.clone(), bob.clone()], &[]);
+        for who in [&alice, &bob] {
+            index.touch(
+                &Thread::Contact(ContactId::Aci(who.uuid)),
+                &message(100, who.uuid, "hi"),
+                unknown,
+            );
+        }
         index.set_sort(Sort::Name);
 
         let first = index.nth(0).unwrap().clone();

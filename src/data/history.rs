@@ -1,5 +1,6 @@
 use uuid::Uuid;
 
+use super::attachment;
 use super::message::project;
 use super::{Message, MessageId, Reaction, Status};
 
@@ -9,6 +10,9 @@ pub struct History {
     oldest: Option<u64>,
     more: bool,
     loading: bool,
+    /// Where the "new" divider sits. Pinned when the thread is opened rather
+    /// than recomputed, so it does not jump as messages are read.
+    first_unread: Option<u64>,
 }
 
 impl History {
@@ -38,6 +42,16 @@ impl History {
 
     pub fn set_loading(&mut self, loading: bool) {
         self.loading = loading;
+    }
+
+    pub fn first_unread(&self) -> Option<u64> {
+        self.first_unread
+    }
+
+    /// Called when the thread is opened with unread messages, so the divider
+    /// stays put while the reader catches up.
+    pub fn mark_unread_from(&mut self, timestamp: Option<u64>) {
+        self.first_unread = timestamp;
     }
 
     pub fn find(&self, id: &MessageId) -> Option<&Message> {
@@ -102,6 +116,14 @@ impl History {
     pub fn apply_reaction(&mut self, target: &MessageId, reaction: Reaction, remove: bool) {
         if let Some(index) = self.index_of(target) {
             project::apply_reaction(&mut self.messages[index], reaction, remove);
+        }
+    }
+
+    /// A digest is shared by every copy of the same bytes, so a single download
+    /// resolves the attachment wherever it was forwarded to.
+    pub fn set_blob(&mut self, id: &attachment::Id, blob: attachment::Blob) {
+        for message in &mut self.messages {
+            message.set_blob(id, blob.clone());
         }
     }
 

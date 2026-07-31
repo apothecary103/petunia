@@ -11,6 +11,7 @@ pub use history::History;
 pub use index::Index;
 pub use state::State;
 pub use message::{
-    Message, MessageId, Reaction, Status, from_content, project, receipt_from_content,
+    Fragment, Message, MessageId, Reaction, Status, classify, pointers, project,
+    receipt_from_content,
 };
 pub use thread::{ContactId, Thread};

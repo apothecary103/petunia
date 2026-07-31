@@ -1,13 +1,56 @@
-use crate::data::Thread;
+use std::path::PathBuf;
+
+use crate::data::attachment;
+use crate::data::message::Range;
+use crate::data::{MessageId, Thread};
 
 /// How many renderable messages a page aims to produce.
 pub const PAGE: u32 = 50;
+
+/// What a reply needs to know about the message it answers.
+#[derive(Debug, Clone)]
+pub struct Quoted {
+    pub id: MessageId,
+    pub body: String,
+    pub ranges: Vec<Range>,
+}
 
 #[derive(Debug, Clone)]
 pub enum Command {
     SendText {
         thread: Thread,
         body: String,
+        /// Set when this is a reply; carries a snapshot of the quoted message
+        /// because the recipient may not have the original.
+        quote: Option<Quoted>,
+        timestamp: u64,
+    },
+    React {
+        thread: Thread,
+        target: MessageId,
+        emoji: String,
+        remove: bool,
+        timestamp: u64,
+    },
+    /// Only ever our own messages: Signal has no way to delete someone else's.
+    DeleteMessage {
+        thread: Thread,
+        target: u64,
+        timestamp: u64,
+    },
+    EditMessage {
+        thread: Thread,
+        target: u64,
+        body: String,
+        timestamp: u64,
+    },
+    /// Uploads the files, then sends them with an optional caption. Paths rather
+    /// than bytes: the worker reads them, so the UI never holds an attachment.
+    SendAttachments {
+        thread: Thread,
+        body: String,
+        paths: Vec<PathBuf>,
+        quote: Option<Quoted>,
         timestamp: u64,
     },
     LoadThread {
@@ -15,6 +58,24 @@ pub enum Command {
         /// Loads the messages immediately older than this timestamp; `None`
         /// loads the newest page.
         before: Option<u64>,
+    },
+    /// Marks everything up to and including `upto` read: sends READ receipts to
+    /// the senders and a read sync to our own other devices.
+    MarkRead {
+        thread: Thread,
+        /// Whose message, and when, for each receipt that is owed.
+        messages: Vec<(uuid::Uuid, u64)>,
+    },
+    Typing {
+        thread: Thread,
+        started: bool,
+    },
+    /// Fetches an attachment the auto-download policy skipped. The pointer is
+    /// re-read from the stored row rather than carried through the UI.
+    DownloadAttachment {
+        thread: Thread,
+        timestamp: u64,
+        id: attachment::Id,
     },
 }
 

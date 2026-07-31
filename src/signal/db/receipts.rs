@@ -334,7 +334,7 @@ mod tests {
     async fn drops_the_legacy_table_on_a_fresh_database() {
         let db = Db::open_in_memory().await.unwrap();
 
-        assert_eq!(db.version().await.unwrap(), 1);
+        assert_eq!(db.version().await.unwrap(), super::super::latest_version());
         assert!(!db.table_exists("petunia_message_status").await.unwrap());
         assert!(db.statuses(&[1, 2], 1).await.unwrap().is_empty());
     }
@@ -373,11 +373,32 @@ mod tests {
         assert_eq!(statuses.get(&200), Some(&Status::Sent));
     }
 
+    /// The case a real install hits: a database already at an older version gains
+    /// the new step without losing what the earlier one back-filled.
+    #[tokio::test]
+    async fn an_existing_database_migrates_forward_without_loss() {
+        let db = Db::open_in_memory_unmigrated().await.unwrap();
+        db.seed_legacy_status(7, 4).await.unwrap(); // Read
+        db.migrate_upto(1).await.unwrap();
+
+        assert_eq!(db.version().await.unwrap(), 1);
+        assert!(!db.table_exists("petunia_blob").await.unwrap());
+
+        db.migrate().await.unwrap();
+
+        assert_eq!(db.version().await.unwrap(), super::super::latest_version());
+        assert!(db.table_exists("petunia_blob").await.unwrap());
+        assert_eq!(
+            db.statuses(&[7], 1).await.unwrap().get(&7),
+            Some(&Status::Read)
+        );
+    }
+
     #[tokio::test]
     async fn migrating_twice_is_a_no_op() {
         let db = Db::open_in_memory().await.unwrap();
         db.migrate().await.unwrap();
 
-        assert_eq!(db.version().await.unwrap(), 1);
+        assert_eq!(db.version().await.unwrap(), super::super::latest_version());
     }
 }

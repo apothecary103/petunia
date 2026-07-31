@@ -68,6 +68,28 @@ impl Db {
         Ok(Page { rows, more })
     }
 
+    /// A single stored row, so an attachment download can recover the pointer
+    /// without it having been carried through the UI.
+    pub async fn row(&self, thread: &Thread, timestamp: u64) -> Result<Option<Envelope>, Error> {
+        let sql = format!(
+            "SELECT {COLUMNS} FROM thread_messages m
+            WHERE m.thread_id = (
+                SELECT id FROM threads WHERE group_master_key = ?1 OR recipient_id = ?2
+            )
+            AND m.ts = ?3"
+        );
+
+        let (master_key, recipient) = keys(thread);
+        Ok(sqlx::query(AssertSqlSafe(sql))
+            .bind(master_key)
+            .bind(recipient)
+            .bind(timestamp as i64)
+            .fetch_optional(&self.pool)
+            .await?
+            .as_ref()
+            .and_then(decode))
+    }
+
     /// The newest rows of every thread that has any, in one statement. The old
     /// path walked every contact and group and loaded each thread in full,
     /// which cost O(all messages) at startup.

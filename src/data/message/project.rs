@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use presage::libsignal_service::content::{Content as Envelope, ContentBody};
 use presage::libsignal_service::proto::sync_message::Sent;
 use presage::libsignal_service::proto::{
-    DataMessage, EditMessage, SyncMessage, data_message, receipt_message,
+    AttachmentPointer, DataMessage, EditMessage, SyncMessage, data_message, receipt_message,
 };
 use presage::store::ContentExt;
 use uuid::Uuid;
@@ -116,6 +116,42 @@ pub fn apply_delete(message: &mut Message) {
     message.quote = None;
     message.preview = None;
     message.reactions.clear();
+}
+
+/// Every downloadable pointer a stored row carries, paired with the id the UI
+/// knows it by. The pointers themselves are never handed to the UI -- they are
+/// bulky, protocol-shaped and expire -- so the worker re-reads them from the
+/// store when a download is asked for.
+pub fn pointers(envelope: &Envelope) -> Vec<(attachment::Id, AttachmentPointer)> {
+    let Some(body) = body(&envelope.body) else {
+        return Vec::new();
+    };
+    let data = match body {
+        Body::Data(data) => data,
+        Body::Edit(edit) => match &edit.data_message {
+            Some(data) => data,
+            None => return Vec::new(),
+        },
+    };
+
+    let quote = data
+        .quote
+        .iter()
+        .flat_map(|quote| quote.attachments.iter())
+        .filter_map(|attached| attached.thumbnail.as_ref());
+    let preview = data.preview.iter().filter_map(|preview| preview.image.as_ref());
+    let sticker = data.sticker.iter().filter_map(|sticker| sticker.data.as_ref());
+
+    data.attachments
+        .iter()
+        .chain(quote)
+        .chain(preview)
+        .chain(sticker)
+        .filter_map(|pointer| {
+            let id = attachment::from_pointer(pointer)?.id;
+            Some((id, pointer.clone()))
+        })
+        .collect()
 }
 
 /// Kept as the single-message entry point for the receive path; history loading

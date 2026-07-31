@@ -1,3 +1,4 @@
+mod cache;
 mod command;
 mod db;
 mod event;
@@ -6,8 +7,8 @@ mod store;
 pub mod subscription;
 mod worker;
 
-pub use command::Command;
-pub use event::Event;
+pub use command::{Command, Quoted};
+pub use event::{Connection, Event};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
