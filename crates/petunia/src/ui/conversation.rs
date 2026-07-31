@@ -566,9 +566,10 @@ impl Render for Conversation {
         })
         .flex_1()
         .w_full()
-        .max_w(px(kit::MEASURE))
-        .mx_auto()
-        .px(px(spacing.padding_x))
+        // Vertical only. gpui's `list` takes each row's origin from the left edge
+        // of its own bounds and never reads `padding.left`, so side padding here
+        // does nothing at all -- which is why it belongs to the wrapper below.
+        // The top and bottom are honoured, and want to be inside the scroller.
         .py(px(spacing.padding_y));
 
         div()
@@ -588,7 +589,15 @@ impl Render for Conversation {
                         .update(cx, |composer, cx| composer.attach(paths, cx));
                 },
             ))
-            .child(div().flex_1().min_h_0().flex().flex_col().child(list))
+            .child(
+                kit::measured()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .px(px(spacing.padding_x))
+                    .child(list),
+            )
             .child(self.composer.clone())
             .into_any_element()
     }

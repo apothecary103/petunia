@@ -60,5 +60,5 @@ curve25519-dalek = { git = "https://github.com/signalapp/curve25519-dalek", tag 
 opt-level = 3           # Max speed optimizations (SIMD, aggressive inlining, unrolling)
 lto = "fat"             # Full Link-Time Optimization (inlines across crates, removes unused dead code)
 codegen-units = 1       # Single code generation unit (gives LLVM total program visibility)
-# panic = "abort"       # Removes panic-unwinding tables (~10-20% size reduction, minor speed boost)
+panic = "abort"       # Removes panic-unwinding tables (~10-20% size reduction, minor speed boost)
 strip = true            # Strips symbol tables (reduces binary disk size; 0 impact on runtime performance)

@@ -292,13 +292,23 @@ fn quote(quote: &data_message::Quote) -> Option<Quote> {
     let id = target_id(quote.id, &quote.author_aci, &quote.author_aci_binary)?;
     let body = quote.text().to_string();
 
+    let attached = quote.attachments.first();
+
     Some(Quote {
         id,
         ranges: range::from_proto(&body, &quote.body_ranges),
         body,
-        thumbnail: quote
-            .attachments
-            .first()
+        // The file's own name for a file, and what it is for anything with a
+        // shape of its own -- "report.pdf" says more than "File", and "Photo"
+        // says more than a camera's serial number.
+        media: attached.map(|attached| {
+            let kind = attachment::classify(attached.content_type(), None);
+            match (&kind, attached.file_name.as_deref()) {
+                (attachment::Kind::File, Some(name)) if !name.is_empty() => name.to_owned(),
+                _ => kind.label().to_owned(),
+            }
+        }),
+        thumbnail: attached
             .and_then(|attached| attached.thumbnail.as_ref())
             .and_then(attachment::from_pointer),
     })
@@ -818,5 +828,43 @@ mod tests {
         assert_eq!(quote.id.timestamp, 100);
         assert_eq!(quote.id.sender, author);
         assert_eq!(quote.body, "original");
+        assert_eq!(quote.media, None);
+    }
+
+    /// A picture sent with no caption quotes as no text at all, so the quote has
+    /// to carry what it *was* or the bar draws a name over an empty line.
+    #[test]
+    fn a_quote_of_media_says_what_was_quoted() {
+        let quoted = |content_type: &str, file_name: Option<&str>| {
+            let content = Envelope::from_body(
+                DataMessage {
+                    body: Some("nice".into()),
+                    timestamp: Some(200),
+                    quote: Some(data_message::Quote {
+                        id: Some(100),
+                        author_aci_binary: Some(Uuid::new_v4().as_bytes().to_vec()),
+                        attachments: vec![data_message::quote::QuotedAttachment {
+                            content_type: Some(content_type.into()),
+                            file_name: file_name.map(str::to_owned),
+                            thumbnail: None,
+                        }],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                metadata(Uuid::new_v4(), 200),
+            );
+            from_content(&content).unwrap().1.quote.unwrap().media
+        };
+
+        assert_eq!(quoted("image/jpeg", None).as_deref(), Some("Photo"));
+        assert_eq!(quoted("video/mp4", None).as_deref(), Some("Video"));
+        // A file has nothing to look at, so its name is the only useful thing to
+        // say about it.
+        assert_eq!(
+            quoted("application/pdf", Some("report.pdf")).as_deref(),
+            Some("report.pdf")
+        );
+        assert_eq!(quoted("application/pdf", None).as_deref(), Some("File"));
     }
 }

@@ -15,6 +15,7 @@ use petunia_config::messages::Spacing;
 use petunia_data::attachment::Blob;
 use petunia_data::message::{Content, Quote, Range, Status, Sticker, Update};
 use petunia_data::{Message, State};
+use crate::ui::image;
 use crate::ui::kit;
 
 /// Everything one message shows: its body, whatever it carries, and whatever
@@ -445,6 +446,7 @@ fn styled(body: &str, ranges: &[Range], state: &State, theme: &Theme) -> StyledT
     let segments = format::segments(body, ranges);
     let mut text = String::new();
     let mut highlights = Vec::new();
+    let mut mono = Vec::new();
 
     for segment in segments {
         let styles = segment.styles;
@@ -464,12 +466,22 @@ fn styled(body: &str, ranges: &[Range], state: &State, theme: &Theme) -> StyledT
             (false, None) => text.push_str(&body[segment.start..segment.end]),
         }
 
+        // `HighlightStyle` has no family to set, so a monospace *span* cannot be
+        // spelled as a highlight -- which is why `` `bat` `` read as the body
+        // font with a faint wash behind it. An override names the family for the
+        // run, inside the one text layout, so the line still wraps as a line
+        // rather than becoming a row of elements that wrap at their own edges.
+        if styles.monospace && !styles.spoiler {
+            mono.push((start..text.len(), theme.typography.mono.clone().into()));
+        }
         if let Some(highlight) = highlight(styles, theme) {
             highlights.push((start..text.len(), highlight));
         }
     }
 
-    StyledText::new(text).with_highlights(highlights)
+    StyledText::new(text)
+        .with_highlights(highlights)
+        .with_font_family_overrides(mono)
 }
 
 fn highlight(styles: format::Styles, theme: &Theme) -> Option<HighlightStyle> {
@@ -523,11 +535,34 @@ fn highlight(styles: format::Styles, theme: &Theme) -> Option<HighlightStyle> {
 fn quoted(quote: &Quote, state: &State, theme: &Theme, spacing: Spacing) -> Div {
     let author = state.sender_name(quote.id.sender);
     let tint = theme.accent_for(quote.id.sender.as_bytes());
+    // A picture with no caption has no text to quote, so the bar says what it
+    // was instead of leaving a blank line where the words would have been. The
+    // caption wins when there is one, because that is what was said.
+    let words = (!quote.body.is_empty()).then(|| styled(&quote.body, &quote.ranges, state, theme));
+    let named = words.is_none().then(|| quote.media.clone()).flatten();
+    let still = match quote.thumbnail.as_ref().map(|thumbnail| &thumbnail.blob) {
+        Some(Blob::Cached(path)) => Some(path.clone()),
+        _ => None,
+    };
+    // Square, at the height the two lines beside it come to, so the bar keeps
+    // its shape whether a still arrived or not.
+    let edge = spacing.small * 2.0 + spacing.body;
 
     div()
         .flex()
         .gap_2p5()
         .child(div().w_px().flex_none().bg(tint).rounded_full())
+        .when_some(still, |this, path| {
+            this.child(
+                div()
+                    .flex_none()
+                    .size(px(edge))
+                    .overflow_hidden()
+                    .rounded(px(4.0))
+                    .bg(theme.surface)
+                    .child(image::cropped(path, edge)),
+            )
+        })
         .child(
             div()
                 .flex()
@@ -540,13 +575,24 @@ fn quoted(quote: &Quote, state: &State, theme: &Theme, spacing: Spacing) -> Div 
                         .text_color(tint)
                         .child(SharedString::from(author)),
                 )
-                .child(
-                    div()
-                        .truncate()
-                        .text_size(px(spacing.small))
-                        .text_color(theme.text_muted)
-                        .child(styled(&quote.body, &quote.ranges, state, theme)),
-                ),
+                .when_some(words, |this, words| {
+                    this.child(
+                        div()
+                            .truncate()
+                            .text_size(px(spacing.small))
+                            .text_color(theme.text_muted)
+                            .child(words),
+                    )
+                })
+                .when_some(named, |this, named| {
+                    this.child(
+                        div()
+                            .truncate()
+                            .text_size(px(spacing.small))
+                            .text_color(theme.text_dim)
+                            .child(SharedString::from(named)),
+                    )
+                }),
         )
 }
 

@@ -34,6 +34,23 @@ pub struct Attachment {
     pub blob: Blob,
 }
 
+impl Kind {
+    /// What to call it in a line of text -- a sidebar preview, or a quote of a
+    /// message that was a picture rather than words. One vocabulary, so the two
+    /// never call the same thing by different names.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Image { .. } => "Photo",
+            Self::Video { .. } => "Video",
+            Self::Audio {
+                voice_note: true, ..
+            } => "Voice message",
+            Self::Audio { .. } => "Audio",
+            Self::File => "File",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Kind {
     Image {
@@ -152,7 +169,10 @@ fn kind(pointer: &AttachmentPointer, content_type: &str) -> Kind {
     classify(content_type, size(pointer))
 }
 
-fn classify(content_type: &str, size: Option<Size>) -> Kind {
+/// What a content type makes something, which is all a quote gets told about the
+/// message it answers: Signal sends the type and the file name beside the
+/// thumbnail, and no dimensions.
+pub fn classify(content_type: &str, size: Option<Size>) -> Kind {
     match content_type.split('/').next().unwrap_or_default() {
         "image" => Kind::Image { size },
         "video" => Kind::Video {

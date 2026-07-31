@@ -47,6 +47,13 @@ pub struct Quote {
     pub id: MessageId,
     pub body: String,
     pub ranges: Vec<Range>,
+    /// What was quoted, when it was not words: a photo with no caption has no
+    /// text to quote, and a bar with nothing in it reads as broken. Signal sends
+    /// the content type and the file name beside the thumbnail, so there is
+    /// something to say even when no thumbnail arrives.
+    pub media: Option<String>,
+    /// The still that came with the quote, if one did. Downloaded like any other
+    /// attachment -- `pointers` collects it and `attachments_mut` reaches it.
     pub thumbnail: Option<Attachment>,
 }
 
@@ -204,19 +211,9 @@ impl Message {
     }
 
     fn attachment_summary(&self) -> &'static str {
-        use crate::attachment::Kind;
-
         match self.attachments.as_slice() {
             [] => "",
-            [one] => match one.kind {
-                Kind::Image { .. } => "Photo",
-                Kind::Video { .. } => "Video",
-                Kind::Audio {
-                    voice_note: true, ..
-                } => "Voice message",
-                Kind::Audio { .. } => "Audio",
-                Kind::File => "File",
-            },
+            [one] => one.kind.label(),
             _ => "Attachments",
         }
     }

@@ -246,10 +246,19 @@ impl Store {
             return;
         }
 
-        let quote = match &intent {
-            Some(Intent::Reply { target, .. }) => self.quoted(*target),
+        let target = match &intent {
+            Some(Intent::Reply { target, .. }) => Some(*target),
             _ => None,
         };
+        let quote = target.and_then(|target| self.quoted(target));
+        // The wire carries no thumbnail with a quote of ours, but the original is
+        // right here -- so the echo shows the picture it is answering rather than
+        // the word "Photo", which is what an incoming quote of media looks like.
+        let still = target
+            .and_then(|target| self.original(&target))
+            .and_then(|message| message.attachments.first())
+            .filter(|attached| matches!(attached.kind, data::attachment::Kind::Image { .. }))
+            .cloned();
 
         let mut echo = data::Message::written(
             MessageId {
@@ -265,7 +274,11 @@ impl Store {
                 id: quoted.id,
                 body: quoted.body.clone(),
                 ranges: quoted.ranges.clone(),
-                thumbnail: None,
+                // `Quoted::body` is already `Message::summary`, so a reply to a
+                // picture carries "Photo" as its text and needs nothing further
+                // to say.
+                media: None,
+                thumbnail: still,
             })
         });
         for path in &attachments {
@@ -346,15 +359,20 @@ impl Store {
         cx.notify();
     }
 
-    /// A reply carries a snapshot of what it answers, because the recipient may
-    /// not have the original.
-    fn quoted(&self, target: MessageId) -> Option<Quoted> {
-        let message = self
-            .state
+    /// The message an id names. Every thread, because a reply is composed against
+    /// whatever is on screen and the id says nothing about which thread that is.
+    fn original(&self, target: &MessageId) -> Option<&data::Message> {
+        self.state
             .as_ref()?
             .histories
             .values()
-            .find_map(|history| history.find(&target))?;
+            .find_map(|history| history.find(target))
+    }
+
+    /// A reply carries a snapshot of what it answers, because the recipient may
+    /// not have the original.
+    fn quoted(&self, target: MessageId) -> Option<Quoted> {
+        let message = self.original(&target)?;
 
         Some(Quoted {
             id: target,
