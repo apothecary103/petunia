@@ -57,8 +57,12 @@ groups = "all"
 # control elsewhere, so one file works on both. Set a binding to "none" to
 # remove it. Press cmd+/ in the app for the current list.
 [keys]
+# Where the bindings start from: "standard", "emacs" or "vim". Anything below
+# merges on top, so a preset is a starting point rather than a cage.
+# preset = "standard"
 # quick-switcher = "cmd+k"
 # search = "cmd+f"
+# search-thread = "cmd+shift+f"
 # focus-composer = "cmd+l"
 # toggle-sidebar = "cmd+b"
 # toggle-details = "cmd+i"
