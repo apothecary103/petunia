@@ -90,6 +90,17 @@ Every one of these has already cost a debugging session.
   Convert at the boundary.
 - **Commands sent before the worker reports in** used to be dropped. The window
   is clickable a second or two before `Event::Ready`; `Store` queues and flushes.
+- **`dirs::config_dir()` is not `~/.config` on macOS.** It is Application
+  Support, which is where an application keeps its own state, not where a person
+  keeps a file they edit. `config::dir()` prefers `~/.config/petunia` there, as
+  Zed does, and falls back to the old location when the file is already in it.
+- **There is no tokio runtime on the UI side.** `tokio::time::timeout` and
+  friends panic outright there; use `cx.background_executor().timer`. The Signal
+  worker has its own runtime and is the only place tokio's timers are safe.
+- **gpui's `surface` asserts its pixel format.** It builds two Metal textures
+  from a buffer's luma and chroma planes and requires bi-planar YCbCr; anything
+  else aborts the process from inside the renderer with two integers for a
+  message. `video.rs` checks before handing one over.
 - **`max_w`/`max_h` on an image is not enough.** An image's natural size is its
   pixel size, so the fitted size is computed from the pointer's dimensions.
 - **`clear_key_bindings` clears everyone's.** `actions::bind` wipes the whole

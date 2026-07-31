@@ -4,7 +4,7 @@ Petunia reads and writes a real conversation. The sidebar, the message list, the
 composer, the media viewer, playback and the details panel are all live against
 a linked account.
 
-289 tests pass and `cargo clippy --all-targets` is clean. `cargo test`, and
+350 tests pass and `cargo clippy --all-targets` is clean. `cargo test`, and
 `cargo build && ./target/debug/petunia` to run it.
 
 ## What works
@@ -25,10 +25,20 @@ a linked account.
   into gpui's surface element, with play, scrub and a clock.
 - **Groups.** Members with roles and the labels Signal lets people pick for
   themselves, descriptions, invite and request counts, the disappearing timer.
-- **Receipts.** Ticks rather than words, read state written down, and reading on
-  another device clears the badge here.
-- **Chrome.** Quick switcher (cmd+k), keyboard sheet (cmd+/), conversation
-  cycling, error notices, themes and hot reload.
+- **Receipts.** A tick beside the text rather than a line of its own, read state
+  written down, and reading on another device clears the badge here.
+- **Markdown**, both ways: what you type is parsed into `BodyRange`s on send, and
+  what arrives with no ranges is parsed for display. Fenced blocks get a box and
+  tree-sitter highlighting in the theme's own syntax palette.
+- **Finding things.** cmd+f over every conversation, cmd+shift+f over the one on
+  screen, cmd+k to jump to a conversation.
+- **The list.** Pinning, archiving, muting and flat folders, from right-click
+  menus; menus on messages and people too.
+- **Settings** (cmd+,) over every preference, writing `config.toml` so the file
+  stays authoritative. Keybinding presets: standard, emacs, vim.
+- **Themes.** Petunia's two, and all eleven of Zed's, compiled in.
+- **Chrome.** Keyboard sheet (cmd+/), conversation cycling, error notices, hot
+  reload, and a translucent sidebar over the desktop on macOS.
 
 ## What is left
 
@@ -41,30 +51,26 @@ Roughly in the order it would be worth doing.
   are styled, but only whole-message clicks are routed. Both need per-span
   hit-testing (`InteractiveText`), with reveal state keyed by message timestamp
   and segment start.
+- **Emoji picker.** The sticker picker's shape carries over.
 - **Mention autocomplete** in the composer, and `:shortcode:` completion. The
   mention *rendering* side is done.
-- **Emoji picker.** The sticker picker's shape carries over.
+- **Notifications.** `[notifications]` is settable and nothing reads it, which
+  the settings window says out loud rather than pretending otherwise.
 - **Per-thread drafts** — body and ranges only, never attachment paths.
-- **Desktop notifications.** `[notifications]` is parsed and has no consumer.
-  Needs `notify-rust`, suppressed when the window is focused and the thread is
-  active. Note that an unbundled binary's notifications are attributed to the
-  parent process on macOS.
-- **Pinned, archived, muted.** `Index::Flags` and the sections exist and are
-  tested; `set_flags` is test-only until there is a `petunia_thread_flags` table
-  to persist them in. The sidebar already renders the sections, empty.
-- **Message search.** FTS5 over presage's `thread_messages`. Wants
-  scroll-to-message, so `ListState` first.
 - **Jump to a quoted message.** The quote block is deliberately not clickable:
   a target outside the loaded page needs a `Command::LoadAround` that does not
   exist, and a control that silently does nothing is worse than none.
 - **Disappearing messages.** The timer is read and shown; nothing expires
   anything. presage negotiates the timer but never deletes, and never stores
   `expirationStartTimestamp`, so the reaper is ours.
-- **Blurhash placeholders.** Parsing was removed rather than left unused —
-  Signal sends the hash, and nothing here can draw one yet.
 - **Squash-friendly history, and a PR to `main` from `gpui-rewrite`.**
 
 ## Known limits
+
+- **Pins, archives and folders are local.** Signal keeps the first two in its
+  Storage Service, which libsignal-service exposes read-only and presage neither
+  uses nor exposes; folders it has no concept of. They survive a restart; they do
+  not follow you to your phone.
 
 - **Download progress is indeterminate.** presage hands back a whole attachment
   and verifies the digest before it returns, so there is no byte count to show.
