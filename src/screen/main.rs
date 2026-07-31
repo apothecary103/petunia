@@ -44,7 +44,7 @@ impl Main {
             .next()
             .map(|(pane, _)| *pane)
             .expect("pane grid has at least one pane");
-        let commands = threads.into_iter().map(signal::Command::LoadThread).collect();
+        let commands = threads.into_iter().map(signal::Command::load).collect();
 
         (
             Self {
@@ -110,35 +110,39 @@ impl Main {
         match buffer.update(message, &self.state) {
             pane::Action::None => Vec::new(),
             pane::Action::Command(command) => {
-                self.echo(&command);
+                self.apply_locally(&command);
                 vec![command]
             }
         }
     }
 
-    /// Shows a sent message immediately; the stored row replaces it when the
-    /// thread is next loaded.
-    fn echo(&mut self, command: &signal::Command) {
-        let signal::Command::SendText {
-            thread,
-            body,
-            timestamp,
-        } = command
-        else {
-            return;
-        };
-        let message = data::Message {
-            status: Some(data::Status::Sending),
-            ..data::Message::plain(
-                data::MessageId {
-                    timestamp: *timestamp,
-                    sender: self.state.aci,
-                },
-                body.clone(),
-            )
-        };
-        self.state.record(thread, &message);
-        self.state.history_mut(thread).insert(message);
+    /// Reflects a command in local state before the worker answers: a sent
+    /// message appears immediately, and a page request marks the thread loading
+    /// so it cannot be requested twice.
+    fn apply_locally(&mut self, command: &signal::Command) {
+        match command {
+            signal::Command::SendText {
+                thread,
+                body,
+                timestamp,
+            } => {
+                let message = data::Message {
+                    status: Some(data::Status::Sending),
+                    ..data::Message::plain(
+                        data::MessageId {
+                            timestamp: *timestamp,
+                            sender: self.state.aci,
+                        },
+                        body.clone(),
+                    )
+                };
+                self.state.record(thread, &message);
+                self.state.history_mut(thread).insert(message);
+            }
+            signal::Command::LoadThread { thread, .. } => {
+                self.state.history_mut(thread).set_loading(true);
+            }
+        }
     }
 
     fn open_thread(&mut self, thread: Thread) -> Vec<signal::Command> {
@@ -148,7 +152,11 @@ impl Main {
         }
         match self.state.history(&thread) {
             Some(history) if !history.is_empty() => Vec::new(),
-            _ => vec![signal::Command::LoadThread(thread)],
+            _ => {
+                let command = signal::Command::load(thread);
+                self.apply_locally(&command);
+                vec![command]
+            }
         }
     }
 
@@ -165,11 +173,23 @@ impl Main {
             signal::Event::Preview { thread, message } => {
                 self.state.record(&thread, &message);
             }
-            signal::Event::History { thread, messages } => {
-                if let Some(last) = messages.last().cloned() {
+            signal::Event::History {
+                thread,
+                messages,
+                more,
+                older,
+            } => {
+                if !older
+                    && let Some(last) = messages.last().cloned()
+                {
                     self.state.record(&thread, &last);
                 }
-                self.state.history_mut(&thread).merge(messages, false);
+                let history = self.state.history_mut(&thread);
+                if older {
+                    history.prepend(messages, more);
+                } else {
+                    history.merge(messages, more);
+                }
             }
             signal::Event::Message { thread, message } => self.message_received(thread, message),
             signal::Event::MessageStatus { timestamps, status } => {
