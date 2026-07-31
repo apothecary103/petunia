@@ -4,8 +4,7 @@ use futures::channel::{mpsc, oneshot};
 use futures::{SinkExt, StreamExt, future, pin_mut};
 use presage::Manager;
 use presage::libsignal_service::configuration::SignalServers;
-use presage::libsignal_service::content::{Content, DataMessage, GroupContextV2, Metadata};
-use presage::libsignal_service::protocol::ServiceId;
+use presage::libsignal_service::content::{DataMessage, GroupContextV2};
 use presage::libsignal_service::zkgroup::profiles::ProfileKey;
 use presage::manager::Registered;
 use presage::model::messages::Received;
@@ -16,7 +15,7 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use super::db::Db;
-use super::{Command, Error, Event, store};
+use super::{Command, Error, Event, outgoing, store};
 use crate::data::{self, Contact, ContactId, Group, Thread};
 
 type Events = mpsc::Sender<Event>;
@@ -90,17 +89,18 @@ async fn serve(mut commands: UnboundedReceiver<Command>, mut events: Events) -> 
             _ = &mut queue_rx, if !queue_drained => {
                 queue_drained = true;
                 info!(pending = pending.len(), "message queue drained");
-                for (thread, body, timestamp) in pending.drain(..) {
-                    send(&mut manager, &db, &mut events, thread, body, timestamp).await;
+                for (thread, message, timestamp) in pending.drain(..) {
+                    send(&mut manager, &db, &mut events, thread, message, timestamp).await;
                 }
             }
             command = commands.recv() => match command {
                 Some(Command::SendText { thread, body, timestamp }) => {
-                    save_outgoing(&manager, &db, &thread, &body, timestamp).await;
+                    let message = outgoing::text(&thread, body, timestamp);
+                    save_outgoing(&manager, &db, &thread, message.clone(), timestamp).await;
                     if queue_drained {
-                        send(&mut manager, &db, &mut events, thread, body, timestamp).await;
+                        send(&mut manager, &db, &mut events, thread, message, timestamp).await;
                     } else {
-                        pending.push((thread, body, timestamp));
+                        pending.push((thread, message, timestamp));
                     }
                 }
                 Some(Command::LoadThread { thread, before }) => {
@@ -216,49 +216,19 @@ async fn receive_once(
     Ok(())
 }
 
-fn text_message(thread: &Thread, body: String, timestamp: u64) -> DataMessage {
-    let group_v2 = match thread {
-        Thread::Contact(_) => None,
-        Thread::Group(master_key) => Some(GroupContextV2 {
-            master_key: Some(master_key.to_vec()),
-            revision: Some(0),
-            ..Default::default()
-        }),
-    };
-    DataMessage {
-        body: Some(body),
-        timestamp: Some(timestamp),
-        group_v2,
-        ..Default::default()
-    }
-}
-
 async fn save_outgoing(
     manager: &RegisteredManager,
     db: &Db,
     thread: &Thread,
-    body: &str,
+    message: DataMessage,
     timestamp: u64,
 ) {
-    let aci = manager.registration_data().service_ids.aci;
-    let time = chrono::DateTime::from_timestamp_millis(timestamp as i64).unwrap_or_default();
-    let destination = match thread {
-        Thread::Contact(contact) => contact.into(),
-        Thread::Group(_) => ServiceId::Aci(aci.into()),
-    };
-    let content = Content::from_body(
-        text_message(thread, body.to_string(), timestamp),
-        Metadata {
-            sender: ServiceId::Aci(aci.into()),
-            destination,
-            sender_device: manager.device_id(),
-            timestamp: time,
-            server_timestamp: time,
-            needs_receipt: false,
-            unidentified_sender: false,
-            was_plaintext: false,
-            server_guid: None,
-        },
+    let content = outgoing::envelope(
+        manager.registration_data().service_ids.aci,
+        manager.device_id(),
+        thread,
+        message,
+        timestamp,
     );
 
     if let Err(error) = manager.store().save_message(&thread.into(), content).await {
@@ -277,10 +247,10 @@ async fn send(
     db: &Db,
     events: &mut Events,
     thread: Thread,
-    body: String,
+    message: DataMessage,
     timestamp: u64,
 ) {
-    let status = match send_text(manager, &thread, body, timestamp).await {
+    let status = match send_message(manager, &thread, message, timestamp).await {
         Ok(()) => data::Status::Sent,
         Err(error) => {
             error!(%error, "failed to send message");
@@ -300,13 +270,12 @@ async fn send(
     .await;
 }
 
-async fn send_text(
+async fn send_message(
     manager: &mut RegisteredManager,
     thread: &Thread,
-    body: String,
+    message: DataMessage,
     timestamp: u64,
 ) -> Result<(), Error> {
-    let message = text_message(thread, body, timestamp);
     match thread {
         Thread::Contact(contact) => {
             manager.send_message(contact, message, timestamp).await?;

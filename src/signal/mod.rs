@@ -1,6 +1,7 @@
 mod command;
 mod db;
 mod event;
+mod outgoing;
 mod store;
 pub mod subscription;
 mod worker;
