@@ -31,6 +31,16 @@ open = "5.4.0"
 toml = "1.1.4"
 notify = "8.2.0"
 rodio = { version = "0.22.2", default-features = false, features = ["playback", "symphonia-all"] }
+objc2-av-foundation = { version = "0.3.2", features = ["objc2-core-media", "objc2-core-video"] }
+objc2-core-media = "0.3.2"
+objc2-core-video = "0.3.2"
+objc2-foundation = "0.3.2"
+objc2 = "0.6.4"
+core-video = "0.5.2"
+core-foundation = "0.10.1"
+objc2-core-graphics = "0.3.2"
+objc2-image-io = "0.3.2"
+objc2-core-foundation = "0.3.2"
 
 [patch.crates-io]
 curve25519-dalek = { git = "https://github.com/signalapp/curve25519-dalek", tag = "signal-curve25519-4.1.3" }
