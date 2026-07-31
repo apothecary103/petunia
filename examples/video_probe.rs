@@ -53,8 +53,13 @@ fn main() {
             player.duration(),
             frame.is_some(),
         );
-        if tick > 8 && frame.is_some() {
-            println!("frames are arriving");
+        if tick > 8 && let Some(frame) = frame {
+            
+            let _ = &frame;
+            println!(
+                "frames are arriving, format {:?}",
+                std::str::from_utf8(&frame.get_pixel_format().to_be_bytes())
+            );
             return;
         }
     }
