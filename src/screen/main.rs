@@ -120,10 +120,14 @@ impl Main {
                         let thread = self.panes.get(pane)?.thread()?.clone();
                         let timestamp = chrono::Utc::now().timestamp_millis() as u64;
                         let message = data::Message {
-                            timestamp,
-                            sender: self.aci,
-                            body: body.clone(),
                             status: Some(data::Status::Sending),
+                            ..data::Message::plain(
+                                data::MessageId {
+                                    timestamp,
+                                    sender: self.aci,
+                                },
+                                body.clone(),
+                            )
                         };
                         self.set_preview(&thread, &message);
                         self.histories.entry(thread.clone()).or_default().push(message);
@@ -163,7 +167,7 @@ impl Main {
         let newer = self
             .previews
             .get(thread)
-            .is_none_or(|current| current.timestamp <= message.timestamp);
+            .is_none_or(|current| current.timestamp() <= message.timestamp());
         if newer {
             self.previews.insert(thread.clone(), message.clone());
         }
@@ -174,15 +178,12 @@ impl Main {
         let history = self.histories.entry(thread.clone()).or_default();
         let live = std::mem::replace(history, messages);
         for message in live {
-            let known = history
-                .iter_mut()
-                .find(|m| m.timestamp == message.timestamp && m.sender == message.sender);
-            match known {
+            match history.iter_mut().find(|known| known.id == message.id) {
                 Some(existing) => *existing = message,
                 None => history.push(message),
             }
         }
-        history.sort_by_key(|message| message.timestamp);
+        history.sort_by_key(|message| message.id);
         if let Some(last) = history.last().cloned() {
             self.set_preview(&thread, &last);
         }
@@ -194,7 +195,7 @@ impl Main {
             .panes
             .iter()
             .any(|(_, pane)| pane.thread() == Some(&thread));
-        if message.sender != self.aci && !visible {
+        if message.sender() != self.aci && !visible {
             *self.unread.entry(thread.clone()).or_default() += 1;
         }
         self.histories.entry(thread).or_default().push(message);
@@ -203,8 +204,8 @@ impl Main {
     pub fn message_status(&mut self, timestamps: &[u64], status: data::Status) {
         for history in self.histories.values_mut() {
             for message in history.iter_mut() {
-                if message.sender == self.aci
-                    && timestamps.contains(&message.timestamp)
+                if message.sender() == self.aci
+                    && timestamps.contains(&message.timestamp())
                     && message.status.is_none_or(|current| current < status)
                 {
                     message.status = Some(status);
