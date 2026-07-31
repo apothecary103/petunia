@@ -34,7 +34,7 @@ impl Body<'_> {
         let spacing = self.spacing;
         let own = self.message.sender() == self.state.aci;
 
-        let mut block = div()
+        let mut said = div()
             .flex()
             .flex_col()
             .gap_1p5()
@@ -42,7 +42,7 @@ impl Body<'_> {
                 this.child(quoted(quote, self.state, theme, spacing))
             });
 
-        block = match &self.message.content {
+        said = match &self.message.content {
             Content::Text { body, ranges } => {
                 // A message that is nothing but a couple of emoji is drawn at a
                 // size you can read, the way Signal does.
@@ -50,7 +50,7 @@ impl Body<'_> {
                     Some(scale) if ranges.is_empty() => spacing.body * scale,
                     _ => spacing.body,
                 };
-                block.child(
+                said.child(
                     div()
                         .text_size(px(size))
                         .line_height(px(size * theme.typography.line_height))
@@ -58,15 +58,15 @@ impl Body<'_> {
                         .child(styled(body, ranges, self.state, theme)),
                 )
             }
-            Content::Sticker(sticker) => block.child(self.sticker(sticker)),
-            Content::Deleted => block.child(
+            Content::Sticker(sticker) => said.child(self.sticker(sticker)),
+            Content::Deleted => said.child(
                 div()
                     .text_size(px(spacing.body))
                     .text_color(theme.text_muted)
                     .italic()
                     .child("This message was deleted"),
             ),
-            Content::Update(update) => block.child(
+            Content::Update(update) => said.child(
                 div()
                     .text_size(px(spacing.small))
                     .text_color(theme.text_muted)
@@ -83,20 +83,35 @@ impl Body<'_> {
             act: self.act,
         };
         for attached in &self.message.attachments {
-            block = block.child(frame.render(attached));
+            said = said.child(frame.render(attached));
         }
 
         if let Some(preview) = self.message.preview.as_ref() {
-            block = block.child(link_card(preview, theme, spacing, self.act));
+            said = said.child(link_card(preview, theme, spacing, self.act));
         }
+
+        // The mark trails what was said rather than taking a line of its own:
+        // one line per message of "Read" doubles the height of a conversation
+        // to say something you only look for when you look for it.
+        let mark = (own && self.message.status.is_some()).then(|| {
+            receipt(
+                self.message.status.expect("checked"),
+                self.message.edited.is_some(),
+                theme,
+            )
+        });
+
+        let mut block = div().flex().flex_col().gap_1p5().child(
+            div()
+                .flex()
+                .items_end()
+                .gap_2()
+                .child(said.min_w_0())
+                .children(mark),
+        );
 
         if !self.message.reactions.is_empty() {
             block = block.child(reactions(self.message, self.state, theme, self.act));
-        }
-
-        // Only our own messages have a delivery state, and only ours show one.
-        if own && let Some(status) = self.message.status {
-            block = block.child(receipt(status, self.message.edited.is_some(), theme));
         }
 
         bar::with_actions(block, self.message, own, theme, self.act)
@@ -176,8 +191,12 @@ fn receipt(status: Status, edited: bool, theme: &Theme) -> gpui::Stateful<Div> {
     div()
         .id("receipt")
         .flex()
+        .flex_none()
         .items_center()
-        .gap_1p5()
+        .gap_1()
+        // Lifted off the baseline so the tick sits with the text rather than
+        // hanging below it.
+        .pb(px(2.0))
         .text_size(px(theme.typography.ui_size - 3.0))
         .text_color(theme.text_muted)
         .tooltip(move |window, cx| {

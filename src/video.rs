@@ -87,6 +87,14 @@ use objc2::rc::Retained;
             unsafe { self.player.rate() != 0.0 }
         }
 
+        /// The video's own pixel dimensions, once the item has loaded enough to
+        /// say. Zero until then, which is not a size.
+        pub fn size(&self) -> Option<(f32, f32)> {
+            let size = unsafe { self.item.presentationSize() };
+            let (width, height) = (size.width as f32, size.height as f32);
+            (width > 0.0 && height > 0.0).then_some((width, height))
+        }
+
         pub fn toggle(&self) {
             if self.is_playing() {
                 self.pause();
@@ -245,6 +253,9 @@ mod platform {
         }
         pub fn finished(&self) -> bool {
             false
+        }
+        pub fn size(&self) -> Option<(f32, f32)> {
+            None
         }
         pub fn position(&self) -> Duration {
             Duration::ZERO

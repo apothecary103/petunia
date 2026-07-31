@@ -92,8 +92,13 @@ async fn serve(mut commands: UnboundedReceiver<Command>, mut events: Events) -> 
     if let Err(error) = send_contacts(&manager, &mut events).await {
         warn!(%error, "failed to load contacts");
     }
-    tokio::task::spawn_local(fetch_avatars(manager.clone(), cache.clone(), events.clone()));
-    tokio::task::spawn_local(fetch_profiles(manager.clone(), events.clone()));
+    tokio::task::spawn_local(show_cached_avatars(manager.clone(), cache.clone(), events.clone()));
+    tokio::task::spawn_local(refresh_profiles(
+        manager.clone(),
+        db.clone(),
+        cache.clone(),
+        events.clone(),
+    ));
     tokio::task::spawn_local(fetch_previews(db.clone(), aci, events.clone()));
     send_sticker_packs(&manager, &cache, &mut events).await;
     if freshly_linked
@@ -354,8 +359,12 @@ async fn receive_once(
                 if let Err(error) = send_contacts(manager, events).await {
                     warn!(%error, "failed to load synced contacts");
                 }
-                tokio::task::spawn_local(fetch_avatars(manager.clone(), cache.clone(), events.clone()));
-                tokio::task::spawn_local(fetch_profiles(manager.clone(), events.clone()));
+                tokio::task::spawn_local(refresh_profiles(
+                    manager.clone(),
+                    db.clone(),
+                    cache.clone(),
+                    events.clone(),
+                ));
                 let aci = manager.registration_data().service_ids.aci;
                 tokio::task::spawn_local(fetch_previews(db.clone(), aci, events.clone()));
             }
@@ -1076,30 +1085,89 @@ async fn recipients(manager: &RegisteredManager, thread: &Thread) -> usize {
     }
 }
 
-async fn fetch_avatars(mut manager: RegisteredManager, cache: Cache, mut events: Events) {
-    let contacts = match manager.store().contacts().await {
-        Ok(contacts) => contacts.filter_map(Result::ok).collect::<Vec<_>>(),
-        Err(error) => {
-            warn!(%error, "failed to list contacts for avatars");
-            Vec::new()
+/// Shows what is already on disk, at once. Nothing here touches the network:
+/// the point is that no picture is missing while the refresh runs.
+async fn show_cached_avatars(manager: RegisteredManager, cache: Cache, mut events: Events) {
+    let mut threads = vec![Thread::Contact(ContactId::Aci(
+        manager.registration_data().service_ids.aci,
+    ))];
+    if let Ok(contacts) = manager.store().contacts().await {
+        threads.extend(
+            contacts
+                .filter_map(Result::ok)
+                .map(|contact| Thread::Contact(ContactId::Aci(contact.uuid))),
+        );
+    }
+    if let Ok(groups) = manager.store().groups().await {
+        threads.extend(
+            groups
+                .filter_map(Result::ok)
+                .map(|(master_key, _)| Thread::Group(master_key)),
+        );
+    }
+
+    for thread in threads {
+        if let Some(path) = cache.avatar(&thread).await {
+            emit(&mut events, Event::Avatar { thread, path }).await;
         }
-    };
-    for contact in contacts {
-        let thread = Thread::Contact(ContactId::Aci(contact.uuid));
-        if send_cached_avatar(&cache, &mut events, &thread).await {
+    }
+}
+
+/// Brings names and pictures up to date.
+///
+/// Both come from the same profile fetch, so they are one pass rather than two
+/// walks over the same people. presage's own profile and avatar caches are
+/// dropped first, because it has no way to expire them and will otherwise keep
+/// answering with whatever it saw the first time.
+async fn refresh_profiles(mut manager: RegisteredManager, db: Db, cache: Cache, mut events: Events) {
+    if let Err(error) = db.forget_profiles().await {
+        warn!(%error, "failed to drop the cached profiles");
+    }
+
+    for (uuid, key) in profile_keys(&manager).await {
+        let thread = Thread::Contact(ContactId::Aci(uuid));
+        let profile = match manager.retrieve_profile_by_uuid(uuid, key).await {
+            Ok(profile) => profile,
+            Err(error) => {
+                debug!(%error, %uuid, "failed to fetch a profile");
+                continue;
+            }
+        };
+
+        if let Some(name) = profile
+            .name
+            .map(|name| name.to_string())
+            .filter(|name| !name.trim().is_empty())
+        {
+            emit(&mut events, Event::Profile { uuid, name }).await;
+        }
+
+        // The avatar's CDN path changes when the picture does, so this is the
+        // whole freshness check -- and the reason a refresh is not a download.
+        let Some(remote) = profile.avatar.filter(|remote| !remote.is_empty()) else {
+            continue;
+        };
+        if unchanged(&db, &cache, &thread, &remote).await {
             continue;
         }
-        let bytes = match &contact.avatar {
-            Some(avatar) => Some(avatar.reader.to_vec()),
-            None => fetch_profile_avatar(&mut manager, &contact).await,
-        };
-        if let Some(bytes) = bytes
-            && !bytes.is_empty()
-        {
-            store_avatar(&cache, &mut events, thread, &bytes).await;
+        match manager.retrieve_profile_avatar_by_uuid(uuid, key).await {
+            Ok(Some(bytes)) if !bytes.is_empty() => {
+                store_avatar(&cache, &db, &mut events, thread, &remote, &bytes).await;
+            }
+            Ok(_) => {}
+            Err(error) => debug!(%error, %uuid, "failed to fetch a profile avatar"),
         }
     }
 
+    refresh_group_avatars(&mut manager, &db, &cache, &mut events).await;
+}
+
+async fn refresh_group_avatars(
+    manager: &mut RegisteredManager,
+    db: &Db,
+    cache: &Cache,
+    events: &mut Events,
+) {
     let groups = match manager.store().groups().await {
         Ok(groups) => groups.filter_map(Result::ok).collect::<Vec<_>>(),
         Err(error) => {
@@ -1107,12 +1175,13 @@ async fn fetch_avatars(mut manager: RegisteredManager, cache: Cache, mut events:
             return;
         }
     };
+
     for (master_key, group) in groups {
         if group.avatar.is_empty() {
             continue;
         }
         let thread = Thread::Group(master_key);
-        if send_cached_avatar(&cache, &mut events, &thread).await {
+        if unchanged(db, cache, &thread, &group.avatar).await {
             continue;
         }
         let context = GroupContextV2 {
@@ -1122,7 +1191,7 @@ async fn fetch_avatars(mut manager: RegisteredManager, cache: Cache, mut events:
         };
         match manager.retrieve_group_avatar(context).await {
             Ok(Some(bytes)) if !bytes.is_empty() => {
-                store_avatar(&cache, &mut events, thread, &bytes).await;
+                store_avatar(cache, db, events, thread, &group.avatar, &bytes).await;
             }
             Ok(_) => {}
             Err(error) => warn!(%error, title = group.title, "failed to fetch group avatar"),
@@ -1130,42 +1199,23 @@ async fn fetch_avatars(mut manager: RegisteredManager, cache: Cache, mut events:
     }
 }
 
-/// Avatars were refetched and re-decoded on every launch; a cached file skips
-/// both the network and the profile-key dance.
-async fn send_cached_avatar(cache: &Cache, events: &mut Events, thread: &Thread) -> bool {
-    let Some(path) = cache.avatar(thread).await else {
-        return false;
-    };
-    emit(
-        events,
-        Event::Avatar {
-            thread: thread.clone(),
-            path,
-        },
-    )
-    .await;
-    true
+/// Whether the cached picture already came from this remote one. Both halves
+/// matter: the recorded source can be right while the file has been pruned.
+async fn unchanged(db: &Db, cache: &Cache, thread: &Thread, remote: &str) -> bool {
+    let recorded = db.avatar_source(thread).await.ok().flatten();
+    recorded.as_deref() == Some(remote) && cache.avatar(thread).await.is_some()
 }
 
-async fn store_avatar(cache: &Cache, events: &mut Events, thread: Thread, bytes: &[u8]) {
-    match cache.put_avatar(&thread, bytes).await {
-        Ok(path) => emit(events, Event::Avatar { thread, path }).await,
-        Err(error) => warn!(%error, "failed to cache an avatar"),
-    }
-}
-
-/// Resolves the names Signal does not put in the contact sync. A contact record
-/// only carries a name if the user typed one on their phone, so group members and
-/// anyone never saved show up as a uuid fragment until their profile is read.
-/// Group membership is where the profile keys for non-contacts come from.
-async fn fetch_profiles(mut manager: RegisteredManager, mut events: Events) {
+/// Everyone worth fetching a profile for, with the key that decrypts it.
+///
+/// A contact record carries a name only if the user typed one on their own
+/// phone, so group members and anyone never saved have nothing until this runs.
+/// Group membership is where the profile keys for non-contacts come from, and
+/// our own comes from the registration -- without it the identity panel shows
+/// someone else's idea of us, or nothing.
+async fn profile_keys(manager: &RegisteredManager) -> Vec<(Uuid, ProfileKey)> {
     let registration = manager.registration_data();
-    // Ours first: the sidebar's own row needs a name like everyone else's, and
-    // the contact sync does not reliably include us.
-    let mut wanted: Vec<(Uuid, ProfileKey)> = vec![(
-        registration.service_ids.aci,
-        registration.profile_key(),
-    )];
+    let mut wanted = vec![(registration.service_ids.aci, registration.profile_key())];
 
     match manager.store().contacts().await {
         Ok(contacts) => {
@@ -1190,18 +1240,25 @@ async fn fetch_profiles(mut manager: RegisteredManager, mut events: Events) {
 
     wanted.sort_by_key(|(uuid, _)| *uuid);
     wanted.dedup_by_key(|(uuid, _)| *uuid);
+    wanted
+}
 
-    for (uuid, key) in wanted {
-        let name = match manager.retrieve_profile_by_uuid(uuid, key).await {
-            Ok(profile) => profile.name.map(|name| name.to_string()),
-            Err(error) => {
-                debug!(%error, %uuid, "failed to fetch a profile");
-                None
+async fn store_avatar(
+    cache: &Cache,
+    db: &Db,
+    events: &mut Events,
+    thread: Thread,
+    remote: &str,
+    bytes: &[u8],
+) {
+    match cache.put_avatar(&thread, bytes).await {
+        Ok(path) => {
+            if let Err(error) = db.set_avatar_source(&thread, remote).await {
+                warn!(%error, "failed to record an avatar source");
             }
-        };
-        if let Some(name) = name.filter(|name| !name.trim().is_empty()) {
-            emit(&mut events, Event::Profile { uuid, name }).await;
+            emit(events, Event::Avatar { thread, path }).await;
         }
+        Err(error) => warn!(%error, "failed to cache an avatar"),
     }
 }
 
@@ -1232,22 +1289,6 @@ async fn fetch_previews(db: Db, aci: Uuid, mut events: Events) {
     }
 }
 
-async fn fetch_profile_avatar(
-    manager: &mut RegisteredManager,
-    contact: &presage::model::contacts::Contact,
-) -> Option<Vec<u8>> {
-    let key: [u8; 32] = contact.profile_key.as_slice().try_into().ok()?;
-    match manager
-        .retrieve_profile_avatar_by_uuid(contact.uuid, ProfileKey::create(key))
-        .await
-    {
-        Ok(avatar) => avatar,
-        Err(error) => {
-            warn!(%error, uuid = %contact.uuid, "failed to fetch profile avatar");
-            None
-        }
-    }
-}
 
 async fn send_contacts(manager: &RegisteredManager, events: &mut Events) -> Result<(), Error> {
     let store = manager.store();

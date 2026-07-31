@@ -134,7 +134,7 @@ impl Default for Media {
         Self {
             auto_download_images: true,
             auto_download_audio: true,
-            auto_download_video: false,
+            auto_download_video: true,
             auto_download_limit: 8,
             cache_limit: 2048,
             image_max_width: 400.0,

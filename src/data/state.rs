@@ -8,7 +8,7 @@ use uuid::Uuid;
 /// this has stopped whether or not the "stopped" arrived.
 const TYPING_TIMEOUT: Duration = Duration::from_secs(15);
 
-use super::{Contact, Group, History, Index, Message, Thread, contact_name};
+use super::{Contact, Group, History, Index, Message, Thread};
 
 /// Everything the panes read while rendering, so that adding a buffer kind does
 /// not mean threading another parameter through every `view`.
@@ -24,6 +24,10 @@ pub struct State {
     /// typed on their own phone, so for group members and anyone never saved this
     /// is the only name there is.
     profiles: HashMap<Uuid, String>,
+    /// Contact names by uuid. The contact list is a `Vec` because order matters
+    /// to the switcher, but resolving a name was a linear scan of it -- once per
+    /// message, per mention and per reaction, every frame.
+    named: HashMap<Uuid, String>,
     pub connection: crate::signal::Connection,
     /// Who is currently typing, per thread. Kept here rather than in `History`
     /// because it is not part of the message stream.
@@ -41,6 +45,7 @@ impl State {
             histories: HashMap::new(),
             avatars: HashMap::new(),
             profiles: HashMap::new(),
+            named: HashMap::new(),
             connection: crate::signal::Connection::default(),
             typing: HashMap::new(),
             sticker_packs: Vec::new(),
@@ -154,9 +159,10 @@ impl State {
     /// What to call someone: the name their contact record carries, else the one
     /// from their profile, else the front of their uuid.
     pub fn name_of(&self, uuid: Uuid) -> String {
-        contact_name(&self.contacts, uuid)
-            .map(str::to_string)
-            .or_else(|| self.profiles.get(&uuid).cloned())
+        self.named
+            .get(&uuid)
+            .or_else(|| self.profiles.get(&uuid))
+            .cloned()
             .unwrap_or_else(|| uuid.to_string()[..8].to_string())
     }
 
@@ -188,6 +194,11 @@ impl State {
 
     pub fn contacts_updated(&mut self, contacts: Vec<Contact>, groups: Vec<Group>) {
         self.index.rebuild(&contacts, &groups, self.aci);
+        self.named = contacts
+            .iter()
+            .filter(|contact| !contact.name.is_empty())
+            .map(|contact| (contact.uuid, contact.name.clone()))
+            .collect();
         self.contacts = contacts;
         self.groups = groups;
         // A contact sync rebuilds every name from the contact records alone, so

@@ -54,12 +54,16 @@ impl Viewer {
     }
 
     /// A video gets a player; anything else does not, and the previous one is
-    /// dropped so it stops decoding the moment it leaves the screen.
+    /// dropped so it stops decoding the moment it leaves the screen. Opening one
+    /// starts it: you asked to watch it.
     fn open_video(&mut self) {
         self.playing = self
             .showing()
             .filter(|path| video::is_video(path))
             .and_then(|path| video::Player::open(path));
+        if let Some(player) = self.playing.as_ref() {
+            player.play();
+        }
     }
 
     pub fn showing(&self) -> Option<&PathBuf> {
@@ -245,21 +249,34 @@ impl Viewer {
     fn face(&mut self, path: &std::path::Path, zoom: f32, window: &mut Window) -> gpui::AnyElement {
         #[cfg(target_os = "macos")]
         if let Some(player) = self.playing.as_mut() {
-            // Decoding runs ahead of drawing, so the next frame only exists if
-            // something asks for it.
-            if player.is_playing() {
+            // Unconditionally, not only while playing. AVFoundation loads the
+            // asset on the run loop, so an item that is not ready yet reports a
+            // rate of zero -- and gating the repaint on that is a deadlock: no
+            // frame, so no repaint, so it never becomes ready.
+            if !player.finished() {
                 window.request_animation_frame();
             }
-            if let Some(frame) = player.frame() {
-                return gpui::surface(frame)
-                    .w(px(900.0 * zoom))
-                    .h(px(600.0 * zoom))
-                    .into_any_element();
-            }
-            return div()
-                .w(px(900.0 * zoom))
-                .h(px(600.0 * zoom))
-                .into_any_element();
+
+            // Its own shape, not a guess. `presentationSize` is zero until the
+            // item has loaded, which is what the fallback box is holding.
+            let (width, height) = match player.size() {
+                Some(size) => super::message::media::fit(
+                    Some(crate::data::attachment::Size {
+                        width: size.0 as u32,
+                        height: size.1 as u32,
+                    }),
+                    (1100.0 * zoom, 700.0 * zoom),
+                ),
+                None => (900.0 * zoom, 560.0 * zoom),
+            };
+
+            return match player.frame() {
+                Some(frame) => gpui::surface(frame)
+                    .w(px(width))
+                    .h(px(height))
+                    .into_any_element(),
+                None => div().w(px(width)).h(px(height)).into_any_element(),
+            };
         }
 
         let _ = window;

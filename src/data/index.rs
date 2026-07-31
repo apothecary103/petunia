@@ -33,6 +33,10 @@ pub struct Flags {
 pub struct Entry {
     pub thread: Thread,
     pub name: String,
+    /// The name folded for comparison. Kept rather than computed, because the
+    /// comparator runs on every reorder and every reorder runs on every message
+    /// that arrives -- and `to_lowercase` allocates.
+    sorted: String,
     pub preview: Option<Message>,
     pub unread: u32,
     pub mentions: u32,
@@ -201,9 +205,11 @@ impl Index {
                 }
             }
             None => {
+                let name = name();
                 self.entries.push(Entry {
                     thread: thread.clone(),
-                    name: name(),
+                    sorted: name.to_lowercase(),
+                    name,
                     last_activity: message.timestamp(),
                     preview: Some(message.clone()),
                     unread: 0,
@@ -241,9 +247,14 @@ impl Index {
     /// Names arrive after the entry does -- a profile fetch is a round trip -- so
     /// an entry's name has to be replaceable in place.
     pub fn set_name(&mut self, thread: &Thread, name: String) {
-        if let Some(entry) = self.entries.iter_mut().find(|e| e.thread == *thread) {
-            entry.name = name;
+        let Some(entry) = self.entries.iter_mut().find(|e| e.thread == *thread) else {
+            return;
+        };
+        if entry.name == name {
+            return;
         }
+        entry.sorted = name.to_lowercase();
+        entry.name = name;
         self.reorder();
     }
 
@@ -267,12 +278,14 @@ impl Index {
     fn carry(&self, thread: Thread, name: String, note_to_self: bool) -> Entry {
         match self.get(&thread) {
             Some(existing) => Entry {
+                sorted: name.to_lowercase(),
                 name,
                 note_to_self,
                 ..existing.clone()
             },
             None => Entry {
                 thread,
+                sorted: name.to_lowercase(),
                 name,
                 preview: None,
                 unread: 0,
@@ -289,11 +302,9 @@ impl Index {
             Sort::Recent => self.entries.sort_by(|a, b| {
                 b.last_activity
                     .cmp(&a.last_activity)
-                    .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                    .then_with(|| a.sorted.cmp(&b.sorted))
             }),
-            Sort::Name => self
-                .entries
-                .sort_by_key(|entry| entry.name.to_lowercase()),
+            Sort::Name => self.entries.sort_by(|a, b| a.sorted.cmp(&b.sorted)),
         }
     }
 }

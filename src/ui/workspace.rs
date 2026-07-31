@@ -37,6 +37,8 @@ pub struct Workspace {
     help: Option<Entity<Help>>,
     /// Always present, and draws nothing until something has gone wrong.
     notices: Entity<Notices>,
+    /// What the window is called, so the platform is only told when it changes.
+    titled: String,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -74,6 +76,7 @@ impl Workspace {
             viewer: None,
             help: None,
             notices,
+            titled: String::new(),
             _subscriptions: subscriptions,
         };
 
@@ -320,7 +323,12 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = cx.palette().clone();
         let border = cx.theme().border;
-        window.set_window_title(&self.title(cx));
+
+        let title = self.title(cx);
+        if title != self.titled {
+            window.set_window_title(&title);
+            self.titled = title;
+        }
 
         let body = match &self.screen {
             Screen::Linking(linking) => linking.clone().into_any_element(),

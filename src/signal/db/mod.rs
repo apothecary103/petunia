@@ -1,3 +1,4 @@
+pub mod avatars;
 pub mod blobs;
 pub mod messages;
 pub mod read;
@@ -21,6 +22,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/001_receipts.sql"),
     include_str!("migrations/002_blobs.sql"),
     include_str!("migrations/003_read.sql"),
+    include_str!("migrations/004_avatars.sql"),
 ];
 
 #[cfg(test)]
@@ -108,7 +110,9 @@ impl Db {
             CREATE TABLE petunia_message_status (
                 timestamp INTEGER PRIMARY KEY,
                 status    INTEGER NOT NULL
-            );",
+            );
+            CREATE TABLE profiles (key BLOB PRIMARY KEY, body BLOB NOT NULL);
+            CREATE TABLE profile_avatars (key BLOB PRIMARY KEY, body BLOB NOT NULL);",
         )
         .execute(&pool)
         .await?;

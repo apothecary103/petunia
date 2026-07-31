@@ -121,14 +121,6 @@ impl From<&presage::model::groups::Member> for Member {
     }
 }
 
-pub fn contact_name(contacts: &[Contact], uuid: Uuid) -> Option<&str> {
-    contacts
-        .iter()
-        .find(|contact| contact.uuid == uuid)
-        .map(|contact| contact.name.as_str())
-        .filter(|name| !name.is_empty())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
