@@ -45,16 +45,22 @@ version is gone and its arrangement is not a precedent for anything.
   way it would read had it been pasted rather than attached — `ui/message/text.rs`
   decides what counts as text and reads the head of it once. Everything else is
   the chip in `ui/message/media.rs`.
-- **Messages.** Three layouts, chosen in settings and built from shared parts in
+- **Messages.** Three layouts, chosen under *Appearance* — what shape a message is
+  drawn in is what it looks like, not what it says — and built from shared parts in
   `ui/message/run.rs`: **standard**, Discord-style runs with an avatar gutter, one
   header per run and a hanging indent; **compact**, one line per message with the
   clock and the name in fixed right-aligned columns, as every IRC client draws it;
   and **bubbles**, Signal's own, yours on the right. The one place that departs
   from the reference, which is not a chat app. Independent of `density`, which is
-  how much room a message is given rather than what shape it is.
-- **The reading column** is capped and pinned to the left of its column, not
-  centred. Centring moves every message sideways when the window is resized or a
-  panel opens.
+  how much room a message is given rather than what shape it is. A bubble is for
+  words: a sticker and a message that is nothing but pictures are drawn without
+  one, because a rounded box around a photograph is a second frame around a frame
+  and Signal draws neither in one.
+- **The conversation column** is the whole of the space between the panels
+  (`kit::column`). It was capped at a reading measure, the way prose is set; a
+  chat log is not prose, and a window somebody made wide is a window they want
+  used. Nothing is centred in it either way — centring moves every message
+  sideways whenever a panel opens.
 
 Anything with a visual opinion goes in `ui/kit.rs`, so the look is one
 decision rather than a per-view accident.
@@ -78,7 +84,14 @@ rather than by good intentions. Each crate may only reach the ones below it.
 - `crates/petunia` — the binary. `ui/` and everything gpui, `store.rs` (the one
   entity views observe, and the only way they talk back to the worker),
   `bridge.rs` (the worker's events into the store), `theme.rs`, `actions.rs`,
-  `session.rs`.
+  `menus.rs`, `session.rs`.
+
+The macOS menu bar (`menus.rs`) is nothing but the actions the keymap already
+dispatches, so a menu item and a keystroke are one code path and the shortcut
+beside an item is read out of the bindings in force. An item with no action behind
+it would be a menu that lies, so there are none. Quitting and hiding are the two
+chords not taken from `config.toml`: a file that could rebind cmd+q could take it
+away, and the item beside it would then name a key that does nothing.
 
 Shared dependency versions live in the root `[workspace.dependencies]`; a crate
 manifest says `foo.workspace = true` and nothing else.
@@ -122,7 +135,12 @@ Every one of these has already cost a debugging session.
   passed `gpui_component_assets::Assets`, or every icon silently draws nothing.
 - **Actions dispatch along the focus path.** If nothing has claimed focus, no
   keybinding fires anywhere. The workspace holds a `FocusHandle` and takes focus
-  at launch.
+  at launch — and takes it back whenever an overlay closes
+  (`Workspace::dismissed`, which every `Dismissed` handler goes through). A sheet
+  that closes while the focus is still on the field inside it leaves the window
+  with nothing focused at all, and every shortcut in the application stops
+  answering: the symptom is a picker that works once, since choosing a result
+  closes it by a route Escape never took.
 - **Timestamps are milliseconds**, but `group_within` is configured in seconds.
   Convert at the boundary.
 - **Commands sent before the worker reports in** used to be dropped. The window
@@ -151,7 +169,14 @@ Every one of these has already cost a debugging session.
   else aborts the process from inside the renderer with two integers for a
   message. `video.rs` checks before handing one over.
 - **`max_w`/`max_h` on an image is not enough.** An image's natural size is its
-  pixel size, so the fitted size is computed from the pointer's dimensions.
+  pixel size, so the fitted size is computed explicitly — and from the *file*
+  (`image::shape`, memoized, a header read) rather than from the sender's
+  declaration. The declaration is missing for anything of our own until the thread
+  is reloaded, in which case the box is the whole 4:3 of `image_max_*`; and it
+  disagrees with the bytes whenever EXIF is involved, since a phone stores a
+  photograph landscape and Signal declares it rotated. Both show up as margin
+  around the picture, because a contained image centres itself in the box it was
+  given. A video's box comes from its poster for the same reason.
 - **`clear_key_bindings` clears everyone's.** `actions::bind` wipes the whole
   keymap, including what `gpui_component::init` installs for its own text input.
   The library therefore has to be initialised *after* it, and the theme after
@@ -162,6 +187,11 @@ Every one of these has already cost a debugging session.
   aliases hard — this is the "pixelated on a retina display" symptom. Never call
   `img()` directly; `ui::image::picture`/`cropped` resample to the device pixels
   the element actually occupies.
+- **A crop is decided before the resample, not after.** `ObjectFit::Cover` over an
+  image resampled to *fit* hands the GPU something smaller than the box in one axis
+  and asks it to enlarge it — a wide photograph in a square thumbnail was then
+  blurrier than the source it came from. `image::Fit` is part of the cache key, and
+  `cropped` asks for the box to be filled.
 - **A layout closure does not know how wide it ended up.** Anything that turns a
   click into a fraction of an element — the waveform, the video scrubber — needs
   a `canvas` behind it to record the bounds it was laid out at.
@@ -180,6 +210,14 @@ Every one of these has already cost a debugging session.
   with them and loading older messages needs no correction; row zero is always
   present, even when it draws nothing, because a row that came and went would
   shift every index behind it.
+- **A page of history is not a page of messages.** A reaction, an edit and a
+  delete are stored rows that project onto a message already loaded, so a page can
+  add nothing at all while the store still reports more behind it. Where the next
+  page is asked from is therefore the oldest *row* a page reached
+  (`Event::History::covered`), not the oldest message in it. Derived from the
+  messages, the top of the list asks for the same page for as long as it is on
+  screen — harmless while a button had to be pressed for it, a query per frame now
+  that reaching the top is the request.
 - **A visible row is re-rendered every frame**, so anything derived in one has to
   be cheap or cached. Two things here were not: `Theme::highlights` is a round
   trip through Zed's theme JSON (~260µs), now built once per theme install and
@@ -206,6 +244,12 @@ Every one of these has already cost a debugging session.
   and rasterises `.SFNS-Regular`. Semibold (600) and Bold (700) land exactly.
   `kit::EMPHASIS` and `kit::STRONG` are the two weights above regular that macOS
   actually draws; nothing should name a weight directly.
+- **The text input brings its own padding.** `Input::small` insets its content by
+  eight across and two down, which inside a card that has a padding of its own is
+  that padding twice on one side and once on the other: the words started sixteen
+  pixels from the left edge while the send button sat eight from the right, and the
+  two sat two pixels apart vertically. The composer strips it (`px_0`, `py_0`) and
+  lets the card hold the padding, one number for every edge.
 - **A div only hears a mouse move while it is under the pointer.** Which is the
   one thing a drag stops being — so a resize written as `on_mouse_move` on an
   ancestor updates on release and never during, the symptom the sidebar's divider
@@ -216,12 +260,20 @@ Every one of these has already cost a debugging session.
   occluded by whatever is in front, but `should_handle_scroll` is not, so that an
   overlay does not stop the page under it scrolling. A modal wants the opposite:
   every full-window sheet calls `occlude`, and `kit::scrim` does it for the ones
-  built on that.
-- **A highlight has no padding.** `HighlightStyle` is a colour over a range of
-  text, so inline code cannot be given a padded rounded box the way markdown draws
-  one. `ui::message::content` pads it with thin spaces *inside* the washed run
-  instead, and the wash is `active` rather than `sunken` — sunken is a shade below
-  the background, which on a dark theme reads as nothing at all.
+  built on that. So does anything with a scroll of its own drawn over something
+  that also scrolls — the settings select's list of themes, whose wheel otherwise
+  moved the page behind it and took the list along.
+- **A highlight has no padding, and no corners.** `HighlightStyle` is a colour over
+  a range of text, so inline code cannot be given the rounded box markdown draws it
+  in — which left `` `bat` `` as a wash the shape of the letters. `ui::wash` is the
+  answer: one text layout, unchanged, so a line still wraps as a line, with the
+  boxes painted underneath it from the glyph positions that layout settled on.
+  `ui::message::content` still pads the run with thin spaces, since the box grows
+  with the text rather than around it. Discord's own measurements: a fifth of an em
+  of padding on every side — which a thin space is, to the pixel — three pixels of
+  radius, and no border, because a hairline drawn around one word reads as a box
+  somebody forgot to fill. The fenced block keeps its border; a box that size is
+  a box.
 
 ## Coding rules
 

@@ -4,7 +4,7 @@ Petunia reads and writes a real conversation. The sidebar, the message list, the
 composer, the media viewer, playback and the details panel are all live against
 a linked account.
 
-385 tests pass and `cargo clippy --workspace --all-targets` is clean. Inside
+411 tests pass and `cargo clippy --workspace --all-targets` is clean. Inside
 `nix develop` (or with direnv, just `cd`): `cargo test`, and
 `cargo build && ./target/debug/petunia` to run it.
 
@@ -17,11 +17,18 @@ a linked account.
   Enter sends, shift+enter breaks the line, escape drops whatever the composer
   is carrying, up on an empty field edits your last message.
 - **Receiving.** Runs with day separators and an unread marker, rich text,
-  quotes, reactions, stickers, link previews, captions, and system lines.
+  quotes, reactions, stickers, link previews, captions, and system lines. Reading
+  backwards needs no button: reaching the top of the loaded page is what asks for
+  the one behind it.
+- **Drafts.** Per conversation, and everything the composer is carrying rather
+  than only the words -- a reply banner and a picked-out file were meant for the
+  conversation they were chosen in. The words alone survive a restart, since an
+  attachment is a path and a path is not a promise.
 - **Media.** Images resampled to the display's real pixel count, video with a
   generated poster frame, voice notes with Signal's own waveform, file chips
-  with open and save. Anything picture-shaped opens full size in a viewer with
-  zoom, pan, a rail of the rest of the thread, copy, save-as and hand-off.
+  with open and save. Anything picture-shaped opens in a viewer with zoom, pan, a
+  rail of the rest of the thread, copy, save-as and hand-off -- a panel over the
+  conversation rather than edge to edge, so what it came from is still there.
 - **Playback.** Voice notes and audio through rodio; video through AVFoundation
   into gpui's surface element, with play, scrub and a clock.
 - **Groups.** Members with roles and the labels Signal lets people pick for
@@ -44,12 +51,13 @@ a linked account.
   menus; menus on messages and people too. Deleting a conversation asks first and
   clears this device's copy -- Signal's own "delete for me" goes through the
   Storage Service, which presage does not expose, so it cannot reach the phone.
-- **Settings** (cmd+,) over every preference, in cards with the theme behind a
-  select rather than thirteen chips, writing `config.toml` so the file stays
-  authoritative. Keybinding presets: standard, emacs, vim.
+- **Settings** (cmd+,) over every preference, six pages down a rail rather than
+  one column of everything, in cards with the theme behind a select rather than
+  thirteen chips, writing `config.toml` so the file stays authoritative.
+  Keybinding presets: standard, emacs, vim.
 - **Themes.** Petunia's two, and all eleven of Zed's, compiled in.
-- **Chrome.** Keyboard sheet (cmd+/), conversation cycling, error notices, hot
-  reload, and a translucent sidebar over the desktop on macOS.
+- **Chrome.** The macOS menu bar, keyboard sheet (cmd+/), conversation cycling,
+  error notices, hot reload, and a translucent sidebar over the desktop.
 
 ## What is left
 
@@ -70,7 +78,6 @@ Roughly in the order it would be worth doing.
   mention *rendering* side is done.
 - **Notifications.** `[notifications]` is settable and nothing reads it, which
   the settings window says out loud rather than pretending otherwise.
-- **Per-thread drafts** — body and ranges only, never attachment paths.
 - **A draggable details edge.** The conversation list has one, and dragging it in
   collapses it to a rail of avatars; the details panel's width is still session
   state nothing but a hand edit can change.
