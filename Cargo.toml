@@ -6,9 +6,14 @@ edition = "2024"
 [dependencies]
 presage = { git = "https://github.com/whisperfish/presage", rev = "63482efd0cbdc0780baf0650517c7d55f1cac05d" }
 presage-store-sqlite = { git = "https://github.com/whisperfish/presage", rev = "63482efd0cbdc0780baf0650517c7d55f1cac05d" }
-gpui = "0.2.2"
+# Deliberately unpinned: gpui-component declares the same bare git source, and
+# cargo treats `git = url` and `git = url, rev = ...` as different sources --
+# which silently builds two incompatible copies of gpui. Cargo.lock pins it.
+gpui = { git = "https://github.com/zed-industries/zed" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "x11", "wayland"] }
 gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "88f102d13654fe25aa2fede076274b6b751a3704" }
 image = { version = "0.25", features = ["webp"] }
+qrcode = { version = "0.14", default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "fs", "time"] }
 futures = "0.3"
 uuid = { version = "1", features = ["serde", "v4"] }
@@ -27,11 +32,6 @@ notify = "8.2.0"
 
 [patch.crates-io]
 curve25519-dalek = { git = "https://github.com/signalapp/curve25519-dalek", tag = "signal-curve25519-4.1.3" }
-# gpui-ce publishes to crates.io under a renamed package, but its in-tree crate
-# is still `gpui` 0.2.2 -- so a plain `gpui = "0.2.2"` dependency resolves here.
-# Both revs are pinned together: gpui-component's released 0.5.1 does not build
-# against gpui-ce's HEAD, only its git main does.
-gpui = { git = "https://github.com/gpui-ce/gpui-ce", rev = "33ed975bf2dff2735eaa21366aa7fa19015c891c" }
 
 [dev-dependencies]
 filetime = "0.2.29"
