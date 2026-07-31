@@ -36,7 +36,7 @@ show_preview = true
 # so anything not downloaded while it is fresh is gone for good.
 auto_download_images = true
 auto_download_audio = true
-auto_download_video = false
+auto_download_video = true
 # Megabytes. Anything larger waits for you to ask.
 auto_download_limit = 8
 # Megabytes of cached media to keep before the oldest is dropped.
