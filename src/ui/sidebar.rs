@@ -230,11 +230,12 @@ fn connection(connection: crate::signal::Connection, palette: &Theme) -> Div {
 }
 
 fn shell(palette: &Theme, translucent: bool, body: Div) -> Div {
-    // Thick rather than thin: at full strength the vibrancy layer is a wash of
-    // whatever is behind the window, and names stop being readable against it.
+    // Nearly solid. The vibrancy layer underneath is not there to be looked
+    // through -- at any strength where the wallpaper is legible the list stops
+    // being -- but to give the surface the depth a flat fill does not have.
     let backing = match translucent {
         true => gpui::Hsla {
-            a: 0.62,
+            a: 0.97,
             ..palette.surface
         },
         false => palette.surface,

@@ -661,6 +661,10 @@ impl Render for Workspace {
         };
 
         let translucent = self.store.read(cx).config.sidebar.blurred();
+        if translucent {
+            let showing = self.session.sidebar.open && matches!(self.screen, Screen::Main { .. });
+            super::vibrancy::sidebar(self.session.sidebar.width, showing);
+        }
 
         div()
             .track_focus(&self.focus)

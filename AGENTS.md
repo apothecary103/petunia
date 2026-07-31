@@ -99,6 +99,15 @@ Every one of these has already cost a debugging session.
 - **There is no tokio runtime on the UI side.** `tokio::time::timeout` and
   friends panic outright there; use `cx.background_executor().timer`. The Signal
   worker has its own runtime and is the only place tokio's timers are safe.
+- **gpui's blur is a tint, not a blur.** `WindowBackgroundAppearance::Blurred`
+  puts an `NSVisualEffectView` across the *whole* window using the `Selection`
+  material, through which the desktop is simply there, in focus. `ui::vibrancy`
+  asks for `Transparent` instead and puts its own view behind the conversation
+  list with the `Sidebar` material, which is what Finder uses and what people
+  mean by a blurred sidebar.
+- **`gpui_component::Root` paints the theme background** across the window. It
+  covers anything behind it, vibrancy included; it implements `Styled`, so
+  `main` clears it when the sidebar is translucent.
 - **gpui's `surface` asserts its pixel format.** It builds two Metal textures
   from a buffer's luma and chroma planes and requires bi-planar YCbCr; anything
   else aborts the process from inside the renderer with two integers for a

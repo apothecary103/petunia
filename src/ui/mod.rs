@@ -18,5 +18,6 @@ pub mod settings;
 pub mod sidebar;
 pub mod switcher;
 pub mod themes;
+pub mod vibrancy;
 pub mod viewer;
 pub mod workspace;

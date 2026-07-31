@@ -14,7 +14,6 @@ use std::sync::Arc;
 use gpui::prelude::*;
 use gpui::Focusable;
 use gpui::{App, Bounds, TitlebarOptions, WindowBounds, WindowOptions, point, px, size};
-use gpui::Styled as _;
 use gpui_component::Root;
 
 use session::Session;
@@ -65,8 +64,12 @@ fn main() {
                 // a vibrancy layer goes behind everything, and what shows
                 // through it is whatever is drawn translucent on top. Only the
                 // conversation list is.
+                // Transparent rather than Blurred: gpui's blur is a whole-window
+                // view using the `Selection` material, which is a tint. The
+                // conversation list puts its own behind itself, with the
+                // material a sidebar is meant to have. See `ui::vibrancy`.
                 window_background: match blurred {
-                    true => gpui::WindowBackgroundAppearance::Blurred,
+                    true => gpui::WindowBackgroundAppearance::Transparent,
                     false => gpui::WindowBackgroundAppearance::Opaque,
                 },
                 ..Default::default()
