@@ -122,6 +122,55 @@ pub fn delete(thread: &Thread, target: u64, timestamp: u64) -> DataMessage {
     }
 }
 
+/// "Delete for me", which is a different thing from `delete` above.
+///
+/// `delete` is a *remote* delete: it asks everybody who received the message to
+/// replace it with a tombstone, and Signal only honours one from the message's
+/// own author. This asks nothing of anybody -- the row goes from this device's
+/// store, and the sync tells the account's *other* devices to drop it too, which
+/// is why it is addressed to ourselves. So it works on somebody else's message,
+/// where a remote delete cannot.
+pub fn delete_for_me(thread: &Thread, target: &MessageId) -> SyncMessage {
+    use presage::libsignal_service::proto::sync_message::delete_for_me;
+    use presage::libsignal_service::proto::{
+        AddressableMessage, ConversationIdentifier, addressable_message, conversation_identifier,
+    };
+
+    SyncMessage {
+        delete_for_me: Some(sync_message::DeleteForMe {
+            message_deletes: vec![delete_for_me::MessageDeletes {
+                conversation: Some(ConversationIdentifier {
+                    identifier: Some(match thread {
+                        // The binary form, which is what a current client reads.
+                        // libsignal writes a service id the same way the wire
+                        // does, so this goes through its own encoding rather than
+                        // pasting sixteen bytes and hoping the recipient is
+                        // reading an ACI.
+                        Thread::Contact(contact) => {
+                            conversation_identifier::Identifier::ThreadServiceIdBinary(
+                                ServiceId::from(contact).service_id_binary(),
+                            )
+                        }
+                        Thread::Group(master_key) => {
+                            conversation_identifier::Identifier::ThreadGroupId(group_identifier(
+                                master_key,
+                            ))
+                        }
+                    }),
+                }),
+                messages: vec![AddressableMessage {
+                    sent_timestamp: Some(target.timestamp),
+                    author: Some(addressable_message::Author::AuthorServiceIdBinary(
+                        target.sender.as_bytes().to_vec(),
+                    )),
+                }],
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
 /// The edit's own timestamp orders revisions; `target_sent_timestamp` keeps it
 /// attached to the original, which is also how presage derives its identity.
 pub fn edit(
@@ -134,6 +183,61 @@ pub fn edit(
     EditMessage {
         target_sent_timestamp: Some(target),
         data_message: Some(message(thread, body, ranges, Vec::new(), timestamp)),
+    }
+}
+
+pub fn poll(
+    thread: &Thread,
+    question: String,
+    options: Vec<String>,
+    allow_multiple: bool,
+    timestamp: u64,
+) -> DataMessage {
+    DataMessage {
+        poll_create: Some(data_message::PollCreate {
+            question: Some(question),
+            allow_multiple: Some(allow_multiple),
+            options,
+        }),
+        timestamp: Some(timestamp),
+        group_v2: group_context(thread),
+        ..Default::default()
+    }
+}
+
+/// `count` is the voter's own running total, incremented once per vote they
+/// cast on this poll -- the caller tracks it, since only they know how many
+/// times they have already voted.
+pub fn poll_vote(
+    thread: &Thread,
+    target: &MessageId,
+    option_indexes: Vec<u32>,
+    count: u32,
+    timestamp: u64,
+) -> DataMessage {
+    DataMessage {
+        poll_vote: Some(data_message::PollVote {
+            target_author_aci_binary: Some(target.sender.as_bytes().to_vec()),
+            target_sent_timestamp: Some(target.timestamp),
+            option_indexes,
+            vote_count: Some(count),
+        }),
+        timestamp: Some(timestamp),
+        group_v2: group_context(thread),
+        ..Default::default()
+    }
+}
+
+/// Only the poll's own author can send this -- the caller enforces it, same
+/// as a remote delete.
+pub fn poll_terminate(thread: &Thread, target: u64, timestamp: u64) -> DataMessage {
+    DataMessage {
+        poll_terminate: Some(data_message::PollTerminate {
+            target_sent_timestamp: Some(target),
+        }),
+        timestamp: Some(timestamp),
+        group_v2: group_context(thread),
+        ..Default::default()
     }
 }
 
@@ -216,6 +320,21 @@ pub fn envelope(
             server_guid: None,
         },
     )
+}
+
+/// The message that tells a new group's members it exists.
+///
+/// A group is created on the server without anybody being told; what reaches the
+/// members is the `GroupContextV2` on a message sent to it, which carries the
+/// master key they need to fetch and decrypt the group for themselves. This
+/// carries nothing else -- it is the announcement, not something anybody said,
+/// and the title is part of the group rather than of the message.
+pub fn group_update(thread: &Thread, timestamp: u64) -> DataMessage {
+    DataMessage {
+        timestamp: Some(timestamp),
+        group_v2: group_context(thread),
+        ..Default::default()
+    }
 }
 
 fn group_context(thread: &Thread) -> Option<GroupContextV2> {

@@ -1,10 +1,15 @@
-//! Forgetting a conversation.
+//! Forgetting a conversation, and forgetting one message in one.
 //!
-//! Local only, like the flags, and for the same reason: Signal's own
-//! "delete for me" travels through the Storage Service, which presage neither
-//! uses nor exposes. So this removes what *this* device holds and says so where
-//! it is asked for — it does not reach the phone, and the conversation comes back
-//! the moment anyone says anything in it.
+//! Deleting a *conversation* is local only, like the flags: Signal's own
+//! conversation delete travels through the Storage Service, which presage
+//! neither uses nor exposes. So this removes what *this* device holds and says so
+//! where it is asked for — it does not reach the phone, and the conversation
+//! comes back the moment anyone says anything in it.
+//!
+//! Deleting one *message* is not in that position. There is a sync message for
+//! it, so `delete_message` here is half of the job and `outgoing::delete_for_me`
+//! is the other: the row goes from this device, and the account's other devices
+//! are told to do the same.
 //!
 //! Every table that keys on a thread is cleared here, which is why they are
 //! listed in one place: a table added later and forgotten would leave rows behind
@@ -91,6 +96,7 @@ impl Db {
             "DELETE FROM petunia_thread_flags WHERE thread = ?",
             "DELETE FROM petunia_read WHERE thread = ?",
             "DELETE FROM petunia_avatar WHERE thread = ?",
+            "DELETE FROM petunia_preview WHERE thread = ?",
         ] {
             sqlx::query(statement)
                 .bind(&key)
@@ -100,6 +106,68 @@ impl Db {
 
         tx.commit().await?;
         Ok(messages)
+    }
+
+    /// Drops one message from this device: the stored row, the search index and
+    /// the receipt keyed on it.
+    ///
+    /// Not a tombstone. A remote delete leaves one, because everybody in the
+    /// conversation has to be told the message was withdrawn -- but "delete for
+    /// me" is the reader deciding they do not want to see it, and a line reading
+    /// "this message was deleted" where they asked for nothing is not that.
+    pub async fn delete_message(&self, thread: &Thread, timestamp: u64) -> Result<bool, Error> {
+        let key = super::read::key(thread);
+        let ts = timestamp as i64;
+        let mut tx = self.pool.begin().await?;
+
+        let id: Option<i64> = sqlx::query(
+            "SELECT thread_id FROM thread_messages WHERE ts = ?1 AND thread_id IN \
+             (SELECT id FROM threads WHERE group_master_key = ?2 OR recipient_id = ?3)",
+        )
+        .bind(ts)
+        .bind(match thread {
+            Thread::Group(master_key) => Some(master_key.to_vec()),
+            Thread::Contact(_) => None,
+        })
+        .bind(match thread {
+            Thread::Contact(contact) => Some(contact.uuid()),
+            Thread::Group(_) => None,
+        })
+        .fetch_optional(&mut *tx)
+        .await?
+        .map(|row| row.get(0));
+
+        let gone = match id {
+            Some(id) => {
+                sqlx::query("DELETE FROM thread_messages WHERE thread_id = ?1 AND ts = ?2")
+                    .bind(id)
+                    .bind(ts)
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected()
+                    > 0
+            }
+            None => false,
+        };
+
+        for statement in [
+            "DELETE FROM petunia_body WHERE thread = ?1 AND ts = ?2",
+            "DELETE FROM petunia_send WHERE thread = ?1 AND ts = ?2",
+        ] {
+            sqlx::query(statement)
+                .bind(&key)
+                .bind(ts)
+                .execute(&mut *tx)
+                .await?;
+        }
+        // Keyed on the timestamp alone, because a ReceiptMessage names no thread.
+        sqlx::query("DELETE FROM petunia_receipt WHERE ts = ?")
+            .bind(ts)
+            .execute(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
+        Ok(gone)
     }
 }
 
@@ -118,6 +186,9 @@ mod tests {
     async fn seeded(db: &Db, thread: &Thread, ts: u64) {
         let sender = Uuid::new_v4();
         db.index_bodies(thread, &[(ts, sender, "hi".into())])
+            .await
+            .unwrap();
+        db.set_preview(thread, &petunia_data::index::Preview::new("hi".into(), ts))
             .await
             .unwrap();
         db.mark_read(thread, ts).await.unwrap();
@@ -145,6 +216,7 @@ mod tests {
         assert!(db.search("hi", None).await.unwrap().is_empty());
         assert!(db.read_marks().await.unwrap().is_empty());
         assert!(db.flags().await.unwrap().is_empty());
+        assert!(db.previews().await.unwrap().is_empty());
         assert_eq!(db.avatar_source(&thread).await.unwrap(), None);
     }
 
@@ -163,6 +235,7 @@ mod tests {
             Some(&200)
         );
         assert_eq!(db.flags().await.unwrap().len(), 1);
+        assert_eq!(db.previews().await.unwrap().len(), 1);
         assert_eq!(db.avatar_source(&kept).await.unwrap(), Some("cdn/one".into()));
         assert_eq!(db.search("hi", None).await.unwrap().len(), 1);
     }

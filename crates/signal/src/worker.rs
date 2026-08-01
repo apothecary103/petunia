@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,11 +9,12 @@ use presage::Manager;
 use presage::libsignal_service::configuration::SignalServers;
 use presage::libsignal_service::content::{ContentBody, GroupContextV2};
 use presage::libsignal_service::proto::{AttachmentPointer, receipt_message};
+use presage::libsignal_service::protocol::{Aci, ServiceId};
 use presage::libsignal_service::sender::AttachmentSpec;
 use presage::libsignal_service::zkgroup::profiles::ProfileKey;
 use presage::manager::Registered;
 use presage::model::messages::Received;
-use presage::store::{ContentExt, ContentsStore, StateStore};
+use presage::store::{ContentExt, ContentsStore, StateStore, Store};
 use presage_store_sqlite::SqliteStore;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -55,12 +57,36 @@ async fn emit(events: &mut Events, event: Event) {
     }
 }
 
+/// Ends a session: the command loop exits either for good (the app is
+/// shutting down) or to link a new account after a log out.
+enum Ended {
+    Shutdown,
+    Relink,
+}
+
 async fn serve(mut commands: UnboundedReceiver<Command>, mut events: Events) -> Result<(), Error> {
-    let store = store::open().await?;
     let db = Db::open().await?;
     let media_policy = config::load().config.media;
     let cache = Cache::new(media_policy.cache_limit);
     let limiter = Arc::new(Semaphore::new(DOWNLOADS));
+
+    loop {
+        match session(&mut commands, &mut events, &db, &cache, &limiter).await? {
+            Ended::Shutdown => return Ok(()),
+            Ended::Relink => continue,
+        }
+    }
+}
+
+async fn session(
+    commands: &mut UnboundedReceiver<Command>,
+    events: &mut Events,
+    db: &Db,
+    cache: &Cache,
+    limiter: &Arc<Semaphore>,
+) -> Result<Ended, Error> {
+    let store = store::open().await?;
+    let media_policy = config::load().config.media;
 
     match cache.prune().await {
         Ok(pruned) if pruned.freed == 0 => {}
@@ -88,11 +114,16 @@ async fn serve(mut commands: UnboundedReceiver<Command>, mut events: Events) -> 
     };
 
     let aci = manager.registration_data().service_ids.aci;
+    let phone_number = manager.registration_data().phone_number.to_string();
     info!(%aci, "signal manager ready");
-    emit(&mut events, Event::Linked { aci }).await;
-    if let Err(error) = send_contacts(&manager, &mut events).await {
+    emit(events, Event::Linked { aci, phone_number }).await;
+    if let Err(error) = send_contacts(&manager, events).await {
         warn!(%error, "failed to load contacts");
     }
+    // Before anything reaches the network. Every name learned on any previous
+    // run is on screen by the time the window is, and the fetches below are then
+    // a refresh rather than the only source there has ever been.
+    send_names(db, events).await;
     tokio::task::spawn_local(show_cached_avatars(manager.clone(), cache.clone(), events.clone()));
     tokio::task::spawn_local(refresh_profiles(
         manager.clone(),
@@ -101,10 +132,19 @@ async fn serve(mut commands: UnboundedReceiver<Command>, mut events: Events) -> 
         events.clone(),
     ));
     tokio::task::spawn_local(fetch_previews(db.clone(), aci, events.clone()));
-    send_sticker_packs(&manager, &cache, &mut events).await;
+    tokio::task::spawn_local(refresh_contacts(manager.clone(), db.clone(), events.clone()));
+    tokio::task::spawn_local(refresh_username(manager.clone(), events.clone()));
+    send_sticker_packs(&manager, cache, events).await;
+    // Off the loop: a pack is a CDN round trip per sticker, and the packs that
+    // need one are exactly the packs nothing can be drawn of anyway.
+    tokio::task::spawn_local(repair_sticker_packs(
+        manager.clone(),
+        cache.clone(),
+        events.clone(),
+    ));
     match db.flags().await {
         Ok(flags) if flags.is_empty() => {}
-        Ok(flags) => emit(&mut events, Event::Flags(flags)).await,
+        Ok(flags) => emit(events, Event::Flags(flags)).await,
         Err(error) => warn!(%error, "failed to load thread flags"),
     }
     if freshly_linked
@@ -119,13 +159,13 @@ async fn serve(mut commands: UnboundedReceiver<Command>, mut events: Events) -> 
         cache: cache.clone(),
         db: db.clone(),
         events: events.clone(),
-        limiter,
+        limiter: limiter.clone(),
         prepared: prepared_tx,
         policy: media_policy,
     };
 
     let (queue_tx, mut queue_rx) = oneshot::channel();
-    tokio::task::spawn_local(receive(
+    let receive_task = tokio::task::spawn_local(receive(
         manager.clone(),
         db.clone(),
         cache.clone(),
@@ -142,11 +182,11 @@ async fn serve(mut commands: UnboundedReceiver<Command>, mut events: Events) -> 
                 queue_drained = true;
                 info!(pending = pending.len(), "message queue drained");
                 for outgoing in pending.drain(..) {
-                    send(&mut manager, &db, &mut events, outgoing).await;
+                    send(&mut manager, db, events, outgoing).await;
                 }
             }
             Some(outgoing) = prepared_rx.recv() => {
-                queue(&mut manager, &db, &mut events, &mut pending, queue_drained, outgoing).await;
+                queue(&mut manager, db, events, &mut pending, queue_drained, outgoing).await;
             }
             command = commands.recv() => match command {
                 Some(Command::SendText { thread, body, ranges, quote, timestamp }) => {
@@ -159,19 +199,38 @@ async fn serve(mut commands: UnboundedReceiver<Command>, mut events: Events) -> 
                     }
                     save_outgoing(&manager, &thread, message.clone(), timestamp).await;
                     let outgoing = Prepared::tracked(thread, message, timestamp);
-                    queue(&mut manager, &db, &mut events, &mut pending, queue_drained, outgoing).await;
+                    queue(&mut manager, db, events, &mut pending, queue_drained, outgoing).await;
                 }
                 Some(Command::React { thread, target, emoji, remove, timestamp }) => {
                     let message = outgoing::reaction(&thread, &target, emoji, remove, timestamp);
                     save_outgoing(&manager, &thread, message.clone(), timestamp).await;
                     let outgoing = Prepared::untracked(thread, message, timestamp);
-                    queue(&mut manager, &db, &mut events, &mut pending, queue_drained, outgoing).await;
+                    queue(&mut manager, db, events, &mut pending, queue_drained, outgoing).await;
                 }
                 Some(Command::DeleteMessage { thread, target, timestamp }) => {
                     let message = outgoing::delete(&thread, target, timestamp);
                     save_outgoing(&manager, &thread, message.clone(), timestamp).await;
                     let outgoing = Prepared::untracked(thread, message, timestamp);
-                    queue(&mut manager, &db, &mut events, &mut pending, queue_drained, outgoing).await;
+                    queue(&mut manager, db, events, &mut pending, queue_drained, outgoing).await;
+                }
+                Some(Command::DeleteForMe { thread, target }) => {
+                    forget(&mut manager, db, events, &thread, target).await;
+                }
+                Some(Command::SetBlocked { contact, blocked }) => {
+                    let service_id = ServiceId::from(Aci::from(contact));
+                    match manager.set_contact_blocked(service_id, blocked).await {
+                        Ok(()) => {
+                            emit(events, Event::Blocked { uuid: contact, blocked }).await;
+                        }
+                        Err(error) => {
+                            warn!(%error, blocked, "failed to change somebody's block state");
+                            emit(events, Event::Error(match blocked {
+                                true => format!("could not block them: {error}"),
+                                false => format!("could not unblock them: {error}"),
+                            }))
+                            .await;
+                        }
+                    }
                 }
                 Some(Command::EditMessage { thread, target, body, ranges, timestamp }) => {
                     let message = outgoing::edit(&thread, target, body, &ranges, timestamp);
@@ -180,7 +239,7 @@ async fn serve(mut commands: UnboundedReceiver<Command>, mut events: Events) -> 
                     // bubble, so its status is what the UI shows.
                     let outgoing = Prepared::tracked(thread, message, timestamp)
                         .reporting(target);
-                    queue(&mut manager, &db, &mut events, &mut pending, queue_drained, outgoing).await;
+                    queue(&mut manager, db, events, &mut pending, queue_drained, outgoing).await;
                 }
                 Some(Command::SendAttachments { thread, body, ranges, paths, quote, timestamp }) => {
                     tokio::task::spawn_local(upload(
@@ -192,7 +251,7 @@ async fn serve(mut commands: UnboundedReceiver<Command>, mut events: Events) -> 
                     ));
                 }
                 Some(Command::LoadThread { thread, before }) => {
-                    match load_history(&manager, &db, &cache, &thread, aci, before).await {
+                    match load_history(&manager, db, cache, &thread, aci, before).await {
                         Ok(loaded) => {
                             tokio::task::spawn_local(download_all(
                                 media.clone(),
@@ -200,7 +259,7 @@ async fn serve(mut commands: UnboundedReceiver<Command>, mut events: Events) -> 
                                 loaded.pointers,
                                 None,
                             ));
-                            emit(&mut events, Event::History {
+                            emit(events, Event::History {
                                 thread,
                                 messages: loaded.messages,
                                 more: loaded.more,
@@ -212,7 +271,7 @@ async fn serve(mut commands: UnboundedReceiver<Command>, mut events: Events) -> 
                         Err(error) => {
                             error!(%error, "failed to load message history");
                             emit(
-                                &mut events,
+                                events,
                                 Event::Error(format!("failed to load history: {error}")),
                             )
                             .await;
@@ -232,7 +291,7 @@ async fn serve(mut commands: UnboundedReceiver<Command>, mut events: Events) -> 
                         Ok(messages) => info!(messages, "deleted a conversation"),
                         Err(error) => {
                             error!(%error, "failed to delete a conversation");
-                            emit(&mut events, Event::Error(format!(
+                            emit(events, Event::Error(format!(
                                 "could not delete that conversation: {error}"
                             )))
                             .await;
@@ -241,12 +300,12 @@ async fn serve(mut commands: UnboundedReceiver<Command>, mut events: Events) -> 
                 }
                 Some(Command::Search { query, within }) => {
                     match db.search(&query, within.as_ref()).await {
-                        Ok(hits) => emit(&mut events, Event::Found { query, hits }).await,
+                        Ok(hits) => emit(events, Event::Found { query, hits }).await,
                         Err(error) => warn!(%error, "search failed"),
                     }
                 }
                 Some(Command::MarkRead { thread, messages }) => {
-                    mark_read(&mut manager, &db, &mut events, &thread, &messages).await;
+                    mark_read(&mut manager, db, events, &thread, &messages).await;
                 }
                 Some(Command::Typing { thread, started }) => {
                     let timestamp = now();
@@ -271,21 +330,33 @@ async fn serve(mut commands: UnboundedReceiver<Command>, mut events: Events) -> 
                     match manager.install_sticker_pack(&pack_id, &key).await {
                         Ok(()) => {
                             info!("installed a sticker pack");
-                            send_sticker_packs(&manager, &cache, &mut events).await;
-    match db.flags().await {
-        Ok(flags) if flags.is_empty() => {}
-        Ok(flags) => emit(&mut events, Event::Flags(flags)).await,
-        Err(error) => warn!(%error, "failed to load thread flags"),
-    }
+                            send_sticker_packs(&manager, cache, events).await;
+                            match db.flags().await {
+                                Ok(flags) if flags.is_empty() => {}
+                                Ok(flags) => emit(events, Event::Flags(flags)).await,
+                                Err(error) => warn!(%error, "failed to load thread flags"),
+                            }
                         }
                         Err(error) => {
                             warn!(%error, "failed to install a sticker pack");
-                            emit(&mut events, Event::Error(format!(
+                            emit(events, Event::Error(format!(
                                 "could not add that sticker pack: {error}"
                             )))
                             .await;
                         }
                     }
+                }
+                Some(Command::PreviewStickerPack { pack_id, key }) => {
+                    // Off the loop: reading a pack is a CDN fetch per sticker,
+                    // and awaited here it stopped everything else -- no messages
+                    // sent, no receipts, nothing drawn -- for as long as it took.
+                    tokio::task::spawn_local(read_pack(
+                        manager.clone(),
+                        cache.clone(),
+                        events.clone(),
+                        pack_id,
+                        key,
+                    ));
                 }
                 Some(Command::DownloadAttachment { thread, timestamp, id }) => {
                     match db.row(&thread, timestamp).await {
@@ -301,20 +372,174 @@ async fn serve(mut commands: UnboundedReceiver<Command>, mut events: Events) -> 
                         // failure here has to be reported or it never settles.
                         Ok(None) => {
                             warn!(timestamp, "no stored row for the requested attachment");
-                            fail(&mut events, &thread, id, "message is no longer stored".into())
+                            fail(events, &thread, id, "message is no longer stored".into())
                                 .await;
                         }
                         Err(error) => {
                             warn!(%error, "failed to read a row for download");
-                            fail(&mut events, &thread, id, error.to_string()).await;
+                            fail(events, &thread, id, error.to_string()).await;
                         }
                     }
                 }
-                None => break,
+                Some(Command::SetNickname { contact, name, note }) => {
+                    let service_id = presage::libsignal_service::protocol::ServiceId::Aci(
+                        presage::libsignal_service::protocol::Aci::from(contact),
+                    );
+                    let (given, family) = match &name {
+                        Some(name) => match name.split_once(' ') {
+                            Some((given, family)) => (Some(given.to_string()), Some(family.to_string())),
+                            None => (Some(name.clone()), None),
+                        },
+                        None => (None, None),
+                    };
+                    match manager
+                        .set_contact_nickname(service_id, given, family, note.clone())
+                        .await
+                    {
+                        Ok(()) => {
+                            if let Err(error) =
+                                db.set_nickname(contact, name.as_deref(), note.as_deref()).await
+                            {
+                                warn!(%error, "failed to store a nickname");
+                            }
+                            emit(events, Event::Nickname { uuid: contact, name, note }).await;
+                        }
+                        Err(error) => {
+                            warn!(%error, "failed to set a contact nickname");
+                            emit(events, Event::Error(format!(
+                                "could not save that nickname: {error}"
+                            )))
+                            .await;
+                        }
+                    }
+                }
+                Some(Command::SetAvatar { bytes }) => {
+                    match manager.retrieve_profile().await {
+                        Ok(profile) => {
+                            let name = profile.name.unwrap_or_else(|| {
+                                presage::libsignal_service::profile_name::ProfileName {
+                                    given_name: String::new(),
+                                    family_name: None,
+                                }
+                            });
+                            match manager
+                                .update_profile_with_avatar(
+                                    name,
+                                    profile.about,
+                                    profile.about_emoji,
+                                    Some(bytes.clone()),
+                                )
+                                .await
+                            {
+                                Ok(()) => {
+                                    let thread = Thread::Contact(ContactId::Aci(aci));
+                                    match cache.put_avatar(&thread, &bytes).await {
+                                        Ok(path) => {
+                                            emit(events, Event::AvatarUpdated(path)).await
+                                        }
+                                        Err(error) => warn!(%error, "failed to cache the new avatar"),
+                                    }
+                                }
+                                Err(error) => {
+                                    warn!(%error, "failed to update the profile avatar");
+                                    emit(events, Event::Error(format!(
+                                        "could not update your profile picture: {error}"
+                                    )))
+                                    .await;
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            warn!(%error, "failed to fetch the current profile");
+                            emit(events, Event::Error(format!(
+                                "could not update your profile picture: {error}"
+                            )))
+                            .await;
+                        }
+                    }
+                }
+                Some(Command::SendPoll { thread, question, options, allow_multiple, timestamp }) => {
+                    let message = outgoing::poll(&thread, question, options, allow_multiple, timestamp);
+                    save_outgoing(&manager, &thread, message.clone(), timestamp).await;
+                    let outgoing = Prepared::tracked(thread, message, timestamp);
+                    queue(&mut manager, db, events, &mut pending, queue_drained, outgoing).await;
+                }
+                Some(Command::VotePoll { thread, target, option_indexes, count, timestamp }) => {
+                    let message = outgoing::poll_vote(&thread, &target, option_indexes, count, timestamp);
+                    let outgoing = Prepared::untracked(thread, message, timestamp);
+                    queue(&mut manager, db, events, &mut pending, queue_drained, outgoing).await;
+                }
+                Some(Command::TerminatePoll { thread, target, timestamp }) => {
+                    let message = outgoing::poll_terminate(&thread, target, timestamp);
+                    let outgoing = Prepared::untracked(thread, message, timestamp);
+                    queue(&mut manager, db, events, &mut pending, queue_drained, outgoing).await;
+                }
+                Some(Command::LogOut) => {
+                    receive_task.abort();
+                    if let Err(error) = manager.unlink_self().await {
+                        warn!(%error, "failed to unlink this device from the server");
+                    }
+                    let mut registration = manager.store().clone();
+                    if let Err(error) = registration.clear().await {
+                        error!(%error, "failed to clear the local account store");
+                        emit(events, Event::Error(format!("could not log out cleanly: {error}"))).await;
+                    }
+                    emit(events, Event::LoggedOut).await;
+                    return Ok(Ended::Relink);
+                }
+                Some(Command::SetUsername { nickname }) => {
+                    match manager.set_username(&nickname).await {
+                        Ok((username, link)) => {
+                            emit(events, Event::Username(Some((username.to_string(), link.to_string())))).await;
+                        }
+                        Err(error) => {
+                            warn!(%error, "failed to set username");
+                            emit(events, Event::Error(format!("could not set that username: {error}"))).await;
+                        }
+                    }
+                }
+                Some(Command::DeleteUsername) => {
+                    match manager.delete_username().await {
+                        Ok(()) => emit(events, Event::Username(None)).await,
+                        Err(error) => {
+                            warn!(%error, "failed to delete username");
+                            emit(events, Event::Error(format!("could not remove the username: {error}"))).await;
+                        }
+                    }
+                }
+                Some(Command::LookUp { query }) => {
+                    let found = look_up(&mut manager, &query).await;
+                    emit(events, Event::LookedUp { query, found }).await;
+                }
+                Some(Command::CreateGroup { title, members, timestamp }) => {
+                    match manager.create_group(&title, &members).await {
+                        Ok(master_key) => {
+                            // Contacts and groups are re-read whole rather than
+                            // patched: presage has just written the group into
+                            // its own store, and one statement is cheaper than
+                            // a second representation of what a group is.
+                            if let Err(error) = send_contacts(&manager, events).await {
+                                warn!(%error, "failed to reload groups after creating one");
+                            }
+                            let thread = Thread::Group(master_key);
+                            let message = outgoing::group_update(&thread, timestamp);
+                            let outgoing = Prepared::untracked(thread.clone(), message, timestamp);
+                            queue(&mut manager, db, events, &mut pending, queue_drained, outgoing).await;
+                            emit(events, Event::GroupCreated { thread }).await;
+                        }
+                        Err(error) => {
+                            warn!(%error, "failed to create a group");
+                            emit(events, Event::Error(format!("could not create the group: {error}"))).await;
+                        }
+                    }
+                }
+                None => {
+                    receive_task.abort();
+                    return Ok(Ended::Shutdown);
+                }
             },
         }
     }
-    Ok(())
 }
 
 async fn link(store: SqliteStore, mut events: Events) -> Result<RegisteredManager, Error> {
@@ -384,10 +609,14 @@ async fn receive_once(
     info!("message stream started");
     emit(events, Event::Connection(Connection::Connected)).await;
 
+    // Delivery receipts owed but not yet sent, by sender. See `owe`.
+    let mut owed: HashMap<Uuid, Vec<u64>> = HashMap::new();
+
     while let Some(received) = messages.next().await {
         match received {
             Received::QueueEmpty => {
                 debug!("message queue empty");
+                deliver_all(manager, &mut owed);
                 if let Some(signal) = queue_signal.take() {
                     let _ = signal.send(());
                 }
@@ -414,25 +643,32 @@ async fn receive_once(
                 if content.metadata.needs_receipt {
                     let sender = content.metadata.sender.raw_uuid();
                     let sent_at = content.metadata.timestamp.timestamp_millis() as u64;
-                    send_delivery(manager, sender, sent_at).await;
+                    owe(manager, &mut owed, queue_signal.is_some(), sender, sent_at);
                 }
 
-                // What we read on another device. presage stores the sync and
-                // ignores it, so without this reading on the phone never clears
-                // anything here.
+                // What we read (or viewed) on another device. presage stores
+                // the sync and ignores it, so without this reading on the
+                // phone never clears anything here. A view-once message read
+                // there is a `viewed` mark rather than a `read` one, but both
+                // clear the same unread state.
                 if let ContentBody::SynchronizeMessage(sync) = &content.body
-                    && !sync.read.is_empty()
+                    && (!sync.read.is_empty() || !sync.viewed.is_empty())
                 {
-                    for read in &sync.read {
-                        let Some(sender) = read
-                            .sender_aci
-                            .as_ref()
-                            .and_then(|aci| aci.parse::<Uuid>().ok())
+                    let marks = sync
+                        .read
+                        .iter()
+                        .map(|read| (read.sender_aci.as_ref(), read.timestamp()))
+                        .chain(
+                            sync.viewed
+                                .iter()
+                                .map(|viewed| (viewed.sender_aci.as_ref(), viewed.timestamp())),
+                        );
+                    for (sender_aci, upto) in marks {
+                        let Some(sender) = sender_aci.and_then(|aci| aci.parse::<Uuid>().ok())
                         else {
                             continue;
                         };
                         let thread = Thread::Contact(ContactId::Aci(sender));
-                        let upto = read.timestamp();
                         if let Err(error) = db.mark_read(&thread, upto).await {
                             warn!(%error, "failed to record a synced read mark");
                         }
@@ -464,6 +700,10 @@ async fn receive_once(
                     {
                         hydrate(cache, std::slice::from_mut(message)).await;
                         index_bodies(db, &thread, std::slice::from_ref(message)).await;
+                        // The one moment writing the sidebar's line is free: the
+                        // message is decoded, projected and in hand. Everything
+                        // else that ever needed it had to work it out again.
+                        remember_preview(db, &thread, message).await;
                     }
                     let pointers = data::pointers(&content);
                     if !pointers.is_empty() {
@@ -484,7 +724,52 @@ async fn receive_once(
             }
         }
     }
+    // The stream ended without the server ever saying the queue was empty, which
+    // is a reconnect: what is still owed has to go now, since nothing will
+    // deliver these messages a second time to ask again.
+    deliver_all(manager, &mut owed);
     Ok(())
+}
+
+/// Records a delivery receipt, and sends it when there is nothing to be gained
+/// by holding it.
+///
+/// A receipt is a sealed-sender message, so it is a network round trip. Awaited
+/// in the receive loop it was one round trip *per message before the next one
+/// was read*, and a backlog then arrived at the speed of the receipts rather
+/// than of the stream — which is the whole of "petunia syncs slower than
+/// Signal". One receipt carries any number of timestamps, so behind a backlog
+/// they are collected and sent per sender when it drains; live there is a single
+/// message to answer and it goes at once, off the loop rather than in it.
+fn owe(
+    manager: &RegisteredManager,
+    owed: &mut HashMap<Uuid, Vec<u64>>,
+    backlog: bool,
+    sender: Uuid,
+    timestamp: u64,
+) {
+    /// A receipt is a protobuf of timestamps, so the batch is bounded by what
+    /// fits in a message rather than by taste.
+    const BATCH: usize = 512;
+
+    if !backlog {
+        deliver(manager, sender, vec![timestamp]);
+        return;
+    }
+
+    let batch = owed.entry(sender).or_default();
+    batch.push(timestamp);
+    if batch.len() >= BATCH {
+        let full = std::mem::take(batch);
+        owed.remove(&sender);
+        deliver(manager, sender, full);
+    }
+}
+
+fn deliver_all(manager: &RegisteredManager, owed: &mut HashMap<Uuid, Vec<u64>>) {
+    for (sender, timestamps) in owed.drain() {
+        deliver(manager, sender, timestamps);
+    }
 }
 
 /// Writes the row presage would have written had this come off the wire, so the
@@ -579,11 +864,7 @@ async fn load_history(
     // Every row the page reached, not only the ones that became a message: a
     // reaction, an edit and a delete are rows too, and the page behind this one
     // has to be asked for from behind them.
-    let covered = page
-        .rows
-        .iter()
-        .map(|row| row.metadata.timestamp.timestamp_millis() as u64)
-        .min();
+    let covered = page.covered;
     let pointers: Vec<_> = page.rows.iter().flat_map(data::pointers).collect();
     let mut messages = data::project(page.rows);
     hydrate(cache, &mut messages).await;
@@ -630,6 +911,16 @@ async fn index_bodies(db: &Db, thread: &Thread, messages: &[data::Message]) {
 
     if let Err(error) = db.index_bodies(thread, &bodies).await {
         warn!(%error, "failed to index message bodies");
+    }
+}
+
+/// Keeps the line the sidebar will draw for this thread. Older lines are refused
+/// by the store, so this can be called for any message without asking whether it
+/// is the newest one.
+async fn remember_preview(db: &Db, thread: &Thread, message: &data::Message) {
+    let preview = data::index::Preview::of(message);
+    if let Err(error) = db.set_preview(thread, &preview).await {
+        warn!(%error, "failed to store a thread preview");
     }
 }
 
@@ -1133,16 +1424,96 @@ async fn mark_read(
     let _ = events;
 }
 
-/// Acknowledges receipt of a message the server asked us to confirm. presage
-/// never sends these, so without it the sender never sees a second tick.
-async fn send_delivery(manager: &mut RegisteredManager, sender: Uuid, timestamp: u64) {
-    let receipt = outgoing::receipt(receipt_message::Type::Delivery, vec![timestamp]);
+/// "Delete for me": the row goes from this device, and the account's other
+/// devices are told to drop it too.
+///
+/// The local delete goes first and the event is emitted whatever the sync does.
+/// The reader asked for the message to be gone from in front of them; a network
+/// failure is a reason the *other* devices have not caught up, not a reason to
+/// leave it on screen here.
+async fn forget(
+    manager: &mut RegisteredManager,
+    db: &Db,
+    events: &mut Events,
+    thread: &Thread,
+    target: data::MessageId,
+) {
+    match db.delete_message(thread, target.timestamp).await {
+        Ok(gone) => debug!(gone, ts = target.timestamp, "deleted a message for ourselves"),
+        Err(error) => {
+            error!(%error, "failed to delete a message locally");
+            emit(events, Event::Error(format!("could not delete that message: {error}"))).await;
+            return;
+        }
+    }
+    emit(events, Event::Forgotten { thread: thread.clone(), target }).await;
+
+    let aci = manager.registration_data().service_ids.aci;
+    let sync = outgoing::delete_for_me(thread, &target);
     if let Err(error) = manager
-        .send_message(&ContactId::Aci(sender), receipt, now())
+        .send_message(&ContactId::Aci(aci), sync, now())
         .await
     {
-        debug!(%error, "failed to send a delivery receipt");
+        warn!(%error, "failed to sync a deletion to our other devices");
     }
+}
+
+/// Everybody this account has blocked, read out of Storage Service at startup.
+///
+/// Signal's block list is the `blocked` flag on each contact record, so it comes
+/// out of the same manifest read the nicknames do -- which is why they are one
+/// pass rather than two.
+async fn refresh_contacts(mut manager: RegisteredManager, db: Db, mut events: Events) {
+    let records = match manager.contact_records().await {
+        Ok(records) => records,
+        Err(error) => {
+            debug!(%error, "failed to read storage service contact records");
+            return;
+        }
+    };
+
+    for record in records {
+        let Some(uuid) = uuid_from_contact_record(&record) else {
+            continue;
+        };
+        let name = record.nickname.as_ref().map(|name| {
+            [name.given.as_str(), name.family.as_str()]
+                .into_iter()
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ")
+        });
+        let note = Some(record.note.clone()).filter(|note| !note.is_empty());
+        if name.is_some() || note.is_some() {
+            if let Err(error) = db.set_nickname(uuid, name.as_deref(), note.as_deref()).await {
+                warn!(%error, %uuid, "failed to store a nickname");
+            }
+            emit(&mut events, Event::Nickname { uuid, name, note }).await;
+        }
+        // Only the blocked ones. Everybody else is the default, and saying so
+        // per contact is a message per person in the address book.
+        if record.blocked {
+            emit(&mut events, Event::Blocked { uuid, blocked: true }).await;
+        }
+    }
+}
+
+/// Acknowledges receipt of a message the server asked us to confirm. presage
+/// never sends these, so without it the sender never sees a second tick.
+/// Spawned rather than awaited: the caller is the receive loop, and nothing it
+/// does next depends on the answer. The socket is an id-matched request channel,
+/// so a receipt in flight is one more request rather than a second connection.
+fn deliver(manager: &RegisteredManager, sender: Uuid, timestamps: Vec<u64>) {
+    let mut manager = manager.clone();
+    tokio::task::spawn_local(async move {
+        let receipt = outgoing::receipt(receipt_message::Type::Delivery, timestamps);
+        if let Err(error) = manager
+            .send_message(&ContactId::Aci(sender), receipt, now())
+            .await
+        {
+            debug!(%error, "failed to send a delivery receipt");
+        }
+    });
 }
 
 fn now() -> u64 {
@@ -1189,6 +1560,76 @@ async fn show_cached_avatars(manager: RegisteredManager, cache: Cache, mut event
     }
 }
 
+/// Reads the username this account already has out of Storage Service, once at
+/// startup.
+///
+/// Signal's servers only ever hold a *hash* of a username, so there is nothing
+/// to ask them: the plaintext lives in the account record every linked device
+/// shares. Without this, a username set on the phone was invisible here and the
+/// settings panel said there was none.
+async fn refresh_username(mut manager: RegisteredManager, mut events: Events) {
+    match manager.username().await {
+        Ok(Some((username, link))) => {
+            let link = link.map(|link| link.to_string()).unwrap_or_default();
+            emit(&mut events, Event::Username(Some((username.to_string(), link)))).await;
+        }
+        Ok(None) => debug!("this account has no username"),
+        Err(error) => debug!(%error, "failed to read the account's username"),
+    }
+}
+
+/// Resolves what somebody typed into the new-chat field to an account.
+///
+/// A username goes through the username hash lookup; a phone
+/// number goes through contact discovery. Neither is tried against the other:
+/// the two are told apart by shape, and a query that is neither resolves to
+/// nothing rather than to two failed round trips.
+async fn look_up(manager: &mut RegisteredManager, query: &str) -> Option<Contact> {
+    let query = query.trim();
+    let uuid: Uuid = if query.starts_with('+') {
+        manager
+            .discover_contacts_by_phone_number([query])
+            .await
+            .inspect_err(|error| debug!(%error, "phone number lookup failed"))
+            .ok()?
+            .into_iter()
+            .find_map(|(_, service_id)| service_id)?
+            .raw_uuid()
+    } else {
+        manager
+            .lookup_username(query)
+            .await
+            .inspect_err(|error| debug!(%error, "username lookup failed"))
+            .ok()??
+            .into()
+    };
+
+    // A stranger's profile is encrypted under a profile key this account has not
+    // been given, so there is no name to fetch: what they were found by is what
+    // they are shown as until they answer and their profile key arrives with it.
+    let name = manager
+        .store()
+        .contact_by_id(&presage::libsignal_service::protocol::ServiceId::Aci(uuid.into()))
+        .await
+        .ok()
+        .flatten()
+        .map(|contact| contact.name)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| query.to_string());
+
+    Some(Contact { uuid, name })
+}
+
+fn uuid_from_contact_record(
+    record: &presage::libsignal_service::proto::ContactRecord,
+) -> Option<Uuid> {
+    record
+        .aci
+        .parse::<Uuid>()
+        .ok()
+        .or_else(|| Uuid::from_slice(&record.aci_binary).ok())
+}
+
 /// Brings names and pictures up to date.
 ///
 /// Both come from the same profile fetch, so they are one pass rather than two
@@ -1215,6 +1656,12 @@ async fn refresh_profiles(mut manager: RegisteredManager, db: Db, cache: Cache, 
             .map(|name| name.to_string())
             .filter(|name| !name.trim().is_empty())
         {
+            // Kept before it is shown. This loop is one round trip per person
+            // over the whole address book, and whatever it reaches before the
+            // window is closed is what the next launch opens with.
+            if let Err(error) = db.set_profile_name(uuid, &name).await {
+                warn!(%error, %uuid, "failed to store a profile name");
+            }
             emit(&mut events, Event::Profile { uuid, name }).await;
         }
 
@@ -1338,20 +1785,54 @@ async fn store_avatar(
     }
 }
 
+/// Fills the sidebar, from what was kept rather than from what can be rebuilt.
+///
+/// Two passes, and the order is the point. The stored lines go first: they are
+/// one query, they need nothing decoded, and they are what the list looked like
+/// when it was last closed. The scan of presage's own rows follows, and only
+/// adds -- a line for a thread that has none, and the bare fact of activity for
+/// a thread whose newest rows project to nothing, which is a thread that used to
+/// drop off the list entirely with its whole history still on disk.
 async fn fetch_previews(db: Db, aci: Uuid, mut events: Events) {
-    let threads = match db.previews().await {
-        Ok(threads) => threads,
+    let mut listed = std::collections::HashSet::new();
+    match db.previews().await {
+        Ok(stored) => {
+            for (thread, preview) in stored {
+                listed.insert(thread.clone());
+                emit(&mut events, Event::Preview { thread, preview }).await;
+            }
+        }
+        Err(error) => warn!(%error, "failed to load the stored previews"),
+    }
+
+    let scanned = match db.recent_rows().await {
+        Ok(scanned) => scanned,
         Err(error) => {
-            warn!(%error, "failed to load thread previews");
+            warn!(%error, "failed to scan for thread previews");
             return;
         }
     };
     let marks = db.read_marks().await.unwrap_or_default();
 
-    for (thread, rows) in threads {
-        if let Some(message) = data::project(rows).pop() {
-            emit(&mut events, Event::Preview { thread: thread.clone(), message }).await;
+    for recent in scanned {
+        let thread = recent.thread;
+        match data::project(recent.rows).pop() {
+            // Written as well as sent: a line the scan had to work for is a line
+            // the next launch should be handed.
+            Some(message) => {
+                let preview = data::index::Preview::of(&message);
+                if let Err(error) = db.set_preview(&thread, &preview).await {
+                    warn!(%error, "failed to store a thread preview");
+                }
+                emit(&mut events, Event::Preview { thread: thread.clone(), preview }).await;
+            }
+            // Nothing to read, but rows all the same. Said so it stays listed.
+            None if !listed.contains(&thread) => {
+                emit(&mut events, Event::Activity { thread: thread.clone(), at: recent.at }).await;
+            }
+            None => {}
         }
+
         // A thread nobody has ever read has no mark, and counting all of its
         // history as unread would put a four-figure badge on every row.
         let Some(&upto) = marks.get(&super::db::read::key(&thread)) else {
@@ -1361,6 +1842,33 @@ async fn fetch_previews(db: Db, aci: Uuid, mut events: Events) {
             Ok(0) => {}
             Ok(count) => emit(&mut events, Event::Unread { thread, count }).await,
             Err(error) => warn!(%error, "failed to count unread messages"),
+        }
+    }
+}
+
+/// Publishes everything known about what people are called, before a single
+/// profile has been fetched. The crawl that follows makes these current; without
+/// them, a crawl that does not finish leaves the rest of the list as uuids.
+async fn send_names(db: &Db, events: &mut Events) {
+    let known = match db.names().await {
+        Ok(known) => known,
+        Err(error) => {
+            warn!(%error, "failed to load the stored names");
+            return;
+        }
+    };
+
+    for known in known {
+        if let Some(name) = known.profile {
+            emit(events, Event::Profile { uuid: known.uuid, name }).await;
+        }
+        if known.nickname.is_some() || known.note.is_some() {
+            emit(events, Event::Nickname {
+                uuid: known.uuid,
+                name: known.nickname,
+                note: known.note,
+            })
+            .await;
         }
     }
 }
@@ -1388,48 +1896,151 @@ async fn send_contacts(manager: &RegisteredManager, events: &mut Events) -> Resu
 /// cache on the way past. presage keeps them decrypted in its own store, but
 /// nothing can draw bytes -- the renderer needs a path.
 async fn send_sticker_packs(manager: &RegisteredManager, cache: &Cache, events: &mut Events) {
-    let stored = match manager.store().sticker_packs().await {
-        Ok(packs) => packs.filter_map(Result::ok).collect::<Vec<_>>(),
-        Err(error) => {
-            warn!(%error, "failed to list sticker packs");
-            return;
-        }
+    let Some(stored) = installed_packs(manager).await else {
+        return;
     };
 
     let mut packs = Vec::new();
+    let mut unreadable = 0;
     for pack in stored {
-        let mut stickers = Vec::new();
-        for sticker in &pack.manifest.stickers {
-            let path = match cache.sticker(&pack.id, sticker.id).await {
-                Some(path) => Some(path),
-                None => match &sticker.bytes {
-                    Some(bytes) => cache
-                        .put_sticker(&pack.id, sticker.id, bytes)
-                        .await
-                        .inspect_err(|error| warn!(%error, "failed to cache a sticker"))
-                        .ok(),
-                    None => None,
-                },
-            };
-            if let Some(path) = path {
-                stickers.push(data::stickers::Sticker {
-                    id: sticker.id,
-                    emoji: sticker.emoji.clone(),
-                    path,
-                });
-            }
+        match cached_pack(pack, cache).await {
+            Some(pack) => packs.push(pack),
+            None => unreadable += 1,
         }
-        if stickers.is_empty() {
-            continue;
-        }
-        packs.push(data::stickers::Pack {
-            id: pack.id,
-            key: pack.key,
-            title: pack.manifest.title,
-            author: pack.manifest.author,
-            stickers,
-        });
     }
 
-    emit(events, Event::StickerPacks(packs)).await;
+    if unreadable > 0 {
+        warn!(unreadable, "installed sticker packs have no stickers to draw");
+    }
+    emit(events, Event::StickerPacks { packs, unreadable }).await;
+}
+
+async fn installed_packs(manager: &RegisteredManager) -> Option<Vec<presage::store::StickerPack>> {
+    match manager.store().sticker_packs().await {
+        Ok(packs) => Some(packs.filter_map(Result::ok).collect()),
+        Err(error) => {
+            warn!(%error, "failed to list sticker packs");
+            None
+        }
+    }
+}
+
+/// Fetches the stickers an installed pack is missing.
+///
+/// A pack is installed once and its stickers downloaded once, in a burst of a
+/// hundred requests -- and whatever fails in that burst is stored with no bytes
+/// and never asked for again. The pack stays installed and half of it, or all of
+/// it, draws nothing for good. So the packs are checked against what is actually
+/// on disk at every launch, and an incomplete one is read again: the manifest is
+/// behind the pack key, which is stored beside it, so this needs nothing the
+/// account has not already got.
+///
+/// `preview_sticker_pack` rather than `install_sticker_pack`, because the pack is
+/// already installed -- installing it again would tell every other device to do
+/// something they did months ago.
+async fn repair_sticker_packs(manager: RegisteredManager, cache: Cache, mut events: Events) {
+    let Some(stored) = installed_packs(&manager).await else {
+        return;
+    };
+
+    let mut wanted = Vec::new();
+    for pack in stored {
+        if missing(&pack, &cache).await > 0 {
+            wanted.push((pack.id, pack.key));
+        }
+    }
+    if wanted.is_empty() {
+        return;
+    }
+
+    info!(packs = wanted.len(), "re-reading incomplete sticker packs");
+    let mut store = manager.store().clone();
+    let mut repaired = 0;
+    for (id, key) in wanted {
+        match manager.preview_sticker_pack(&id, &key).await {
+            Ok(fetched) => match store.add_sticker_pack(&fetched).await {
+                Ok(()) => repaired += 1,
+                Err(error) => warn!(%error, "failed to store a re-read sticker pack"),
+            },
+            Err(error) => warn!(%error, "failed to re-read a sticker pack"),
+        }
+    }
+
+    if repaired > 0 {
+        send_sticker_packs(&manager, &cache, &mut events).await;
+    }
+}
+
+/// How many of a pack's stickers there is nothing to draw for: no bytes in the
+/// manifest and no file in the cache either.
+async fn missing(pack: &presage::store::StickerPack, cache: &Cache) -> usize {
+    let mut missing = 0;
+    for sticker in &pack.manifest.stickers {
+        if sticker.bytes.is_none() && cache.sticker(&pack.id, sticker.id).await.is_none() {
+            missing += 1;
+        }
+    }
+    missing
+}
+
+/// Reads a pack this account does not have and reports what it holds. Nothing is
+/// installed by it and no other device is told.
+async fn read_pack(
+    manager: RegisteredManager,
+    cache: Cache,
+    mut events: Events,
+    pack_id: Vec<u8>,
+    key: Vec<u8>,
+) {
+    let pack = match manager.preview_sticker_pack(&pack_id, &key).await {
+        Ok(pack) => cached_pack(pack, &cache)
+            .await
+            .ok_or_else(|| "none of that pack's stickers could be read".to_owned()),
+        Err(error) => {
+            warn!(%error, "failed to read a sticker pack");
+            Err(format!("could not read that sticker pack: {error}"))
+        }
+    };
+    emit(&mut events, Event::StickerPackPreview { pack_id, pack }).await;
+}
+
+/// A pack as the views read it: every sticker's bytes written into the media
+/// cache, because nothing can draw bytes. `None` for a pack none of whose
+/// stickers could be written, which is a pack there is nothing to show of.
+async fn cached_pack(
+    pack: presage::store::StickerPack,
+    cache: &Cache,
+) -> Option<data::stickers::Pack> {
+    let mut stickers = Vec::new();
+    for sticker in &pack.manifest.stickers {
+        let path = match cache.sticker(&pack.id, sticker.id).await {
+            Some(path) => Some(path),
+            None => match &sticker.bytes {
+                Some(bytes) => cache
+                    .put_sticker(&pack.id, sticker.id, bytes)
+                    .await
+                    .inspect_err(|error| warn!(%error, "failed to cache a sticker"))
+                    .ok(),
+                None => None,
+            },
+        };
+        if let Some(path) = path {
+            stickers.push(data::stickers::Sticker {
+                id: sticker.id,
+                emoji: sticker.emoji.clone(),
+                path,
+            });
+        }
+    }
+
+    if stickers.is_empty() {
+        return None;
+    }
+    Some(data::stickers::Pack {
+        id: pack.id,
+        key: pack.key,
+        title: pack.manifest.title,
+        author: pack.manifest.author,
+        stickers,
+    })
 }

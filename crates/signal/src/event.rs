@@ -13,6 +13,8 @@ pub enum Event {
     LinkUrl(String),
     Linked {
         aci: Uuid,
+        /// In Signal's own +E.164 shape, for display -- nothing here dials it.
+        phone_number: String,
     },
     Contacts {
         contacts: Vec<Contact>,
@@ -67,10 +69,34 @@ pub enum Event {
     },
     /// Every installed sticker pack, with each sticker's bytes already written
     /// into the media cache.
-    StickerPacks(Vec<petunia_data::stickers::Pack>),
+    StickerPacks {
+        packs: Vec<petunia_data::stickers::Pack>,
+        /// Installed packs that nothing could be drawn of, because none of their
+        /// stickers ever arrived. Counted rather than dropped silently: an empty
+        /// picker saying "no sticker packs yet" to somebody who has ten of them
+        /// is the failure reporting itself as a fresh install.
+        unreadable: usize,
+    },
+    /// A pack that was read but not installed, for the sheet that offers to add
+    /// it. `Err` carries what to say when the fetch failed, since a sheet that
+    /// waits forever is the same as one that lies.
+    StickerPackPreview {
+        pack_id: Vec<u8>,
+        pack: Result<petunia_data::stickers::Pack, String>,
+    },
+    /// What the sidebar draws for a thread's newest message: the line, not the
+    /// message. Read back off disk at startup, so the list is whole before a
+    /// single row has been decoded or a single profile fetched.
     Preview {
         thread: Thread,
-        message: Message,
+        preview: petunia_data::index::Preview,
+    },
+    /// That a thread has something in it, with no line to show for it -- its
+    /// newest rows are reactions, edits and tombstones, which project to nothing
+    /// renderable. Enough to keep it listed, which is what it was not.
+    Activity {
+        thread: Thread,
+        at: u64,
     },
     History {
         thread: Thread,
@@ -109,5 +135,45 @@ pub enum Event {
     /// Whether the message stream is up. The worker knows; nothing else can.
     Connection(Connection),
     Error(String),
+    /// This device has been unlinked and its local store cleared. Nothing but
+    /// linking again can follow.
+    LoggedOut,
+    /// The account's username, and the `signal.me` link it confirmed with.
+    /// `None` when it was deleted rather than set.
+    Username(Option<(String, String)>),
+    /// What a new-chat lookup resolved to. Carries the query it answers, so an
+    /// answer that arrives after the field has moved on can be dropped.
+    LookedUp {
+        query: String,
+        found: Option<Contact>,
+    },
+    /// A group this account has just made, ready to be opened.
+    GroupCreated {
+        thread: Thread,
+    },
+    /// A nickname and note for a contact, from Storage Service or from this
+    /// account just having set one. `None` for either half means it was
+    /// cleared, not that it was left unread.
+    Nickname {
+        uuid: Uuid,
+        name: Option<String>,
+        note: Option<String>,
+    },
+    /// Somebody's block state, read out of Storage Service at startup or set
+    /// here just now.
+    Blocked {
+        uuid: Uuid,
+        blocked: bool,
+    },
+    /// A message this device is to forget, because "delete for me" happened --
+    /// here, or on another device that told us about it.
+    Forgotten {
+        thread: Thread,
+        target: petunia_data::MessageId,
+    },
+    /// Our own avatar changed, at the path the worker cached the new picture
+    /// under -- the same shape `Event::Avatar` already uses for everyone
+    /// else's.
+    AvatarUpdated(std::path::PathBuf),
 }
 
