@@ -1,3 +1,4 @@
+pub mod latex;
 pub mod markup;
 pub mod project;
 pub mod range;
@@ -33,8 +34,43 @@ pub struct Message {
 pub enum Content {
     Text { body: String, ranges: Vec<Range> },
     Sticker(Box<Sticker>),
+    Poll(Box<Poll>),
     Deleted,
     Update(Update),
+}
+
+#[derive(Debug, Clone)]
+pub struct Poll {
+    pub question: String,
+    pub options: Vec<String>,
+    pub allow_multiple: bool,
+    /// One entry per voter, replaced rather than appended: Signal's own poll
+    /// vote carries every option a voter has chosen, not a single toggle, and
+    /// a `count` that only ever increases -- an older ballot for someone who
+    /// has already voted again is dropped rather than folded in.
+    pub ballots: Vec<Ballot>,
+    pub terminated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ballot {
+    pub voter: Uuid,
+    pub option_indexes: Vec<u32>,
+    pub count: u32,
+}
+
+impl Poll {
+    /// How many ballots named this option, for the bar under it.
+    pub fn votes_for(&self, option: usize) -> usize {
+        self.ballots
+            .iter()
+            .filter(|ballot| ballot.option_indexes.contains(&(option as u32)))
+            .count()
+    }
+
+    pub fn ballot_for(&self, voter: Uuid) -> Option<&Ballot> {
+        self.ballots.iter().find(|ballot| ballot.voter == voter)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -202,6 +238,7 @@ impl Message {
                 Some(emoji) => format!("{emoji} Sticker"),
                 None => "Sticker".into(),
             },
+            Content::Poll(poll) => format!("📊 {}", poll.question),
             Content::Deleted => "This message was deleted".into(),
             Content::Update(Update::ExpireTimer { seconds: 0 }) => {
                 "Disappearing messages off".into()
@@ -226,7 +263,7 @@ impl Message {
         Self::new(id, Content::Text { body, ranges })
     }
 
-    fn new(id: MessageId, content: Content) -> Self {
+    pub fn new(id: MessageId, content: Content) -> Self {
         Self {
             id,
             content,

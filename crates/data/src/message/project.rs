@@ -9,7 +9,10 @@ use presage::store::ContentExt;
 use uuid::Uuid;
 
 use super::range;
-use super::{Content, LinkPreview, Message, MessageId, Quote, Reaction, Status, Sticker, Update};
+use super::{
+    Ballot, Content, LinkPreview, Message, MessageId, Poll, Quote, Reaction, Status, Sticker,
+    Update,
+};
 use crate::{Thread, attachment};
 
 #[derive(Debug, Clone)]
@@ -18,7 +21,27 @@ pub enum Fragment {
     Edit { target: MessageId, message: Message },
     Reaction { target: MessageId, reaction: Reaction, remove: bool },
     Delete { target: MessageId },
+    PollVote { target: MessageId, ballot: Ballot },
+    PollTerminate { target: MessageId },
     Ignored,
+}
+
+impl Fragment {
+    /// Who this row came from, where that is knowable. Every one of these but
+    /// `Ignored` was sent by somebody -- for a modifier it is the author of the
+    /// modification, not of the message it lands on, which is what "did a blocked
+    /// person send this" has to mean: a reaction from somebody blocked is still
+    /// something from somebody blocked.
+    pub fn sender(&self) -> Option<Uuid> {
+        match self {
+            Self::Message(message) | Self::Edit { message, .. } => Some(message.sender()),
+            Self::Reaction { reaction, .. } => Some(reaction.author),
+            Self::Delete { target }
+            | Self::PollVote { target, .. }
+            | Self::PollTerminate { target } => Some(target.sender),
+            Self::Ignored => None,
+        }
+    }
 }
 
 pub fn classify(envelope: &Envelope) -> Option<(Thread, Fragment)> {
@@ -87,6 +110,16 @@ pub fn project(rows: impl IntoIterator<Item = Envelope>) -> Vec<Message> {
                     apply_delete(existing);
                 }
             }
+            Fragment::PollVote { target, ballot } => {
+                if let Some(existing) = messages.get_mut(&target) {
+                    apply_poll_vote(existing, ballot);
+                }
+            }
+            Fragment::PollTerminate { target } => {
+                if let Some(existing) = messages.get_mut(&target) {
+                    apply_poll_terminate(existing);
+                }
+            }
             Fragment::Message(_) | Fragment::Ignored => {}
         }
     }
@@ -116,6 +149,27 @@ pub fn apply_delete(message: &mut Message) {
     message.quote = None;
     message.preview = None;
     message.reactions.clear();
+}
+
+/// Replaces a voter's ballot, unless an out-of-order delivery would move their
+/// count backwards -- `count` only ever increases from a real client, so a
+/// smaller one arriving late is stale rather than a retraction.
+pub fn apply_poll_vote(message: &mut Message, ballot: Ballot) {
+    if let Content::Poll(poll) = &mut message.content {
+        if let Some(existing) = poll.ballots.iter().find(|existing| existing.voter == ballot.voter)
+            && existing.count > ballot.count
+        {
+            return;
+        }
+        poll.ballots.retain(|existing| existing.voter != ballot.voter);
+        poll.ballots.push(ballot);
+    }
+}
+
+pub fn apply_poll_terminate(message: &mut Message) {
+    if let Content::Poll(poll) = &mut message.content {
+        poll.terminated = true;
+    }
 }
 
 /// One thing worth fetching, and whether waiting to be asked for it is an
@@ -253,6 +307,39 @@ fn data_fragment(data: &DataMessage, sender: Uuid, timestamp: u64) -> Fragment {
         };
     }
 
+    if let Some(vote) = &data.poll_vote {
+        let author = uuid(&None, &vote.target_author_aci_binary);
+        let Some((author, timestamp)) = author.zip(vote.target_sent_timestamp) else {
+            return Fragment::Ignored;
+        };
+        return Fragment::PollVote {
+            target: MessageId {
+                timestamp,
+                sender: author,
+            },
+            ballot: Ballot {
+                voter: sender,
+                option_indexes: vote.option_indexes.clone(),
+                count: vote.vote_count(),
+            },
+        };
+    }
+
+    // Only the poll's own author ever terminates it, so the terminating
+    // message's own sender is the poll's -- there is no author field on the
+    // wire message to say so explicitly.
+    if let Some(terminate) = &data.poll_terminate {
+        return match terminate.target_sent_timestamp {
+            Some(target) => Fragment::PollTerminate {
+                target: MessageId {
+                    timestamp: target,
+                    sender,
+                },
+            },
+            None => Fragment::Ignored,
+        };
+    }
+
     let id = MessageId { timestamp, sender };
     let message = message(data, id);
 
@@ -287,6 +374,16 @@ fn content(data: &DataMessage) -> Content {
         return Content::Update(Update::ExpireTimer {
             seconds: data.expire_timer(),
         });
+    }
+
+    if let Some(create) = &data.poll_create {
+        return Content::Poll(Box::new(Poll {
+            question: create.question().to_string(),
+            options: create.options.clone(),
+            allow_multiple: create.allow_multiple(),
+            ballots: Vec::new(),
+            terminated: false,
+        }));
     }
 
     if let Some(sticker) = &data.sticker {

@@ -208,17 +208,29 @@ pub fn wrap(
     let Some(marker) = marker_for(style) else {
         return (text.to_string(), selection);
     };
+    between(text, selection, marker, marker)
+}
+
+/// The same, for the two things the toolbar writes that are not a Signal style:
+/// a fence, whose halves differ, and a pair of dollars around maths, which
+/// travels as the characters that were typed because no client renders it.
+pub fn between(
+    text: &str,
+    selection: std::ops::Range<usize>,
+    opening: &str,
+    closing: &str,
+) -> (String, std::ops::Range<usize>) {
     let start = selection.start.min(text.len());
     let end = selection.end.clamp(start, text.len());
 
-    let mut wrapped = String::with_capacity(text.len() + marker.len() * 2);
+    let mut wrapped = String::with_capacity(text.len() + opening.len() + closing.len());
     wrapped.push_str(&text[..start]);
-    wrapped.push_str(marker);
+    wrapped.push_str(opening);
     wrapped.push_str(&text[start..end]);
-    wrapped.push_str(marker);
+    wrapped.push_str(closing);
     wrapped.push_str(&text[end..]);
 
-    let moved = start + marker.len()..end + marker.len();
+    let moved = start + opening.len()..end + opening.len();
     (wrapped, moved)
 }
 
@@ -426,6 +438,17 @@ mod tests {
     #[test]
     fn wrapping_clamps_a_selection_past_the_end() {
         assert_eq!(wrap("hi", 0..99, Style::Monospace).0, "`hi`");
+    }
+
+    /// The markers whose halves differ, which is every one the toolbar writes
+    /// that Signal has no style for.
+    #[test]
+    fn wrapping_between_two_different_markers() {
+        let (text, selection) = between("say ", 4..4, "```\n", "\n```");
+
+        assert_eq!(text, "say ```\n\n```");
+        assert_eq!(selection, 8..8);
+        assert_eq!(between("x", 0..1, "$", "$").0, "$x$");
     }
 
     /// A button writes the starred spelling, never the underscored one, so what
