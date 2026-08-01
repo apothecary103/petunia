@@ -38,9 +38,12 @@ pub fn items(message: &Message, own: bool, act: &Dispatch) -> Vec<Item> {
     items.push(Item::Separator);
     items.push(entry(act, "Message details", IconName::Info, Act::Raw(id)));
 
-    if own && message.is_addressable() {
+    // Offered on anybody's message, because "delete for me" works on anybody's.
+    // Which of the two deletions happens is asked rather than assumed, so this is
+    // one item either way.
+    if message.is_addressable() {
         items.push(Item::Separator);
-        items.push(entry(act, "Delete", IconName::Delete, Act::Delete(id)).danger());
+        items.push(entry(act, "Delete…", IconName::Delete, Act::Delete(id)).danger());
     }
 
     items
@@ -82,13 +85,21 @@ fn attachments(message: &Message, act: &Dispatch) -> Vec<Item> {
 }
 
 /// The menu for a person: the same one the details panel opens, plus a way in.
-pub fn person(who: uuid::Uuid, act: &Dispatch) -> Vec<Item> {
-    vec![entry(
-        act,
-        "Show profile",
-        IconName::User,
-        Act::Inspect(who),
-    )]
+///
+/// `blocked` decides which way the block item reads, since it is a toggle and a
+/// menu that offered both would be a menu where one of them does nothing.
+pub fn person(who: uuid::Uuid, blocked: bool, act: &Dispatch) -> Vec<Item> {
+    let mut items = vec![
+        entry(act, "Show profile", IconName::User, Act::Inspect(who)),
+        entry(act, "Set nickname…", IconName::Replace, Act::Nickname(who)),
+        Item::Separator,
+    ];
+
+    items.push(match blocked {
+        true => entry(act, "Unblock", IconName::CircleCheck, Act::Block(who, false)),
+        false => entry(act, "Block…", IconName::CircleX, Act::Block(who, true)).danger(),
+    });
+    items
 }
 
 fn entry(act: &Dispatch, label: &'static str, icon: IconName, what: Act) -> Item {
@@ -137,17 +148,20 @@ mod tests {
         let offered = labels(&items(&message("hi"), true, &dispatch()));
 
         assert!(offered.contains(&"Edit".to_string()));
-        assert!(offered.contains(&"Delete".to_string()));
+        assert!(offered.contains(&"Delete…".to_string()));
     }
 
-    /// Signal permits neither on someone else's, so offering them would be two
-    /// controls that cannot do what they say.
+    /// Signal permits editing only your own, so offering it on somebody else's
+    /// would be a control that cannot do what it says. Deleting is *not* in that
+    /// position: "delete for me" works on anybody's, which is why the item is
+    /// there either way and the dialog behind it decides which deletions to
+    /// offer.
     #[test]
-    fn someone_else_s_message_cannot() {
+    fn someone_else_s_message_cannot_be_edited_but_can_be_deleted() {
         let offered = labels(&items(&message("hi"), false, &dispatch()));
 
         assert!(!offered.contains(&"Edit".to_string()));
-        assert!(!offered.contains(&"Delete".to_string()));
+        assert!(offered.contains(&"Delete…".to_string()));
         assert!(offered.contains(&"Reply".to_string()));
     }
 
@@ -160,7 +174,7 @@ mod tests {
 
         assert!(!offered.contains(&"Reply".to_string()));
         assert!(!offered.contains(&"Forward…".to_string()));
-        assert!(!offered.contains(&"Delete".to_string()));
+        assert!(!offered.contains(&"Delete…".to_string()));
     }
 
     /// Forwarding is not editing, so it is offered on anyone's message.

@@ -1,8 +1,9 @@
 //! Asking for one line of text.
 //!
-//! There is exactly one of these — naming a folder — and it is here rather than
-//! inline in the sidebar because a menu cannot hold a text field: the menu
-//! closes on the click that would focus it.
+//! Every single line goes through this one — a folder's name, a nickname, a
+//! group's title — and it is here rather than inline in the sidebar because a
+//! menu cannot hold a text field: the menu closes on the click that would focus
+//! it.
 
 use gpui::prelude::*;
 use gpui::{Context, Entity, MouseButton, SharedString, Subscription, Window, div, px};
@@ -24,6 +25,10 @@ impl gpui::EventEmitter<Answered> for Prompt {}
 pub struct Prompt {
     title: SharedString,
     confirm: SharedString,
+    /// One line under the field, for the thing somebody would otherwise have to
+    /// be told elsewhere or not at all. Absent unless it is asked for, since a
+    /// prompt with nothing to explain must not reserve a line for it.
+    note: Option<SharedString>,
     input: Entity<InputState>,
     focus: gpui::FocusHandle,
     _subscriptions: Vec<Subscription>,
@@ -51,10 +56,16 @@ impl Prompt {
         Self {
             title: title.into(),
             confirm: confirm.into(),
+            note: None,
             input,
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
         }
+    }
+
+    pub fn note(mut self, note: impl Into<SharedString>) -> Self {
+        self.note = Some(note.into());
+        self
     }
 
     pub fn take_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -99,15 +110,15 @@ impl Render for Prompt {
                             .child(self.title.clone()),
                     )
                     .child(
-                        div()
-                            .px_2p5()
-                            .py_2()
-                            .rounded(px(kit::RADIUS))
-                            .bg(palette.sunken)
-                            .border_1()
-                            .border_color(palette.border)
+                        kit::field(&palette)
                             .child(Input::new(&self.input).appearance(false).bordered(false)),
                     )
+                    .children(self.note.clone().map(|note| {
+                        div()
+                            .text_size(px(palette.typography.ui_size - 1.0))
+                            .text_color(palette.text_muted)
+                            .child(note)
+                    }))
                     .child(
                         div()
                             .flex()

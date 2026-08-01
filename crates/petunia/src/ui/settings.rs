@@ -10,7 +10,6 @@ use gpui::prelude::*;
 use gpui::{App, Context, Entity, MouseButton, MouseDownEvent, SharedString, Window, div, px};
 
 use super::kit;
-use petunia_config::keys::Preset;
 use petunia_config::messages::{Density, Layout, Timestamps};
 use petunia_config::{Config, GroupNotifications, Sort, Theme, theme, write};
 use crate::store::Store;
@@ -22,8 +21,19 @@ pub struct Dismissed;
 /// covers more than this sheet does.
 pub struct EditFile;
 
+/// A username was asked for. The workspace opens the one prompt that already
+/// knows how to take a line of text, because this sheet has nowhere to put a
+/// text field of its own without becoming the thing it already isn't.
+pub struct RequestUsername;
+
+/// Logging out was asked for. The workspace confirms it before telling the
+/// worker, because there is no undo once the device is unlinked.
+pub struct RequestLogOut;
+
 impl gpui::EventEmitter<Dismissed> for Settings {}
 impl gpui::EventEmitter<EditFile> for Settings {}
+impl gpui::EventEmitter<RequestUsername> for Settings {}
+impl gpui::EventEmitter<RequestLogOut> for Settings {}
 
 /// What clicking something does. Boxed rather than generic because a select is
 /// built from a list of them and they are all different closures.
@@ -37,6 +47,7 @@ type Option_ = (SharedString, bool, Click);
 /// reach the keyboard and no way to tell how much of it there was.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
+    Account,
     Appearance,
     Messages,
     List,
@@ -46,7 +57,8 @@ enum Tab {
 }
 
 impl Tab {
-    const EVERY: [Tab; 6] = [
+    const EVERY: [Tab; 7] = [
+        Tab::Account,
         Tab::Appearance,
         Tab::Messages,
         Tab::List,
@@ -57,6 +69,7 @@ impl Tab {
 
     fn label(self) -> &'static str {
         match self {
+            Tab::Account => "Account",
             Tab::Appearance => "Appearance",
             Tab::Messages => "Messages",
             Tab::List => "Conversations",
@@ -70,6 +83,7 @@ impl Tab {
         use gpui_component::IconName;
 
         match self {
+            Tab::Account => IconName::User,
             Tab::Appearance => IconName::Palette,
             Tab::Messages => IconName::GalleryVerticalEnd,
             Tab::List => IconName::PanelLeft,
@@ -155,6 +169,34 @@ impl Settings {
         cx.notify();
     }
 
+    /// Reads the picked image once, here, so the worker never touches a path
+    /// that might have changed by the time it gets to it.
+    fn pick_avatar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Choose".into()),
+        });
+
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = picked.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            let Ok(bytes) = std::fs::read(&path) else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                this.store.update(cx, |store, _| store.set_avatar(bytes));
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Picking a theme takes effect at once rather than waiting for the watcher,
     /// because the whole point of choosing one is looking at it.
     fn pick_theme(&mut self, name: String, cx: &mut Context<Self>) {
@@ -237,6 +279,9 @@ impl Render for Settings {
                                     .px_5()
                                     .pb_5()
                                     .child(match self.tab {
+                                        Tab::Account => {
+                                            self.account(&palette, cx).into_any_element()
+                                        }
                                         Tab::Appearance => {
                                             self.appearance(&draft, &palette, cx).into_any_element()
                                         }
@@ -368,6 +413,127 @@ impl Settings {
                 gpui_component::IconName::Close,
                 palette,
                 cx.listener(|_, _, _, cx| cx.emit(Dismissed)),
+            ))
+    }
+
+    fn account(&self, palette: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let username = self.store.read(cx).username.clone();
+        let phone_number = self.store.read(cx).phone_number.clone();
+
+        div()
+            .flex()
+            .flex_col()
+            .child(group(
+                "This device",
+                palette,
+                vec![
+                    field("Phone number", palette)
+                        .child(
+                            div()
+                                .text_size(px(palette.typography.ui_size))
+                                .text_color(palette.text)
+                                .child(phone_number.unwrap_or_else(|| "—".into())),
+                        )
+                        .into_any_element(),
+                    field("Profile picture", palette)
+                        .child(kit::button(
+                            "change-avatar",
+                            "Change…",
+                            kit::Intent::Quiet,
+                            palette,
+                            cx.listener(|this: &mut Self, _, window, cx| this.pick_avatar(window, cx)),
+                        ))
+                        .into_any_element(),
+                ],
+                None,
+            ))
+            .child(group(
+                "Username",
+                palette,
+                vec![match username {
+                    Some((name, link)) => div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_4()
+                        .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .min_w_0()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .text_size(px(palette.typography.ui_size))
+                                    .text_color(palette.text)
+                                    .child(name),
+                            )
+                            // A username read out of Storage Service may have no
+                            // link beside it: the record carries the two
+                            // separately, and a blank line is not a link.
+                            .children(Some(link).filter(|link| !link.is_empty()).map(|link| {
+                                div()
+                                    .text_size(px(palette.typography.ui_size - 2.0))
+                                    .text_color(palette.text_muted)
+                                    .child(link)
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_none()
+                            .gap_1p5()
+                            .child(kit::button(
+                                "change-username",
+                                "Change",
+                                kit::Intent::Quiet,
+                                palette,
+                                cx.listener(|_, _, _, cx| cx.emit(RequestUsername)),
+                            ))
+                            .child(kit::button(
+                                "remove-username",
+                                "Remove",
+                                kit::Intent::Quiet,
+                                palette,
+                                cx.listener(|this: &mut Self, _, _, cx| {
+                                    this.store
+                                        .update(cx, |store, _| store.delete_username());
+                                }),
+                            )),
+                    )
+                    .into_any_element(),
+                    None => field("No username set", palette)
+                        .child(kit::button(
+                            "set-username",
+                            "Set a username",
+                            kit::Intent::Primary,
+                            palette,
+                            cx.listener(|_, _, _, cx| cx.emit(RequestUsername)),
+                        ))
+                        .into_any_element(),
+                }],
+                None,
+            ))
+            .child(group(
+                "Danger zone",
+                palette,
+                vec![
+                    described(
+                        "Log out",
+                        "Unlinks this device from Signal and clears everything stored \
+                         here. You will need to link again from your phone.",
+                        palette,
+                    )
+                    .child(kit::button(
+                        "log-out",
+                        "Log Out",
+                        kit::Intent::Danger,
+                        palette,
+                        cx.listener(|_, _, _, cx| cx.emit(RequestLogOut)),
+                    ))
+                    .into_any_element(),
+                ],
+                None,
             ))
     }
 
@@ -744,37 +910,41 @@ impl Settings {
         )
     }
 
+    /// There is nothing to set here, which is the point.
+    ///
+    /// There used to be three presets — standard, emacs, vim — and they were a
+    /// promise this cannot keep: a preset is only a preset if it goes all the way
+    /// down, and a chat window has no modes, no kill ring and no buffer list. So
+    /// what a person got for choosing one was the same twenty verbs under chords
+    /// they would have to look up anyway. What they actually wanted out of it was
+    /// `ctrl+p` and `ctrl+n`, which everybody has now.
+    ///
+    /// So this page reports rather than offers: whether the keymap is the shipped
+    /// one, and the two places to go about it. A row with one control that resets
+    /// to the state you are already in is not a control.
     fn keys(&self, draft: &Config, palette: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let current = draft.keys.matches();
+        let _ = cx;
 
         group(
             "Keyboard",
             palette,
             vec![
-                field("Preset", palette)
-                    .child(div().flex().gap_1p5().children(Preset::every().map(
-                        |preset| {
-                            chip(
-                                preset.label(),
-                                current == Some(preset),
-                                palette,
-                                cx.listener(move |this: &mut Self, _, _, cx| {
-                                    this.change(
-                                        |config| config.keys = petunia_config::Keys::preset(preset),
-                                        cx,
-                                    )
-                                }),
-                            )
-                        },
-                    )))
+                field("Bindings", palette)
+                    .child(
+                        div()
+                            .text_size(px(palette.typography.ui_size))
+                            .text_color(palette.text_dim)
+                            .child(match draft.keys.are_default() {
+                                true => "Default",
+                                false => "Edited in config.toml",
+                            }),
+                    )
                     .into_any_element(),
             ],
-            Some(match current {
-                Some(_) => "Press cmd+/ to see the bindings. Individual keys can be rebound \
-                            by editing config.toml.",
-                None => "These bindings have been edited, so no preset matches. Press cmd+/ \
-                         to see them.",
-            }),
+            Some(
+                "Press cmd+/ for the whole list. Any of them can be rebound by \
+                 editing config.toml.",
+            ),
         )
     }
 }

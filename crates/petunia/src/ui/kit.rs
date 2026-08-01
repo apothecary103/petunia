@@ -169,7 +169,7 @@ pub fn badge(label: impl Into<SharedString>, tint: Hsla, size: f32, line: f32) -
 
 /// A filled dot, for "something happened here" with nothing worth counting.
 pub fn dot(tint: Hsla) -> Div {
-    div().flex_none().size(px(6.0)).rounded_full().bg(tint)
+    div().flex_none().size(px(5.0)).rounded_full().bg(tint)
 }
 
 /// Three dots rising in turn: somebody is typing.
@@ -221,6 +221,22 @@ pub fn column() -> Div {
 /// A colour at the strength a fill wants rather than the strength text wants.
 pub fn tinted(color: Hsla) -> Hsla {
     Hsla { a: 0.16, ..color }
+}
+
+/// The box a line of text is typed into. The box rather than the input, so a
+/// field made of more than one input -- a username, which is a name and a number
+/// -- is one box with a separator drawn in it rather than two sitting beside each
+/// other.
+pub fn field(theme: &Theme) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .px_2p5()
+        .py_2()
+        .rounded(px(RADIUS))
+        .bg(theme.sunken)
+        .border_1()
+        .border_color(theme.border)
 }
 
 /// The card a dialog sits in, over a scrim that dims what it is covering.

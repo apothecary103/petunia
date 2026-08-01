@@ -31,15 +31,46 @@ pub type Create = Rc<dyn Fn(&mut Window, &mut gpui::App)>;
 /// reason `Create` is: it needs a dialog, not a flag.
 pub type Delete = Rc<dyn Fn(&mut Window, &mut gpui::App)>;
 
+/// Who a one-to-one conversation is with, and what is already true about them.
+/// `None` for a group, which has nobody to nickname and nobody to block.
+#[derive(Debug, Clone, Copy)]
+pub struct Person {
+    pub who: uuid::Uuid,
+    pub blocked: bool,
+}
+
+/// What the two entries about the person do. Both need more than a flag -- a
+/// nickname needs a field and blocking asks first -- so both are callbacks, and
+/// blocking is told which way it is going rather than reading it back.
+pub type Name = Rc<dyn Fn(uuid::Uuid, &mut Window, &mut gpui::App)>;
+pub type Block = Rc<dyn Fn(uuid::Uuid, bool, &mut Window, &mut gpui::App)>;
+
+/// What every entry in the menu does. One struct rather than five arguments:
+/// they are all the same kind of thing, and a caller passing them positionally
+/// is a caller who can swap two of them silently.
+pub struct Acts {
+    pub apply: Apply,
+    pub create: Create,
+    pub delete: Delete,
+    pub name: Name,
+    pub block: Block,
+}
+
 /// The menu for a conversation in the list.
 pub fn items(
     flags: &Flags,
     folders: &[String],
     now: u64,
-    apply: Apply,
-    create: Create,
-    delete: Delete,
+    person: Option<Person>,
+    acts: Acts,
 ) -> Vec<Item> {
+    let Acts {
+        apply,
+        create,
+        delete,
+        name,
+        block,
+    } = acts;
     let mut items = vec![
         toggle(
             &apply,
@@ -119,6 +150,34 @@ pub fn items(
         );
     }
 
+    // What is true about the person rather than about the conversation. Here
+    // rather than only in the details panel: the list is where you already are
+    // when you decide you have had enough of somebody, and a panel you have to
+    // open first to reach a verb is a verb behind a door.
+    if let Some(person) = person {
+        items.push(Item::Separator);
+        items.push(
+            Item::new("Set nickname…", move |window: &mut Window, cx: &mut gpui::App| {
+                name(person.who, window, cx)
+            })
+            .icon(IconName::Replace),
+        );
+        // A toggle written as one entry that reads the way it acts. Both at
+        // once would be a menu where one of them does nothing.
+        items.push(match person.blocked {
+            true => Item::new("Unblock", {
+                let block = block.clone();
+                move |window: &mut Window, cx: &mut gpui::App| block(person.who, false, window, cx)
+            })
+            .icon(IconName::CircleCheck),
+            false => Item::new("Block…", move |window: &mut Window, cx: &mut gpui::App| {
+                block(person.who, true, window, cx)
+            })
+            .icon(IconName::CircleX)
+            .danger(),
+        });
+    }
+
     // Last, and behind a separator: the one entry here that throws something
     // away, kept as far as possible from the ones that merely file it. The
     // ellipsis is the promise that it asks first.
@@ -174,14 +233,30 @@ mod tests {
 
     /// What is offered, which is all these check -- not what it does.
     fn menu(flags: Flags, folders: &[String], now: u64) -> Vec<Item> {
+        with(flags, folders, now, None)
+    }
+
+    fn with(flags: Flags, folders: &[String], now: u64, person: Option<Person>) -> Vec<Item> {
         items(
             &flags,
             folders,
             now,
-            Rc::new(|_, _, _| {}),
-            Rc::new(|_, _| {}),
-            Rc::new(|_, _| {}),
+            person,
+            Acts {
+                apply: Rc::new(|_, _, _| {}),
+                create: Rc::new(|_, _| {}),
+                delete: Rc::new(|_, _| {}),
+                name: Rc::new(|_, _, _| {}),
+                block: Rc::new(|_, _, _, _| {}),
+            },
         )
+    }
+
+    fn person(blocked: bool) -> Option<Person> {
+        Some(Person {
+            who: uuid::Uuid::nil(),
+            blocked,
+        })
     }
 
     /// Without this there is no way to make the first folder, and the whole
@@ -264,6 +339,54 @@ mod tests {
                 "{flags:?}"
             );
         }
+    }
+
+    /// The list is where you already are when you decide what to do about
+    /// somebody, so both verbs are reachable without opening a panel first.
+    #[test]
+    fn a_conversation_with_one_person_offers_a_nickname_and_a_block() {
+        let offered = labels(&with(Flags::default(), &[], 0, person(false)));
+
+        assert!(offered.contains(&"Set nickname…".to_string()));
+        assert!(offered.contains(&"Block…".to_string()));
+    }
+
+    /// Blocking is a toggle, and a menu offering both ways of it would be a menu
+    /// where one of them does nothing.
+    #[test]
+    fn somebody_already_blocked_is_only_offered_the_way_back() {
+        let offered = labels(&with(Flags::default(), &[], 0, person(true)));
+
+        assert!(offered.contains(&"Unblock".to_string()));
+        assert!(!offered.contains(&"Block…".to_string()));
+    }
+
+    /// A group has nobody to nickname and nobody to block.
+    #[test]
+    fn a_group_is_offered_neither() {
+        let offered = labels(&menu(Flags::default(), &[], 0));
+
+        assert!(!offered.contains(&"Set nickname…".to_string()));
+        assert!(!offered.contains(&"Block…".to_string()));
+        assert!(!offered.contains(&"Unblock".to_string()));
+    }
+
+    /// Blocking is destructive enough to be marked as such, and the ellipsis is
+    /// the promise that it asks first -- the same two things the delete entry
+    /// carries. Unblocking is neither: it is the undo.
+    #[test]
+    fn blocking_asks_first_and_unblocking_does_not() {
+        let blocking = with(Flags::default(), &[], 0, person(false));
+        assert!(blocking.iter().any(|item| matches!(
+            item,
+            Item::Entry { label, danger: true, .. } if label == "Block…"
+        )));
+
+        let unblocking = with(Flags::default(), &[], 0, person(true));
+        assert!(unblocking.iter().any(|item| matches!(
+            item,
+            Item::Entry { label, danger: false, .. } if label == "Unblock"
+        )));
     }
 
     #[test]

@@ -20,7 +20,18 @@ use crate::theme::ActivePalette;
 #[derive(Debug, Clone)]
 pub struct Viewing(pub PathBuf);
 
+/// A nickname was asked for. The workspace owns the prompt that takes a line
+/// of text, same as naming a folder.
+#[derive(Debug, Clone, Copy)]
+pub struct EditNickname(pub Uuid);
+
+/// Somebody is to be blocked or unblocked. The workspace answers it, because
+/// blocking asks first and a panel does not own dialogs.
+pub struct SetBlocked(pub Uuid, pub bool);
+
 impl gpui::EventEmitter<Viewing> for Details {}
+impl gpui::EventEmitter<EditNickname> for Details {}
+impl gpui::EventEmitter<SetBlocked> for Details {}
 
 /// The two things anything in the panel can ask for. Built before the store is
 /// read, because a listener needs the context mutably and the store's contents
@@ -29,6 +40,10 @@ impl gpui::EventEmitter<Viewing> for Details {}
 struct Hooks {
     view: Hook<PathBuf>,
     inspect: Hook<Uuid>,
+    nickname: Hook<Uuid>,
+    /// Who, and which way. Blocking is asked about and unblocking is not, and
+    /// that decision belongs to the workspace rather than to a row.
+    block: Hook<(Uuid, bool)>,
 }
 
 type Hook<T> = std::rc::Rc<dyn Fn(T, &mut Window, &mut gpui::App)>;
@@ -55,6 +70,18 @@ impl Details {
             inspect: std::rc::Rc::new(move |uuid, _, cx| {
                 store.update(cx, |store, cx| store.inspect(Some(Focus::Person(uuid)), cx));
             }),
+            nickname: {
+                let this = cx.entity();
+                std::rc::Rc::new(move |uuid, _, cx| {
+                    this.update(cx, |_, cx| cx.emit(EditNickname(uuid)));
+                })
+            },
+            block: {
+                let this = cx.entity();
+                std::rc::Rc::new(move |(uuid, blocked), _, cx| {
+                    this.update(cx, |_, cx| cx.emit(SetBlocked(uuid, blocked)));
+                })
+            },
         }
     }
 }
@@ -136,6 +163,89 @@ fn person(
             ],
             palette,
         ))
+        .when(uuid != state.aci, |this| {
+            this.child(nickname_row(uuid, state.nickname_of(uuid), palette, hooks))
+                .child(block_row(uuid, state.is_blocked(uuid), palette, hooks))
+        })
+}
+
+/// Blocking, as a row rather than a switch: it is one of two verbs depending on
+/// where you are, and a toggle that has to be read to know which way it is
+/// pointing is a control that says less than the word does.
+fn block_row(
+    uuid: Uuid,
+    blocked: bool,
+    palette: &Theme,
+    hooks: &Hooks,
+) -> impl IntoElement {
+    let go = hooks.block.clone();
+    let tint = match blocked {
+        true => palette.text_dim,
+        false => palette.danger,
+    };
+
+    div()
+        .id("block")
+        .flex()
+        .items_center()
+        .justify_between()
+        .px_4()
+        .py_2()
+        .cursor_pointer()
+        .hover(|this| this.bg(palette.hover))
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            go((uuid, !blocked), window, cx)
+        })
+        .child(
+            div()
+                .text_size(px(palette.typography.ui_size))
+                .text_color(tint)
+                .child(match blocked {
+                    true => "Unblock",
+                    false => "Block…",
+                }),
+        )
+        .children(blocked.then(|| {
+            div()
+                .text_size(px(palette.typography.ui_size - 1.0))
+                .text_color(palette.text_muted)
+                .child("Blocked")
+        }))
+}
+
+/// A nickname is set through this account alone -- there is nothing else here
+/// worth a text field of its own, so it borrows the same one-line prompt a new
+/// folder is named with.
+fn nickname_row(
+    uuid: Uuid,
+    nickname: Option<&str>,
+    palette: &Theme,
+    hooks: &Hooks,
+) -> impl IntoElement {
+    let go = hooks.nickname.clone();
+
+    div()
+        .id("nickname")
+        .flex()
+        .items_center()
+        .justify_between()
+        .px_4()
+        .py_2()
+        .cursor_pointer()
+        .hover(|this| this.bg(palette.hover))
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| go(uuid, window, cx))
+        .child(
+            div()
+                .text_size(px(palette.typography.ui_size))
+                .text_color(palette.text_dim)
+                .child("Nickname"),
+        )
+        .child(
+            div()
+                .text_size(px(palette.typography.ui_size))
+                .text_color(palette.text)
+                .child(nickname.map(str::to_owned).unwrap_or_else(|| "Set…".into())),
+        )
 }
 
 fn conversation(
