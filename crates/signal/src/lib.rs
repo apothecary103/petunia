@@ -2,6 +2,7 @@ mod cache;
 pub mod command;
 pub mod db;
 mod event;
+mod key;
 mod outgoing;
 mod store;
 mod worker;
@@ -33,4 +34,8 @@ pub enum Error {
     Database(#[from] sqlx::Error),
     #[error("signal error: {0}")]
     Signal(#[from] presage::Error<presage_store_sqlite::SqliteStoreError>),
+    #[error("could not reach the system keyring for the store's key: {0}")]
+    Keyring(#[from] keyring::Error),
+    #[error("{0}")]
+    Encryption(String),
 }

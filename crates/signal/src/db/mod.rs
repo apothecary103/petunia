@@ -2,12 +2,14 @@ pub mod avatars;
 pub mod blobs;
 pub mod flags;
 pub mod messages;
+pub mod names;
+pub mod previews;
 pub mod read;
 pub mod receipts;
 pub mod search;
 pub mod threads;
 
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool};
+use sqlx::sqlite::SqlitePool;
 use sqlx::Row;
 
 use super::Error;
@@ -28,6 +30,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/004_avatars.sql"),
     include_str!("migrations/005_search.sql"),
     include_str!("migrations/006_flags.sql"),
+    include_str!("migrations/007_directory.sql"),
 ];
 
 #[cfg(test)]
@@ -36,19 +39,30 @@ fn latest_version() -> i64 {
 }
 
 impl Db {
+    /// Opens the same file presage's store has, with the same key. Not an
+    /// option: this is a second pool over one encrypted database, and one that
+    /// forgot the key would find nothing there but a corrupt file.
     pub async fn open() -> Result<Self, Error> {
-        Self::open_at(config::store_path()).await
+        let passphrase = super::store::ready().await?;
+        Self::open_with(config::store_path(), Some(&passphrase)).await
     }
 
-    async fn open_at(path: impl AsRef<std::path::Path>) -> Result<Self, Error> {
-        let options = SqliteConnectOptions::new()
-            .filename(path)
-            .create_if_missing(true)
-            .journal_mode(SqliteJournalMode::Wal);
+    async fn open_with(
+        path: impl AsRef<std::path::Path>,
+        passphrase: Option<&str>,
+    ) -> Result<Self, Error> {
+        let options = super::store::options(path.as_ref(), passphrase).create_if_missing(true);
         let pool = SqlitePool::connect_with(options).await?;
         let db = Self { pool };
         db.migrate().await?;
         Ok(db)
+    }
+
+    /// A store built by hand, which only a test has. Everything else goes
+    /// through `open`, and so cannot be opened unkeyed by accident.
+    #[cfg(test)]
+    async fn open_at(path: impl AsRef<std::path::Path>) -> Result<Self, Error> {
+        Self::open_with(path, None).await
     }
 
     async fn migrate(&self) -> Result<(), Error> {
