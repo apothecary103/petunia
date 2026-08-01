@@ -1,3 +1,5 @@
+pub mod emoji;
+pub mod picker;
 pub mod stickers;
 
 use std::borrow::Cow;
@@ -45,6 +47,27 @@ pub enum Intent {
     Edit { target: MessageId },
 }
 
+/// A poll was asked for. The conversation opens it, since a dialog answers to
+/// the workspace rather than to the card that asked for one.
+pub struct RequestPoll;
+
+/// The plus was pressed, at this point on screen. What goes in the menu is the
+/// composer's business; where a menu is drawn is the workspace's, so this only
+/// says where the click was.
+pub struct RequestMore(pub gpui::Point<gpui::Pixels>);
+
+/// A sticker in the picker was right-clicked. What the menu offers -- keeping it
+/// to hand, opening the pack it is from -- is decided where the store is, so
+/// this only says which sticker and where the click was.
+pub struct RequestStickerMenu {
+    pub chosen: stickers::Chosen,
+    pub at: gpui::Point<gpui::Pixels>,
+}
+
+impl gpui::EventEmitter<RequestPoll> for Composer {}
+impl gpui::EventEmitter<RequestMore> for Composer {}
+impl gpui::EventEmitter<RequestStickerMenu> for Composer {}
+
 /// What was typed in a conversation and not sent. Everything the field is
 /// carrying, because all of it was meant for the conversation it was written in
 /// -- a reply banner and a file picked out are as much part of the message as
@@ -78,10 +101,19 @@ pub struct Composer {
     /// to put it away.
     holding: Option<Thread>,
     formatting: bool,
-    /// Which pack the sticker picker is showing, or `None` when it is closed.
-    stickers: Option<stickers::Showing>,
-    /// What is typed into the picker's own filter, which is not the message.
+    /// Which tab of the picker is showing, or `None` when the panel is closed.
+    /// One panel with two tabs rather than two panels: there is only room for
+    /// one above the card, and picking a sticker and picking an emoji are the
+    /// same gesture.
+    picker: Option<picker::Tab>,
+    /// Which pack the sticker tab is showing. Kept while the panel is closed, so
+    /// reopening it shows what was last being browsed.
+    stickers: stickers::Showing,
+    /// What is typed into each tab's own filter, which is not the message.
     sticker_query: Entity<InputState>,
+    /// Which group the emoji tab is showing.
+    emoji: emoji::Showing,
+    emoji_query: Entity<InputState>,
     /// When the last typing indicator went out, so the re-send is throttled.
     announced: Option<Instant>,
     _subscriptions: Vec<Subscription>,
@@ -106,9 +138,17 @@ impl Composer {
             InputState::new(window, cx).placeholder("Search stickers")
         });
 
+        let emoji_query = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Search emoji")
+        });
+
         let subscriptions = vec![
             cx.subscribe_in(&input, window, Self::on_input),
             cx.subscribe_in(&sticker_query, window, |this: &mut Self, _, _: &InputEvent, _, cx| {
+                cx.notify();
+                let _ = this;
+            }),
+            cx.subscribe_in(&emoji_query, window, |this: &mut Self, _, _: &InputEvent, _, cx| {
                 cx.notify();
                 let _ = this;
             }),
@@ -137,8 +177,11 @@ impl Composer {
             drafts,
             holding: None,
             formatting: false,
-            stickers: None,
+            picker: None,
+            stickers: stickers::Showing::default(),
             sticker_query,
+            emoji: emoji::Showing::default(),
+            emoji_query,
             announced: None,
             _subscriptions: subscriptions,
         }
@@ -180,7 +223,7 @@ impl Composer {
         self.attachments = draft.attachments;
         // A picker is about the message being written, so it does not follow the
         // reader into the next conversation either.
-        self.stickers = None;
+        self.picker = None;
         self.input
             .update(cx, |input, cx| input.set_value(draft.body, window, cx));
         cx.notify();
@@ -280,7 +323,7 @@ impl Composer {
             cx.notify();
             return true;
         }
-        if self.stickers.take().is_some() {
+        if self.picker.take().is_some() {
             cx.notify();
             return true;
         }
@@ -298,7 +341,7 @@ impl Composer {
         let Some(thread) = self.store.read(cx).active().cloned() else {
             return;
         };
-        self.stickers = None;
+        self.picker = None;
         self.store.update(cx, |store, cx| {
             store.send_sticker(thread, chosen, cx);
         });
@@ -398,6 +441,49 @@ impl Composer {
         cx.notify();
     }
 
+    /// Puts an emoji in at the caret, replacing whatever was selected.
+    ///
+    /// The picker stays open: picking one is very often picking three, and a
+    /// panel that closed on the first would have to be reopened for each of them.
+    fn insert(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| {
+            let current = input.value().to_string();
+            let selection = input.selected_range();
+            let start = selection.start.min(current.len());
+            let end = selection.end.clamp(start, current.len());
+
+            let mut with = String::with_capacity(current.len() + text.len());
+            with.push_str(&current[..start]);
+            with.push_str(text);
+            with.push_str(&current[end..]);
+
+            let at = start + text.len();
+            input.set_value(with, window, cx);
+            input.set_selected_range(at..at, cx);
+            input.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    /// The same, for the markers Signal has no style for.
+    fn mark_between(
+        &mut self,
+        opening: &str,
+        closing: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.input.update(cx, |input, cx| {
+            let text = input.value().to_string();
+            let (wrapped, selection) =
+                markup::between(&text, input.selected_range(), opening, closing);
+            input.set_value(wrapped, window, cx);
+            input.set_selected_range(selection, cx);
+            input.focus(window, cx);
+        });
+        cx.notify();
+    }
+
     pub fn pick_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // The platform's own dialog rather than a crate's: gpui already owns the
         // event loop a file picker has to run on.
@@ -423,7 +509,7 @@ impl Render for Composer {
         let palette = cx.palette().clone();
         // Read out of the store and let the borrow go: everything below needs
         // the context mutably to build its listeners.
-        let (padding_x, title, typing, packs) = {
+        let (padding_x, title, typing, packs, favourites) = {
             let store = self.store.read(cx);
             // The same padding the message list uses. Both are capped at the
             // reading measure and centred, so a card with a padding of its own
@@ -439,19 +525,22 @@ impl Render for Composer {
                 .active()
                 .zip(store.state())
                 .and_then(|(thread, state)| describe_typing(state, thread));
-            // Only cloned when the picker is up, because a pack is a list of
-            // stickers and this runs every frame.
+            // Only cloned when the sticker tab is up, because a pack is a list
+            // of stickers and this runs every frame.
             let query = self.sticker_query.read(cx).value().to_string();
-            let packs = match self.stickers.is_some() {
-                true => store
-                    .state()
-                    .map(|state| state.sticker_packs.clone())
-                    .unwrap_or_default(),
+            let showing_stickers = self.picker == Some(picker::Tab::Stickers);
+            let packs = match showing_stickers {
+                true => store.sticker_packs().to_vec(),
                 false => Vec::new(),
             };
-            (padding_x, title, typing, (packs, query))
+            let favourites = match showing_stickers {
+                true => store.favourites.kept().to_vec(),
+                false => Vec::new(),
+            };
+            let unreadable = store.unreadable_packs();
+            (padding_x, title, typing, (packs, query, unreadable), favourites)
         };
-        let (packs, query) = packs;
+        let (packs, query, unreadable_packs) = packs;
 
         let field = div()
             .flex()
@@ -518,6 +607,9 @@ impl Render for Composer {
                     )
                     .child("Aa"),
             )
+            // One control for both pickers. Stickers and emoji are the same
+            // gesture -- reach for a picture, put it in the message -- and the
+            // panel it opens is what says which of the two you are after.
             .child(
                 div()
                     .id("stickers")
@@ -528,41 +620,51 @@ impl Render for Composer {
                     .justify_center()
                     .rounded(px(7.0))
                     .cursor_pointer()
-                    .when(self.stickers.is_some(), |this| this.bg(palette.active))
+                    .when(self.picker.is_some(), |this| this.bg(palette.active))
                     .hover(|this| this.bg(palette.hover))
+                    .tooltip(|window, cx| {
+                        gpui_component::tooltip::Tooltip::new("Stickers and emoji")
+                            .build(window, cx)
+                    })
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, _, cx| {
-                            this.stickers = match this.stickers {
+                            this.picker = match this.picker {
                                 Some(_) => None,
-                                None => Some(stickers::Showing::default()),
+                                None => Some(picker::Tab::default()),
                             };
                             cx.notify();
                         }),
                     )
                     // The set ships no sticker glyph, and the smiley this drew
-                    // instead read as an emoji picker -- which is a different
-                    // control that this one is not.
+                    // instead read as an emoji picker -- which is one of the two
+                    // things behind this now, rather than the whole of it.
                     .child(kit::glyph(
                         "icons/sticker.svg",
                         15.0,
-                        if self.stickers.is_some() {
-                            palette.text_dim
-                        } else {
-                            palette.text_muted
+                        match self.picker.is_some() {
+                            true => palette.text_dim,
+                            false => palette.text_muted,
                         },
                     )),
             )
+            // One plus rather than a row of verbs. A poll is a rare thing to send
+            // and a permanent button for it sat beside the file picker as though
+            // the two were equally often wanted; folded into a menu, the card
+            // keeps a control per *kind* of thing instead of one per thing.
             .child(kit::icon_button(
-                "attach",
+                "more",
                 IconName::Plus,
                 &palette,
-                cx.listener(|this, _, window, cx| this.pick_files(window, cx)),
+                cx.listener(|_, event: &gpui::MouseDownEvent, _, cx| {
+                    cx.emit(RequestMore(event.position))
+                }),
             ))
             .child(send(
                 &palette,
                 cx.listener(|this, _, window, cx| this.submit(window, cx)),
             ));
+
 
         kit::column()
             .flex()
@@ -594,17 +696,19 @@ impl Render for Composer {
             .when(!self.attachments.is_empty(), |this| {
                 this.child(strip(&self.attachments, &palette, cx))
             })
-            .when_some(self.stickers.clone(), |this, showing| {
-                this.child(
-                    stickers::Picker {
+            .when_some(self.picker, |this, tab| {
+                let body = match tab {
+                    picker::Tab::Stickers => stickers::Picker {
                         packs: &packs,
-                        showing: &showing,
+                        unreadable: unreadable_packs,
+                        showing: &self.stickers,
                         query: &query,
                         search: &self.sticker_query,
                         theme: &palette,
+                        favourites: &favourites,
                         on_pack: std::rc::Rc::new(cx.listener(
                             |this: &mut Self, showing: &stickers::Showing, _, cx| {
-                                this.stickers = Some(showing.clone());
+                                this.stickers = showing.clone();
                                 cx.notify();
                             },
                         )),
@@ -613,9 +717,53 @@ impl Render for Composer {
                                 this.send_sticker(chosen.clone(), cx)
                             },
                         )),
+                        on_menu: std::rc::Rc::new(cx.listener(
+                            |_: &mut Self,
+                             (chosen, at): &(stickers::Chosen, gpui::Point<gpui::Pixels>),
+                             _,
+                             cx| {
+                                cx.emit(RequestStickerMenu {
+                                    chosen: chosen.clone(),
+                                    at: *at,
+                                })
+                            },
+                        )),
                     }
                     .render(),
-                )
+                    picker::Tab::Emoji => {
+                        let query = self.emoji_query.read(cx).value().to_string();
+                        emoji::Picker {
+                            showing: self.emoji,
+                            query: &query,
+                            search: &self.emoji_query,
+                            theme: &palette,
+                            on_group: std::rc::Rc::new(cx.listener(
+                                |this: &mut Self, showing: &emoji::Showing, _, cx| {
+                                    this.emoji = *showing;
+                                    cx.notify();
+                                },
+                            )),
+                            on_pick: std::rc::Rc::new(cx.listener(
+                                |this: &mut Self, picked: &str, window, cx| {
+                                    this.insert(picked, window, cx)
+                                },
+                            )),
+                        }
+                        .render()
+                    }
+                };
+
+                this.child(picker::panel(
+                    tab,
+                    &palette,
+                    std::rc::Rc::new(cx.listener(
+                        |this: &mut Self, tab: &picker::Tab, _, cx| {
+                            this.picker = Some(*tab);
+                            cx.notify();
+                        },
+                    )),
+                    body,
+                ))
             })
             .when(self.formatting, |this| this.child(toolbar(&palette, cx)))
             .child(field)
@@ -648,14 +796,29 @@ fn spill(image: &gpui::Image) -> Option<PathBuf> {
     std::fs::create_dir_all(&directory).ok()?;
     let path = directory.join(format!("{:016x}.{extension}", image.id()));
 
-    if !path.exists()
-        && let Err(error) = std::fs::write(&path, bytes.as_ref())
-    {
-        tracing::warn!(%error, "could not save a pasted image");
-        return None;
+    // Written under a name of its own and moved into place. The name is a hash of
+    // the bytes, so two pastes of one image aim at the same path, and a `write`
+    // truncates before it fills -- which hands whoever asked second a file that
+    // is half an image. A rename is atomic, and the bytes being identical is what
+    // makes overwriting the winner harmless.
+    if !path.exists() {
+        let staging = directory.join(format!(
+            "{:016x}.{}.part",
+            image.id(),
+            SPILLED.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        if let Err(error) = std::fs::write(&staging, bytes.as_ref())
+            .and_then(|()| std::fs::rename(&staging, &path))
+        {
+            tracing::warn!(%error, "could not save a pasted image");
+            return None;
+        }
     }
     Some(path)
 }
+
+/// Tells one in-flight write of the same image from another.
+static SPILLED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn png(bytes: &[u8]) -> Option<Vec<u8>> {
     let decoded = image::load_from_memory(bytes)
@@ -790,19 +953,51 @@ fn thumbnail(path: &Path, palette: &Theme) -> gpui::AnyElement {
     kit::icon(icon, 16.0, palette.text_muted).into_any_element()
 }
 
-/// Signal's own formatting. Each button is drawn in the style it applies, so it
-/// shows what it does rather than needing an icon to say so -- the icon set has
-/// no bold or italic, and the box-drawing glyph a spoiler wanted is simply
-/// absent from the system font.
-fn toolbar(palette: &Theme, cx: &mut Context<Composer>) -> Div {
-    const MARKS: [(&str, Style); 5] = [
-        ("bold", Style::Bold),
-        ("italic", Style::Italic),
-        ("strikethrough", Style::Strikethrough),
-        ("monospace", Style::Monospace),
-        ("spoiler", Style::Spoiler),
-    ];
+/// What a toolbar button writes around the selection, and how the button is
+/// drawn.
+///
+/// The five Signal styles go through the style, so the marker table in `markup`
+/// stays the one place a spelling is decided. The last three are markers Signal
+/// has no style for: a fence, whose halves differ, and maths, which travels as
+/// what was typed. They are on the same bar because to somebody writing a
+/// message they are the same kind of thing.
+struct Mark {
+    id: &'static str,
+    tip: &'static str,
+    face: Face,
+    opening: &'static str,
+    closing: &'static str,
+    style: Option<Style>,
+}
 
+enum Face {
+    Bold,
+    Italic,
+    Strike,
+    Mono(&'static str),
+    /// A variable, set the way maths sets one.
+    Math(&'static str),
+    Glyph(&'static str),
+    Spoiler,
+}
+
+const MARKS: [Mark; 8] = [
+    Mark { id: "bold", tip: "Bold", face: Face::Bold, opening: "", closing: "", style: Some(Style::Bold) },
+    Mark { id: "italic", tip: "Italic", face: Face::Italic, opening: "", closing: "", style: Some(Style::Italic) },
+    Mark { id: "strikethrough", tip: "Strikethrough", face: Face::Strike, opening: "", closing: "", style: Some(Style::Strikethrough) },
+    Mark { id: "code", tip: "Code", face: Face::Mono("‹›"), opening: "", closing: "", style: Some(Style::Monospace) },
+    Mark { id: "code-block", tip: "Code block", face: Face::Mono("{ }"), opening: "```\n", closing: "\n```", style: None },
+    Mark { id: "maths", tip: "Maths", face: Face::Math("x"), opening: "$", closing: "$", style: None },
+    Mark { id: "display-maths", tip: "Maths block", face: Face::Glyph("∑"), opening: "$$\n", closing: "\n$$", style: None },
+    Mark { id: "spoiler", tip: "Spoiler", face: Face::Spoiler, opening: "", closing: "", style: Some(Style::Spoiler) },
+];
+
+/// Each button is drawn in the style it applies, so it shows what it does rather
+/// than needing an icon to say so -- the icon set has no bold or italic, and the
+/// box-drawing glyph a spoiler wanted is simply absent from the system font.
+/// What is left over is a tooltip, for the three whose glyph is a convention
+/// rather than a picture of the result.
+fn toolbar(palette: &Theme, cx: &mut Context<Composer>) -> Div {
     div()
         .flex()
         .items_center()
@@ -812,11 +1007,14 @@ fn toolbar(palette: &Theme, cx: &mut Context<Composer>) -> Div {
         .bg(palette.elevated)
         .border_1()
         .border_color(palette.border)
-        .children(MARKS.map(|(id, style)| {
+        .children(MARKS.iter().map(|mark| {
+            let (opening, closing, style) = (mark.opening, mark.closing, mark.style);
+            let tip = mark.tip;
+
             // A fixed square with everything centred inside it, so a glyph and
             // an icon sit on the same baseline instead of drifting apart.
             let button = div()
-                .id(id)
+                .id(mark.id)
                 .size(px(26.0))
                 .flex()
                 .flex_none()
@@ -827,21 +1025,28 @@ fn toolbar(palette: &Theme, cx: &mut Context<Composer>) -> Div {
                 .hover(|this| this.bg(palette.hover))
                 .text_size(px(palette.typography.ui_size))
                 .text_color(palette.text_dim)
+                .tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(tip).build(window, cx)
+                })
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(move |this: &mut Composer, _, window, cx| {
-                        this.mark(style, window, cx)
+                    cx.listener(move |this: &mut Composer, _, window, cx| match style {
+                        Some(style) => this.mark(style, window, cx),
+                        None => this.mark_between(opening, closing, window, cx),
                     }),
                 );
 
-            match style {
-                Style::Bold => button.font_weight(kit::STRONG).child("B"),
-                Style::Italic => button.italic().child("I"),
-                Style::Strikethrough => button.line_through().child("S"),
-                Style::Monospace => button
+            match mark.face {
+                Face::Bold => button.font_weight(kit::STRONG).child("B"),
+                Face::Italic => button.italic().child("I"),
+                Face::Strike => button.line_through().child("S"),
+                Face::Mono(glyph) => button
                     .font_family(palette.typography.mono.clone())
-                    .child("M"),
-                _ => button.child(kit::icon(IconName::EyeOff, 15.0, palette.text_dim)),
+                    .text_size(px(palette.typography.ui_size - 1.0))
+                    .child(glyph),
+                Face::Math(glyph) => button.italic().child(glyph),
+                Face::Glyph(glyph) => button.child(glyph),
+                Face::Spoiler => button.child(kit::icon(IconName::EyeOff, 15.0, palette.text_dim)),
             }
         }))
 }
