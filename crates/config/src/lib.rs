@@ -306,7 +306,7 @@ mod tests {
     /// must not drift from the struct definitions.
     #[test]
     fn the_example_config_parses() {
-        let example = include_str!("../../../config.example.toml");
+        let example = include_str!("../../../examples/config.example.toml");
 
         let config: Config = toml::from_str(example).expect("example config parses");
 
@@ -334,7 +334,7 @@ mod tests {
     /// parseable chord, or the documentation lies.
     #[test]
     fn the_example_keybinds_are_all_valid() {
-        let example = include_str!("../../../config.example.toml");
+        let example = include_str!("../../../examples/config.example.toml");
         let bindings: String = example
             .lines()
             .skip_while(|line| !line.starts_with("[keys]"))

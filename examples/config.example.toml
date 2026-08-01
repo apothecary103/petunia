@@ -76,22 +76,23 @@ groups = "all"
 # control elsewhere, so one file works on both. Set a binding to "none" to
 # remove it. Press cmd+/ in the app for the current list.
 [keys]
-# Where the bindings start from: "standard", "emacs" or "vim". Anything below
-# merges on top, so a preset is a starting point rather than a cage.
-# preset = "standard"
-# quick-switcher = "cmd+k"
+# An action may be reached more than one way, and several are: give it a list
+# rather than a string. Naming an action here replaces *every* chord it had, so
+# a list is also how you keep the ones you did not mean to drop.
+# quick-switcher = ["cmd+k", "ctrl+space"]
+# new-chat = "cmd+n"
 # search = "cmd+f"
 # search-thread = "cmd+shift+f"
 # focus-composer = "cmd+l"
 # toggle-sidebar = "cmd+b"
 # toggle-details = "cmd+i"
-# scroll-up = "pageup"
-# scroll-down = "pagedown"
-# scroll-to-top = "cmd+home"
-# scroll-to-bottom = "cmd+end"
+# scroll-up = ["up", "pageup", "ctrl+alt+p"]
+# scroll-down = ["down", "pagedown", "ctrl+alt+n"]
+# scroll-to-top = ["home", "cmd+home"]
+# scroll-to-bottom = ["end", "cmd+end"]
 # next-unread = "cmd+j"
-# next-conversation = "cmd+shift+down"
-# previous-conversation = "cmd+shift+up"
+# next-conversation = ["ctrl+n", "alt+down", "cmd+shift+down"]
+# previous-conversation = ["ctrl+p", "alt+up", "cmd+shift+up"]
 # mark-read = "cmd+shift+r"
 # reply-to-last = "cmd+r"
 # edit-last = "cmd+e"

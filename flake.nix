@@ -45,6 +45,12 @@
               # invalidates one of them, and the failure then names spqr rather
               # than the missing tool.
               pkgs.protobuf
+              # Contact discovery (presage's `cdsi` feature, which is the only
+              # way to resolve a phone number to an account) reaches
+              # libsignal-net, and through it Signal's fork of BoringSSL, which
+              # is a cmake project with a Go-based build step.
+              pkgs.cmake
+              pkgs.go
             ];
 
             RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
