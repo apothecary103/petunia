@@ -26,7 +26,13 @@ pub fn install(store: Entity<Store>, cx: &mut App) {
     let avatars_dir = PathBuf::from("/tmp/frieren_pfps");
 
     store.update(cx, |store, cx| {
-        store.apply(Event::Linked { aci: me }, cx);
+        store.apply(
+            Event::Linked {
+                aci: me,
+                phone_number: "+15555550100".into(),
+            },
+            cx,
+        );
         store.apply(
             Event::Profile {
                 uuid: me,

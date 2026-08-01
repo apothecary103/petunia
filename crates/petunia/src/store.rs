@@ -28,9 +28,41 @@ pub struct Store {
     pub link_failure: Option<String>,
     /// The conversation on screen. A message arriving here is read, not unread.
     active: Option<Thread>,
+    /// Whether the window is the one in front. Reading a message is looking at
+    /// it, and nobody is looking at a window that is behind another one -- so
+    /// this decides both whether an arriving message counts as unread and
+    /// whether it owes a read receipt. Only the window knows, so it says.
+    frontmost: bool,
     /// What the details panel is looking at. `None` means the conversation
     /// itself, which is what opening the panel with nothing picked shows.
     focus: Option<Focus>,
+    /// This account's username and the `signal.me` link it confirmed with,
+    /// once the worker has reported one. `None` until asked for, or after it
+    /// is deleted.
+    pub username: Option<(String, String)>,
+    /// This account's own number, in +E.164. `None` until linking finishes.
+    pub phone_number: Option<String>,
+    /// The stickers kept to hand, which are a reference into the installed
+    /// packs rather than stickers of their own.
+    pub favourites: crate::favourites::Favourites,
+    /// Packs that have been asked for but not installed, by pack id, and what
+    /// came back: what the sheet for a sticker from a pack this account does not
+    /// have shows. Present and `None` means the fetch is still out, which is
+    /// also what stops it being asked for again every frame.
+    previews: std::collections::HashMap<Vec<u8>, Option<Result<data::stickers::Pack, String>>>,
+    /// Installed packs there is nothing to draw of, because none of their
+    /// stickers ever arrived. Kept so the picker can say which of the two empty
+    /// pickers it is: an account with no packs, or an account whose packs did
+    /// not download.
+    unreadable_packs: usize,
+}
+
+/// What is known about a pack that has been asked about but not installed.
+#[derive(Debug, Clone, Copy)]
+pub enum Previewed<'a> {
+    Reading,
+    Read(&'a data::stickers::Pack),
+    Failed(&'a str),
 }
 
 /// Something worth inspecting, named by what it is rather than by which panel
@@ -62,6 +94,26 @@ pub enum StoreEvent {
         hits: Vec<petunia_signal::db::search::Hit>,
     },
     Failed(String),
+    /// This device is unlinked and the local account cleared; the window
+    /// should show the linking screen again.
+    LoggedOut,
+    /// What a new-chat lookup resolved to, carrying the query it answers so a
+    /// late answer cannot replace a newer one.
+    LookedUp {
+        query: String,
+        found: Option<petunia_data::Contact>,
+    },
+    /// A conversation the model has decided should be on screen -- a group just
+    /// created, which nothing clicked on. Which pane shows it is the workspace's
+    /// business, so this is raised rather than applied.
+    Opened(Thread),
+    /// Something the desktop should be told about, unless `on_screen` -- the
+    /// message arrived in the conversation being read, in the window in front,
+    /// which is the one case a banner is certainly wrong.
+    Notify {
+        notice: crate::notify::Notice,
+        on_screen: bool,
+    },
 }
 
 impl EventEmitter<StoreEvent> for Store {}
@@ -73,10 +125,19 @@ impl Store {
             state: None,
             commands: None,
             queued: Vec::new(),
+            // The window takes the front at launch, and says so as soon as it
+            // has one; assuming otherwise would leave the first messages of a
+            // session unread in a conversation being read.
+            frontmost: true,
             focus: None,
             link_url: None,
             link_failure: None,
             active: None,
+            username: None,
+            phone_number: None,
+            favourites: crate::favourites::Favourites::load(),
+            previews: std::collections::HashMap::new(),
+            unreadable_packs: 0,
         }
     }
 
@@ -128,10 +189,18 @@ impl Store {
             return;
         }
 
-        let unseen = self
-            .state
-            .as_ref()
-            .is_none_or(|state| state.history(&thread).is_none());
+        // Whether a *page* has been read, not whether a history exists. A message
+        // arriving live builds a history out of nothing but itself, and treating
+        // that as the thread having been loaded left everything already on disk
+        // invisible -- which is what a conversation that had been talked in while
+        // petunia was closed looked like: the handful of messages the receive
+        // queue delivered, no way to scroll back, and the rest only after a
+        // restart.
+        let unseen = self.state.as_ref().is_none_or(|state| {
+            state
+                .history(&thread)
+                .is_none_or(|history| !history.has_page())
+        });
         if unseen {
             self.send(Command::load(thread.clone()));
         }
@@ -201,6 +270,63 @@ impl Store {
         }
         self.send(Command::DeleteThread { thread });
         cx.notify();
+    }
+
+    /// Unlinks this device and clears everything stored locally. There is no
+    /// undo: the window falls back to the linking screen once the worker
+    /// confirms it with `Event::LoggedOut`.
+    pub fn log_out(&mut self) {
+        self.send(Command::LogOut);
+    }
+
+    /// Reserves and confirms a username, replacing whatever this account had.
+    pub fn set_username(&mut self, nickname: String) {
+        self.send(Command::SetUsername { nickname });
+    }
+
+    pub fn delete_username(&mut self) {
+        self.send(Command::DeleteUsername);
+    }
+
+    /// Resolves a username or a phone number to an account, so a conversation
+    /// can be started with somebody who is not in the contact list.
+    pub fn look_up(&mut self, query: String) {
+        self.send(Command::LookUp { query });
+    }
+
+    /// Creates a group. The conversation opens when the worker answers with the
+    /// master key that is the group's identity, not before: until the server has
+    /// taken it there is no thread to open.
+    pub fn create_group(&mut self, title: String, members: Vec<uuid::Uuid>) {
+        self.send(Command::CreateGroup {
+            title,
+            members,
+            timestamp: now(),
+        });
+    }
+
+    /// Sets or clears the nickname and note shown for a contact. Applied here
+    /// before the round trip, the way a flag or a delete already is, so the
+    /// panel does not wait on Storage Service to show what was just typed.
+    pub fn set_nickname(
+        &mut self,
+        contact: uuid::Uuid,
+        name: Option<String>,
+        note: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(state) = self.state.as_mut() {
+            state.set_nickname(contact, name.clone(), note.clone());
+        }
+        self.send(Command::SetNickname { contact, name, note });
+        cx.notify();
+    }
+
+    /// Replaces the profile picture. Takes the bytes rather than a path: the
+    /// picker already read them to show a preview, and reading the file twice
+    /// would only risk it having changed between the two.
+    pub fn set_avatar(&mut self, bytes: Vec<u8>) {
+        self.send(Command::SetAvatar { bytes });
     }
 
     /// Sends what the composer built, and puts it on screen before the network
@@ -395,6 +521,53 @@ impl Store {
         cx.notify();
     }
 
+    /// Keeps a sticker to hand, or lets it go again.
+    pub fn keep_sticker(&mut self, pack_id: &[u8], sticker_id: u32, cx: &mut Context<Self>) {
+        self.favourites.toggle(pack_id, sticker_id);
+        cx.notify();
+    }
+
+    /// Every installed pack, which is what the picker draws.
+    pub fn sticker_packs(&self) -> &[data::stickers::Pack] {
+        self.state
+            .as_ref()
+            .map(|state| state.sticker_packs.as_slice())
+            .unwrap_or_default()
+    }
+
+    /// Installed packs with nothing in them to draw. What the picker says when
+    /// it has nothing to show depends on this: with none of these, an empty
+    /// picker is an account that has never added a pack.
+    pub fn unreadable_packs(&self) -> usize {
+        self.unreadable_packs
+    }
+
+    /// The installed pack a given id names, if this account has it.
+    pub fn installed(&self, pack_id: &[u8]) -> Option<&data::stickers::Pack> {
+        self.sticker_packs().iter().find(|pack| pack.id == pack_id)
+    }
+
+    /// What is known about a pack this account does not have. `None` for one
+    /// nothing has been asked about.
+    pub fn preview(&self, pack_id: &[u8]) -> Option<Previewed<'_>> {
+        self.previews.get(pack_id).map(|answer| match answer {
+            None => Previewed::Reading,
+            Some(Ok(pack)) => Previewed::Read(pack),
+            Some(Err(why)) => Previewed::Failed(why),
+        })
+    }
+
+    /// Asks for a pack this account does not have. Asked for once: the answer,
+    /// and the wait for it, are both remembered, so a view that calls this every
+    /// frame costs one fetch.
+    pub fn preview_pack(&mut self, pack_id: Vec<u8>, key: Vec<u8>) {
+        if self.previews.contains_key(&pack_id) {
+            return;
+        }
+        self.previews.insert(pack_id.clone(), None);
+        self.send(Command::PreviewStickerPack { pack_id, key });
+    }
+
     /// The message an id names, for the views that are shown one rather than
     /// drawing the thread it is in.
     pub fn find(&self, target: &MessageId) -> Option<&data::Message> {
@@ -459,7 +632,14 @@ impl Store {
         cx.notify();
     }
 
-    pub fn delete(&mut self, thread: Thread, target: MessageId, cx: &mut Context<Self>) {
+    /// Withdraws a message from everybody who got it. The tombstone goes up here
+    /// straight away, because that is what every recipient is about to see.
+    pub fn delete_for_everyone(
+        &mut self,
+        thread: Thread,
+        target: MessageId,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(state) = self.state.as_mut() {
             state.history_mut(&thread).apply_delete(&target);
         }
@@ -469,6 +649,139 @@ impl Store {
             timestamp: now(),
         });
         cx.notify();
+    }
+
+    /// Drops a message from this account. Taken out of the history rather than
+    /// replaced by a tombstone: nobody else was told, so there is nothing for a
+    /// line of text to report.
+    pub fn delete_for_me(&mut self, thread: Thread, target: MessageId, cx: &mut Context<Self>) {
+        if let Some(state) = self.state.as_mut() {
+            state.history_mut(&thread).remove(&target);
+        }
+        self.send(Command::DeleteForMe { thread, target });
+        cx.notify();
+    }
+
+    /// Blocks or unblocks somebody. Applied here at once and sent on: the whole
+    /// of blocking is a flag in Storage Service, and the round trip that writes
+    /// it is not something a menu should appear to hang on.
+    pub fn set_blocked(&mut self, contact: uuid::Uuid, blocked: bool, cx: &mut Context<Self>) {
+        if let Some(state) = self.state.as_mut() {
+            state.set_blocked(contact, blocked);
+        }
+        self.send(Command::SetBlocked { contact, blocked });
+        cx.notify();
+    }
+
+    /// Creates a poll, and puts it on screen before the network has heard of
+    /// it -- the same optimistic echo `compose` gives a text message.
+    pub fn send_poll(
+        &mut self,
+        thread: Thread,
+        question: String,
+        options: Vec<String>,
+        allow_multiple: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(aci) = self.state.as_ref().map(|state| state.aci) else {
+            return;
+        };
+        let timestamp = now();
+
+        let mut echo = data::Message::new(
+            MessageId { timestamp, sender: aci },
+            data::message::Content::Poll(Box::new(data::message::Poll {
+                question: question.clone(),
+                options: options.clone(),
+                allow_multiple,
+                ballots: Vec::new(),
+                terminated: false,
+            })),
+        );
+        echo.status = Some(data::Status::Sending);
+
+        self.send(Command::SendPoll {
+            thread: thread.clone(),
+            question,
+            options,
+            allow_multiple,
+            timestamp,
+        });
+
+        if let Some(state) = self.state.as_mut() {
+            state.record(&thread, &echo);
+            state.history_mut(&thread).insert(echo);
+        }
+        cx.notify();
+    }
+
+    /// Casts (or changes) this reader's own ballot. `chosen` is the whole set
+    /// of options that should end up checked, since Signal's vote replaces a
+    /// ballot rather than toggling one option in it.
+    pub fn vote_poll(
+        &mut self,
+        thread: Thread,
+        target: MessageId,
+        chosen: Vec<u32>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        let aci = state.aci;
+        let count = state
+            .history(&thread)
+            .and_then(|history| history.find(&target))
+            .and_then(|message| match &message.content {
+                data::message::Content::Poll(poll) => poll.ballot_for(aci),
+                _ => None,
+            })
+            .map(|ballot| ballot.count)
+            .unwrap_or(0)
+            + 1;
+
+        state.history_mut(&thread).apply_poll_vote(&target, data::message::Ballot {
+            voter: aci,
+            option_indexes: chosen.clone(),
+            count,
+        });
+        self.send(Command::VotePoll {
+            thread,
+            target,
+            option_indexes: chosen,
+            count,
+            timestamp: now(),
+        });
+        cx.notify();
+    }
+
+    pub fn terminate_poll(&mut self, thread: Thread, target: MessageId, cx: &mut Context<Self>) {
+        if let Some(state) = self.state.as_mut() {
+            state.history_mut(&thread).apply_poll_terminate(&target);
+        }
+        self.send(Command::TerminatePoll {
+            thread,
+            target: target.timestamp,
+            timestamp: now(),
+        });
+        cx.notify();
+    }
+
+    /// Whether the window is the one in front. Coming back to it is coming back
+    /// to whatever conversation was open, so the receipts that went unowed while
+    /// petunia was behind something else go now.
+    pub fn front(&mut self, frontmost: bool, cx: &mut Context<Self>) {
+        if self.frontmost == frontmost {
+            return;
+        }
+        self.frontmost = frontmost;
+        if let Some(thread) = self.active.clone().filter(|_| frontmost) {
+            if let Some(state) = self.state.as_mut() {
+                state.index.clear_unread(&thread);
+            }
+            self.mark_read(thread);
+            cx.notify();
+        }
     }
 
     /// Owns up to everything unread in a thread: a receipt to each sender and a
@@ -525,16 +838,33 @@ impl Store {
             Event::LinkUrl(url) => {
                 self.link_url = Some(url);
             }
-            Event::Linked { aci } => {
+            Event::Linked { aci, phone_number } => {
                 self.link_url = None;
                 self.link_failure = None;
                 self.state = Some(State::new(aci));
+                self.phone_number = Some(phone_number);
                 self.apply_config();
                 cx.emit(StoreEvent::Linked);
             }
             Event::Error(message) if self.state.is_none() => {
                 error!(%message, "signal error while linking");
                 self.link_failure = Some(message);
+            }
+            Event::LoggedOut => {
+                self.state = None;
+                self.username = None;
+                self.link_url = None;
+                self.link_failure = None;
+                self.active = None;
+                cx.emit(StoreEvent::LoggedOut);
+            }
+            Event::Username(username) => {
+                self.username = username;
+            }
+            // Not part of the account's state: a pack that was read and not
+            // added is a sheet's business and nothing else's.
+            Event::StickerPackPreview { pack_id, pack } => {
+                self.previews.insert(pack_id, Some(pack));
             }
             event => self.apply_to_state(event, cx),
         }
@@ -549,7 +879,10 @@ impl Store {
 
         match event {
             Event::Contacts { contacts, groups } => state.contacts_updated(contacts, groups),
-            Event::StickerPacks(packs) => state.sticker_packs = packs,
+            Event::StickerPacks { packs, unreadable } => {
+                state.sticker_packs = packs;
+                self.unreadable_packs = unreadable;
+            }
             Event::Found { query, hits } => cx.emit(StoreEvent::Found { query, hits }),
             Event::Flags(flags) => {
                 for (thread, flags) in flags {
@@ -567,8 +900,18 @@ impl Store {
             }
             Event::Unread { thread, count } => state.index.set_unread(&thread, count),
             Event::Profile { uuid, name } => state.set_profile(uuid, name),
+            Event::Nickname { uuid, name, note } => state.set_nickname(uuid, name, note),
+            Event::Blocked { uuid, blocked } => state.set_blocked(uuid, blocked),
+            // Either this device asked for it, or another one did and the sync
+            // told us. Both mean the same thing here.
+            Event::Forgotten { thread, target } => {
+                state.history_mut(&thread).remove(&target);
+            }
             Event::Avatar { thread, path } => {
                 state.avatars.insert(thread, path);
+            }
+            Event::AvatarUpdated(path) => {
+                state.avatars.insert(Thread::Contact(petunia_data::ContactId::Aci(state.aci)), path);
             }
             Event::Typing {
                 thread,
@@ -584,7 +927,8 @@ impl Store {
             } => {
                 state.history_mut(&thread).set_blob(&id, blob, measured);
             }
-            Event::Preview { thread, message } => state.record(&thread, &message),
+            Event::Preview { thread, preview } => state.record_preview(&thread, preview),
+            Event::Activity { thread, at } => state.record_activity(&thread, at),
             Event::History {
                 thread,
                 messages,
@@ -607,7 +951,7 @@ impl Store {
                 // Opening a thread marks it read, but on the first open there is
                 // nothing loaded yet to owe a receipt for, so the page arriving
                 // is when the debt becomes knowable.
-                if !older && self.active.as_ref() == Some(&thread) {
+                if !older && self.frontmost && self.active.as_ref() == Some(&thread) {
                     self.mark_read(thread);
                 }
             }
@@ -621,22 +965,55 @@ impl Store {
                 thread,
                 fragment,
                 order,
-            } => self.fragment(thread, fragment, order),
+            } => self.fragment(thread, fragment, order, cx),
             Event::Error(message) => {
                 error!(%message, "signal error");
                 cx.emit(StoreEvent::Failed(message));
             }
-            Event::Ready(_) | Event::LinkUrl(_) | Event::Linked { .. } => {}
+            Event::LookedUp { query, found } => {
+                if let Some(contact) = found.clone() {
+                    // Recorded before the panel is told, so activating the thread
+                    // it names finds a name for it rather than a bare uuid.
+                    state.record_contact(contact);
+                }
+                cx.emit(StoreEvent::LookedUp { query, found });
+            }
+            // Opening it is the workspace's business, not the model's, and the
+            // thread is already in the index by the time this arrives.
+            Event::GroupCreated { thread } => cx.emit(StoreEvent::Opened(thread)),
+            Event::Ready(_)
+            | Event::LinkUrl(_)
+            | Event::Linked { .. }
+            | Event::LoggedOut
+            | Event::StickerPackPreview { .. }
+            | Event::Username(_) => {}
         }
     }
 
-    fn fragment(&mut self, thread: Thread, fragment: Fragment, order: u64) {
+    fn fragment(
+        &mut self,
+        thread: Thread,
+        fragment: Fragment,
+        order: u64,
+        cx: &mut Context<Self>,
+    ) {
         let Some(state) = self.state.as_mut() else {
             return;
         };
 
+        // Blocking somebody has to mean not seeing what they send, or it is a
+        // flag in Storage Service and nothing else. Dropped here rather than in
+        // the worker because this is the one funnel every arriving row goes
+        // through -- and dropped rather than stored and hidden, since a filter
+        // over the history would be a filter every view had to remember to apply.
+        if let Some(sender) = fragment.sender()
+            && state.is_blocked(sender)
+        {
+            return;
+        }
+
         match fragment {
-            Fragment::Message(message) => self.message(thread, message),
+            Fragment::Message(message) => self.message(thread, message, cx),
             Fragment::Edit { target, message } => {
                 state.history_mut(&thread).apply_edit(&target, message, order);
                 self.refresh_preview(&thread);
@@ -654,19 +1031,42 @@ impl Store {
                 state.history_mut(&thread).apply_delete(&target);
                 self.refresh_preview(&thread);
             }
+            Fragment::PollVote { target, ballot } => {
+                state.history_mut(&thread).apply_poll_vote(&target, ballot);
+            }
+            Fragment::PollTerminate { target } => {
+                state.history_mut(&thread).apply_poll_terminate(&target);
+            }
             Fragment::Ignored => {}
         }
     }
 
-    fn message(&mut self, thread: Thread, message: data::Message) {
+    fn message(&mut self, thread: Thread, message: data::Message, cx: &mut Context<Self>) {
         let active = self.active.clone();
+        let settings = self.config.notifications.clone();
         let Some(state) = self.state.as_mut() else {
             return;
         };
 
         state.record(&thread, &message);
 
-        let unread = message.sender() != state.aci && active.as_ref() != Some(&thread);
+        // Whether anybody is actually looking at this message, which is one
+        // question rather than two: the conversation has to be the open one and
+        // the window has to be in front. Being the open one alone is what it
+        // asked before -- so a message arriving in the conversation last read
+        // went unread nowhere and sent a read receipt back while petunia sat
+        // behind somebody's browser.
+        let on_screen = active.as_ref() == Some(&thread) && self.frontmost;
+        let notice = crate::notify::wanted(
+            &settings,
+            state,
+            &thread,
+            &message,
+            false,
+            now(),
+        );
+
+        let unread = message.sender() != state.aci && !on_screen;
         if unread {
             let mentioned = message.mentions(state.aci);
             state.index.mark_unread(&thread, mentioned);
@@ -675,7 +1075,11 @@ impl Store {
         let timestamp = message.timestamp();
         state.history_mut(&thread).insert(message);
 
-        // Arriving in the conversation you are looking at is arriving read.
+        if let Some(notice) = notice {
+            cx.emit(StoreEvent::Notify { notice, on_screen });
+        }
+
+        // Arriving in the conversation somebody is looking at is arriving read.
         if !unread && sender != state.aci {
             self.send(Command::MarkRead {
                 thread,

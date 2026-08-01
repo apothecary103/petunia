@@ -15,7 +15,22 @@ use petunia_media::{audio, video};
 /// than keep a hidden one around.
 pub struct Dismissed;
 
+/// A right-click on the picture, at this point on screen. The workspace draws the
+/// menu, the way it draws every other one -- a menu near an edge has to flip, and
+/// which edge that is is not something a panel knows.
+pub struct Raise {
+    items: std::cell::RefCell<Vec<super::menu::Item>>,
+    pub at: gpui::Point<gpui::Pixels>,
+}
+
+impl Raise {
+    pub fn take(&self) -> Vec<super::menu::Item> {
+        self.items.take()
+    }
+}
+
 impl gpui::EventEmitter<Dismissed> for Viewer {}
+impl gpui::EventEmitter<Raise> for Viewer {}
 
 /// How far a picture can be blown up, and how far it can be shrunk. Beyond the
 /// first there is nothing to see; below the second it is a thumbnail with a
@@ -152,6 +167,58 @@ impl Viewer {
             tracing::warn!(%error, "could not hand the file to the system");
         }
     }
+
+    /// The same verbs the strip above the picture carries.
+    ///
+    /// Not *instead* of the toolbar: a right-click is where somebody looks for
+    /// "save this" without having read the row of glyphs, and the row is where
+    /// somebody looks who has. Both go through the same methods, so neither can
+    /// come to mean something the other does not.
+    fn context(&self, at: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) -> Raise {
+        use super::menu::Item;
+
+        let entity = cx.entity();
+        let one = |label: &'static str,
+                   icon: IconName,
+                   act: fn(&mut Self, &mut Window, &mut Context<Self>)| {
+            let entity = entity.clone();
+            Item::new(label, move |window: &mut Window, cx: &mut gpui::App| {
+                entity.update(cx, |this, cx| act(this, window, cx));
+            })
+            .icon(icon)
+        };
+
+        let mut items = vec![
+            one("Copy", IconName::Copy, |this, _, cx| this.copy(cx)),
+            one("Save as…", IconName::ArrowDown, |this, window, cx| {
+                this.save(window, cx)
+            }),
+            one("Open with…", IconName::ExternalLink, |this, _, _| this.open()),
+            super::menu::Item::Separator,
+            one("Zoom in", IconName::Plus, |this, _, cx| this.scale_by(1.25, cx)),
+            one("Zoom out", IconName::Minus, |this, _, cx| {
+                this.scale_by(1.0 / 1.25, cx)
+            }),
+            one("Actual size", IconName::Minimize, |this, _, cx| this.reset(cx)),
+        ];
+
+        // Only where there is anywhere to step to, which is the same condition
+        // the rail is drawn under.
+        if self.reel.len() > 1 {
+            items.push(super::menu::Item::Separator);
+            items.push(one("Previous", IconName::ChevronLeft, |this, _, cx| {
+                this.step(-1, cx)
+            }));
+            items.push(one("Next", IconName::ChevronRight, |this, _, cx| {
+                this.step(1, cx)
+            }));
+        }
+
+        Raise {
+            items: std::cell::RefCell::new(items),
+            at,
+        }
+    }
 }
 
 impl gpui::Focusable for Viewer {
@@ -200,6 +267,14 @@ impl Render for Viewer {
             // The scrim behind closes on a click, so the panel stops one from
             // reaching it.
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
+                    let raise = this.context(event.position, cx);
+                    cx.emit(raise);
+                    cx.stop_propagation();
+                }),
+            )
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
                 let delta = f32::from(event.delta.pixel_delta(px(20.0)).y);
                 this.scale_by(1.0 + delta / 400.0, cx);
@@ -365,7 +440,7 @@ impl Viewer {
                 .into_any_element();
         }
 
-        image::picture(path, stage.0 * zoom, stage.1 * zoom).into_any_element()
+        image::animated("stage-frames", path, stage.0 * zoom, stage.1 * zoom).into_any_element()
     }
 
     /// Play, a bar that scrubs, and the clock. Only drawn when there is a video

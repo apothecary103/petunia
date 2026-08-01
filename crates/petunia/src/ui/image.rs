@@ -6,23 +6,27 @@
 //! nineteen twentieths of the source and aliases hard — the "pixelated on a
 //! retina display" symptom. Resampling on the CPU with a real filter, to exactly
 //! the number of device pixels the element will occupy, is the fix.
+//!
+//! And the resamples are kept here rather than in gpui's asset cache, which
+//! never gives anything back: see `Cache`.
 
+use std::collections::HashMap;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use futures::FutureExt;
+use futures::future::Shared;
 use gpui::prelude::*;
 use gpui::{
-    App, Asset, ImageCacheError, Img, ObjectFit, RenderImage, Window, img, px,
+    App, Global, ImageCacheError, Img, ObjectFit, RenderImage, Task, Window, img, px,
 };
 use image::codecs::gif::GifDecoder;
 use image::codecs::webp::WebPDecoder;
 use image::imageops::FilterType;
 use image::{AnimationDecoder, Frame, ImageFormat, Rgba, RgbaImage};
 
-/// A decoded, resampled image, keyed by the file and the size it is drawn at.
-pub enum Scaled {}
-
+/// What identifies a resample: the file, and the size and shape it is drawn at.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Request {
     path: PathBuf,
@@ -46,17 +50,120 @@ pub enum Fit {
     Cover,
 }
 
-impl Asset for Scaled {
-    type Source = Request;
-    type Output = Result<Arc<RenderImage>, ImageCacheError>;
+type Decoded = Result<Arc<RenderImage>, ImageCacheError>;
 
-    #[allow(clippy::manual_async_fn)]
-    fn load(
-        source: Self::Source,
-        _cx: &mut App,
-    ) -> impl std::future::Future<Output = Self::Output> + Send + 'static {
-        // Runs on gpui's background executor, so decoding here blocks nothing.
-        async move { decode(&source) }
+/// The resamples that have been drawn, and the last frame each was drawn on.
+///
+/// This exists because `Window::use_asset` does not: gpui keeps a loaded asset in
+/// `App::loading_assets` for the life of the process and offers no eviction of
+/// its own, and a resample is uncompressed BGRA — a photograph in the
+/// conversation is a megabyte or two per size it was drawn at, and one animation
+/// is up to `MAX_FRAMES` of them. Scrolling back through a thread full of
+/// pictures therefore never gave a byte back, which is the whole of "petunia's
+/// memory use is high". So the resamples are held here instead, and the ones that
+/// have not been drawn in a while are handed back — both the buffers and the
+/// atlas tile, which is a second copy on the GPU.
+struct Cache {
+    entries: HashMap<Request, Entry>,
+    /// Not a clock: a counter bumped per lookup, which is all "least recently
+    /// drawn" needs and is the one thing available inside a render.
+    drawn: u64,
+}
+
+struct Entry {
+    decoding: Shared<Task<Decoded>>,
+    drawn: u64,
+}
+
+impl Global for Cache {}
+
+/// Comfortably more than any window can show at once, so nothing on screen is
+/// ever the least recently drawn — evicting a picture this frame is asking to
+/// draw it again next frame, forever.
+const RESIDENT: usize = 192;
+
+impl Cache {
+    /// The resample for this request, or `None` while it is still being made.
+    fn load(request: &Request, window: &mut Window, cx: &mut App) -> Option<Decoded> {
+        if !cx.has_global::<Cache>() {
+            cx.set_global(Cache {
+                entries: HashMap::new(),
+                drawn: 0,
+            });
+        }
+
+        let known = cx.update_global(|cache: &mut Cache, _| {
+            cache.drawn += 1;
+            let drawn = cache.drawn;
+            let entry = cache.entries.get_mut(request)?;
+            entry.drawn = drawn;
+            Some(entry.decoding.clone())
+        });
+
+        // A task that has not finished yet reports nothing rather than blocking
+        // the frame on it.
+        if let Some(decoding) = known {
+            return decoding.now_or_never();
+        }
+
+        let decoding = {
+            let source = request.clone();
+            // On the background executor, so decoding a photograph blocks no
+            // frame.
+            cx.background_executor()
+                .spawn(async move { decode(&source) })
+                .shared()
+        };
+        cx.update_global(|cache: &mut Cache, _| {
+            let drawn = cache.drawn;
+            cache.entries.insert(request.clone(), Entry {
+                decoding: decoding.clone(),
+                drawn,
+            });
+        });
+        Self::evict(window, cx);
+
+        // Redrawn when it lands, since the frame that asked has nothing to show.
+        let view = window.current_view();
+        window
+            .spawn(cx, {
+                let decoding = decoding.clone();
+                async move |cx| {
+                    let _ = decoding.await;
+                    cx.on_next_frame(move |_, cx| cx.notify(view));
+                }
+            })
+            .detach();
+
+        decoding.now_or_never()
+    }
+
+    /// Gives back everything past `RESIDENT`, oldest first.
+    fn evict(window: &mut Window, cx: &mut App) {
+        let over = cx.global::<Cache>().entries.len().saturating_sub(RESIDENT);
+        if over == 0 {
+            return;
+        }
+
+        let stale = cx.update_global(|cache: &mut Cache, _| {
+            let mut by_age: Vec<_> = cache
+                .entries
+                .iter()
+                .map(|(request, entry)| (entry.drawn, request.clone()))
+                .collect();
+            by_age.sort_unstable_by_key(|(drawn, _)| *drawn);
+            by_age
+                .into_iter()
+                .take(over)
+                .filter_map(|(_, request)| cache.entries.remove(&request)?.decoding.now_or_never())
+                .collect::<Vec<_>>()
+        });
+
+        // The buffers go with the task above; this is the copy in the atlas,
+        // which nothing else would ever reclaim.
+        for image in stale.into_iter().flatten() {
+            cx.drop_image(image, Some(window));
+        }
     }
 }
 
@@ -189,6 +296,24 @@ pub fn picture(path: impl AsRef<Path>, width: f32, height: f32) -> Img {
         .object_fit(ObjectFit::Contain)
 }
 
+/// The same, for a file that might be animated.
+///
+/// An `Img` keeps which frame it is showing in gpui's element state, and element
+/// state is keyed by the element's id — so an image with no id is handed `None`
+/// for its state every frame, leaves the counter at zero, and draws frame one of
+/// the animation forever. That was every GIF in the application: decoded whole,
+/// resampled whole, and frozen. Nothing else needs an id, and an id has to be
+/// unique among its siblings, so this is a separate call rather than something
+/// `picture` invents for every avatar in a list.
+pub fn animated(
+    id: impl Into<gpui::ElementId>,
+    path: impl AsRef<Path>,
+    width: f32,
+    height: f32,
+) -> gpui::Stateful<Img> {
+    picture(path, width, height).id(id.into())
+}
+
 /// A picture filling a square and cropped to it, for avatars and thumbnails.
 pub fn cropped(path: impl AsRef<Path>, edge: f32) -> Img {
     sized(path.as_ref().to_path_buf(), edge, edge, Fit::Cover)
@@ -210,7 +335,7 @@ fn sized(path: PathBuf, width: f32, height: f32, fit: Fit) -> Img {
             height: device(height),
             fit,
         };
-        window.use_asset::<Scaled>(&request, cx)
+        Cache::load(&request, window, cx)
     })
 }
 

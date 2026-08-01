@@ -142,10 +142,20 @@ impl Run<'_> {
     }
 
     /// Signal's own: what you said on the right, what they said on the left,
-    /// each in a rounded bubble. No avatar on your own side, because there is
-    /// only ever one person on it.
+    /// each in a rounded bubble. No avatar and no name on either side --
+    /// position is who it was -- and no bubble stretches wider than the words
+    /// in it, `max_w` alone bounding a side column that would otherwise grow
+    /// to fill the row it sits in.
     fn bubbles(&self) -> Div {
         let own = self.own();
+        let clock = self.header(false);
+        // `flex_1` is what makes a bubble the width of its words. Without it the
+        // column is sized to fit its content, and a percentage max-width inside
+        // one of those resolves against a width that is itself waiting on the
+        // content -- so every bubble collapsed to its longest word and wrapped
+        // there, which is the "all of them short" symptom. Given the whole row
+        // to align inside, a bubble takes the width the text wants and stops at
+        // `BUBBLE`, which is what Signal does.
         let side = div()
             .flex()
             .flex_col()
@@ -153,7 +163,8 @@ impl Run<'_> {
             .min_w_0()
             .gap(px(self.spacing.within_run))
             .when(own, |this| this.items_end())
-            .children(self.header(!own))
+            .when(!own, |this| this.items_start())
+            .children(clock)
             .children(self.messages.iter().map(|message| match bubbled(message) {
                 true => self.bubble(own, self.body(message)).into_any_element(),
                 false => self.body(message).into_any_element(),
@@ -162,7 +173,10 @@ impl Run<'_> {
         div()
             .flex()
             .items_end()
+            .w_full()
             .gap(px(self.spacing.gutter - self.spacing.avatar))
+            .when(own, |this| this.justify_end())
+            .when(!own, |this| this.justify_start())
             // An avatar only where it distinguishes anybody: in a group, on the
             // messages that are not yours.
             .when(!own && self.thread.is_group(), |this| {
@@ -188,9 +202,10 @@ impl Run<'_> {
     }
 
     /// The name, what the group says about them, and when they started talking.
-    /// `named` is false for your own side of a bubble layout, where the position
-    /// already says who it was -- and with no name and no clock there is nothing
-    /// to draw, so a run does not carry an empty line above it.
+    /// `named` is false for both sides of a bubble layout, where position
+    /// already says who it was, the way Signal itself draws it -- and with no
+    /// name and no clock there is nothing to draw, so a run does not carry an
+    /// empty line above it.
     fn header(&self, named: bool) -> Option<Div> {
         let tint = self.tint();
         let clock = self

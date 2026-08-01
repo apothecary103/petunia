@@ -8,7 +8,7 @@ use super::avatar::avatar;
 use super::kit;
 use super::relative;
 use petunia_config::Theme;
-use petunia_data::{Section, Thread};
+use petunia_data::{Section, Thread, hex};
 use crate::store::Store;
 use crate::theme::ActivePalette;
 
@@ -43,8 +43,11 @@ impl Sidebar {
 }
 
 impl Render for Sidebar {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = cx.palette().clone();
+        // macOS hides the traffic lights in fullscreen, and no other platform
+        // ever draws them here.
+        let lights = cfg!(target_os = "macos") && !window.is_fullscreen();
         let store = self.store.read(cx);
         let active = store.active().cloned();
 
@@ -77,7 +80,7 @@ impl Render for Sidebar {
             let rows = entries.into_iter().map(|entry| {
                 let thread = entry.thread.clone();
                 let selected = active.as_ref() == Some(&thread);
-                let seed = entry.thread.seed().to_vec();
+                let seed = entry.thread.seed();
 
                 let wanted = thread.clone();
 
@@ -94,15 +97,13 @@ impl Render for Sidebar {
                 let line = Line {
                     picture: state.avatar(&entry.thread),
                     name: &entry.name,
-                    seed: &seed,
+                    seed,
                     typing,
-                    // Summarised per row per frame, so not summarised at all
-                    // when there is nowhere to put it.
                     preview: entry
                         .preview
                         .as_ref()
                         .filter(|_| show_preview && !rail)
-                        .map(|message| message.summary()),
+                        .map(|preview| preview.line.as_str()),
                     when: entry.last_activity,
                     unread: entry.unread,
                     mentions: entry.mentions,
@@ -115,7 +116,7 @@ impl Render for Sidebar {
                     true => pip(&palette, line),
                     false => row(&palette, line),
                 }
-                .id(SharedString::from(format!("thread-{}", hex(&seed))))
+                .id(SharedString::from(format!("thread-{}", hex(seed))))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _, _, cx| this.open(thread.clone(), cx)),
@@ -156,8 +157,42 @@ impl Render for Sidebar {
             // The window's traffic lights float over the top of this column, so
             // the band they sit in is its own element rather than padding on the
             // scroll area -- padding scrolls away with the content, which slid
-            // the first row up underneath them.
-            .child(div().h(px(super::workspace::TITLE_BAR)).flex_none())
+            // the first row up underneath them. The band exists *for* the lights:
+            // where there are none it is only what the compose button needs. Off
+            // macOS there never are, and in fullscreen macOS takes them away, so
+            // a band that stayed put there was forty pixels of nothing at the top
+            // of the column.
+            //
+            // Which the rail cannot share with them: it is no wider than a face,
+            // and the lights reach most of the way across it -- so a button at
+            // its right edge is a button underneath the one that maximises the
+            // window. There the band is left to them and the compose control
+            // takes the row below, centred like everything else on the rail.
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .when(rail, |this| this.justify_center())
+                    .when(!rail, |this| {
+                        this.justify_end().px(px(kit::LIST_PADDING))
+                    })
+                    .when(lights && !rail, |this| {
+                        this.h(px(super::workspace::TITLE_BAR))
+                    })
+                    .when(lights && rail, |this| {
+                        this.mt(px(super::workspace::TITLE_BAR))
+                    })
+                    .when(!lights, |this| this.pt_2())
+                    .child(kit::icon_button(
+                        "new-chat",
+                        IconName::Plus,
+                        &palette,
+                        cx.listener(|_, _, window, cx| {
+                            window.dispatch_action(Box::new(crate::actions::NewChat), cx)
+                        }),
+                    )),
+            )
             .child(
                 div()
                     .id("conversations")
@@ -239,6 +274,7 @@ fn identity(
     }
 
     div()
+        .id("identity")
         .flex()
         .items_center()
         .flex_none()
@@ -392,7 +428,7 @@ struct Line<'a> {
     /// joining it: the preview is what was last said, and this is what is being
     /// said now.
     typing: Option<String>,
-    preview: Option<String>,
+    preview: Option<&'a str>,
     when: u64,
     unread: u32,
     mentions: u32,
@@ -581,7 +617,7 @@ fn row(palette: &Theme, line: Line<'_>) -> Stateful<Div> {
                                         palette.text_muted
                                     })
                                     .child(SharedString::from(
-                                        line.preview.clone().unwrap_or_default(),
+                                        line.preview.unwrap_or_default().to_owned(),
                                     )),
                             )
                         })
@@ -610,16 +646,4 @@ fn badge(unread: u32, mentions: u32, muted: bool, palette: &Theme) -> Div {
         return kit::dot(tint);
     }
     kit::chip(unread.to_string(), tint, palette)
-}
-
-/// One allocation, not one per byte. The list is a scrolling `div`, so every row
-/// is rebuilt on every frame of every flick, and a group's seed is 32 bytes.
-fn hex(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
 }

@@ -37,6 +37,8 @@ pub fn install(cx: &mut App) {
             MenuItem::action("Find in Conversation…", SearchThread),
         ]),
         Menu::new("Message").items([
+            MenuItem::action("New Conversation…", NewChat),
+            MenuItem::separator(),
             MenuItem::action("Reply to Last", ReplyToLast),
             MenuItem::action("Edit Last", EditLast),
             MenuItem::separator(),

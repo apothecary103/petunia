@@ -4,6 +4,8 @@ use std::time::Duration;
 use presage::libsignal_service::content::AttachmentPointerFlags;
 use presage::libsignal_service::proto::AttachmentPointer;
 
+use crate::hex;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Id(String);
 
@@ -200,13 +202,6 @@ fn is_voice_note(pointer: &AttachmentPointer) -> bool {
     pointer.flags() & AttachmentPointerFlags::VoiceMessage as u32 != 0
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().fold(String::new(), |mut out, byte| {
-        use std::fmt::Write;
-        let _ = write!(out, "{byte:02x}");
-        out
-    })
-}
 
 #[cfg(test)]
 mod tests {

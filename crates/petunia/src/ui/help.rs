@@ -120,6 +120,7 @@ fn row(chord: &str, what: &'static str, palette: &Theme) -> gpui::Div {
 fn describe(action: Action) -> &'static str {
     match action {
         Action::QuickSwitcher => "Jump to a conversation",
+        Action::NewChat => "Start a conversation, or a group",
         Action::Search => "Search every conversation",
         Action::SearchThread => "Search this conversation",
         Action::FocusComposer => "Write a message",

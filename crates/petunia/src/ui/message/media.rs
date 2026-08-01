@@ -104,7 +104,11 @@ impl Frame<'_> {
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 act(Act::View(target.clone()), window, cx)
             })
-            .child(image::picture(path, width, height).rounded(px(kit::RADIUS)))
+            // Given an id, because a GIF arrives here and gpui keeps which frame
+            // it is showing in element state that only an id gets it.
+            .child(
+                image::animated("frames", path, width, height).rounded(px(kit::RADIUS)),
+            )
             .into_any_element()
     }
 
@@ -297,25 +301,32 @@ impl Frame<'_> {
                     )),
             )
             .child(
-                content::box_of_code(theme)
-                    .child(content::lines(
-                        &head.code,
-                        language,
-                        theme,
-                        self.highlights,
-                        self.spacing.body,
-                    ))
-                    .when(head.remaining > 0, |this| {
-                        this.child(
-                            div()
-                                .text_size(px(self.spacing.small))
-                                .text_color(theme.text_muted)
-                                .child(SharedString::from(match head.remaining {
-                                    1 => "1 more line".to_owned(),
-                                    more => format!("{more} more lines"),
-                                })),
-                        )
-                    }),
+                content::box_of_code(theme).child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .px_3()
+                        .py_2()
+                        .child(content::lines(
+                            &head.code,
+                            language,
+                            theme,
+                            self.highlights,
+                            self.spacing.body,
+                        ))
+                        .when(head.remaining > 0, |this| {
+                            this.child(
+                                div()
+                                    .text_size(px(self.spacing.small))
+                                    .text_color(theme.text_muted)
+                                    .child(SharedString::from(match head.remaining {
+                                        1 => "1 more line".to_owned(),
+                                        more => format!("{more} more lines"),
+                                    })),
+                            )
+                        }),
+                ),
             )
             .into_any_element()
     }

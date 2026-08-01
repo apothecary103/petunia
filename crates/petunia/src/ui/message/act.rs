@@ -23,7 +23,14 @@ pub enum Act {
     },
     Reply(MessageId),
     React(MessageId, String),
+    /// Toggles an option on a poll you have not already voted the same way
+    /// on. Carries every option that should be checked afterward, since
+    /// Signal's own vote is a full ballot rather than a single toggle.
+    VotePoll(MessageId, Vec<u32>),
+    TerminatePoll(MessageId),
     Edit(MessageId),
+    /// Asks which deletion. Never deletes anything itself: there are two and
+    /// they mean different things, so the choice is the reader's.
     Delete(MessageId),
     /// Copies the message's text to the clipboard.
     Copy(MessageId),
@@ -42,12 +49,19 @@ pub enum Act {
     Play(PathBuf),
     /// Jumps to a fraction of the way through what is playing.
     Seek(PathBuf, f32),
-    /// Installs the pack a received sticker came from.
-    InstallStickers { pack_id: Vec<u8>, key: Vec<u8> },
+    /// Opens the sticker, and the pack it came from. Boxed because a sticker
+    /// carries an attachment and every other variant here is a word wide.
+    ShowSticker(Box<petunia_data::message::Sticker>),
     /// Opens a link in the browser.
     OpenLink(String),
     /// Opens someone's profile in the details panel.
     Inspect(uuid::Uuid),
+    /// Asks for a nickname for somebody, which syncs to every device on this
+    /// account.
+    Nickname(uuid::Uuid),
+    /// Blocks or unblocks somebody. Blocking asks first; unblocking does not,
+    /// because it is the undo.
+    Block(uuid::Uuid, bool),
     /// A right-click on a message, at this point on screen.
     Menu(MessageId, gpui::Point<gpui::Pixels>),
     /// A right-click on someone's name or picture.

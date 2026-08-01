@@ -2,7 +2,10 @@ use gpui::prelude::*;
 use gpui::{App, Context, Entity, Focusable as _, SharedString, Subscription, Window, div, px};
 use gpui_component::{ActiveTheme, IconName};
 
-use super::conversation::{Conversation, Forwarding, Inspecting, Raise, Viewing};
+use super::conversation::{
+    Blocking, Conversation, Deleting, Forwarding, Inspecting, Naming, Raise, Stickering, Viewing,
+};
+use super::delete::{self, Delete};
 use super::details::{self, Details};
 use super::editor::{self, Editor};
 use super::forward::{self, Forward};
@@ -10,6 +13,7 @@ use super::help::{self, Help};
 use super::kit;
 use super::linking::Linking;
 use super::menu::{self, Menu};
+use super::new_chat::{self, NewChat};
 use super::notice::Notices;
 use super::palette::{Dismissed, Switcher};
 use super::confirm::{self, Confirm};
@@ -19,6 +23,8 @@ use super::search::{self, Scope, Search};
 use super::settings::{self, Settings};
 use super::themes::{self, Themes};
 use super::sidebar::Sidebar;
+use super::sticker::{self, StickerSheet};
+use super::username::{self, Username};
 use super::viewer::{self, Viewer};
 use crate::actions;
 use crate::session::Session;
@@ -79,7 +85,16 @@ pub struct Workspace {
     editor: Option<Entity<Editor>>,
     /// Where a message is being sent on to, and what the wire said about one.
     forward: Option<Entity<Forward>>,
+    /// Who a conversation is being started with.
+    new_chat: Option<Entity<NewChat>>,
     raw: Option<Entity<Raw>>,
+    poll: Option<Entity<crate::ui::poll_composer::PollComposer>>,
+    /// A sticker somebody clicked, and the pack behind it.
+    sticker: Option<Entity<StickerSheet>>,
+    /// Which deletion, asked.
+    delete: Option<Entity<Delete>>,
+    /// Choosing a username, which is two fields rather than one line of text.
+    username: Option<Entity<Username>>,
     /// Always present, and draws nothing until something has gone wrong.
     notices: Entity<Notices>,
     /// The divider being dragged, while it is being dragged. The preference is
@@ -133,6 +148,12 @@ impl Workspace {
             // Remembered as it happens, written once on the way out: a drag
             // reports every frame, and the session file is not a log.
             cx.observe_window_bounds(window, |this, window, _| this.remember_size(window)),
+            // Reading a conversation means having it in front of you, so the
+            // model is told when this window is and when it is not.
+            cx.observe_window_activation(window, |this, window, cx| {
+                let frontmost = window.is_window_active();
+                this.store.update(cx, |store, cx| store.front(frontmost, cx));
+            }),
             cx.on_app_quit(|this: &mut Self, cx: &mut Context<Self>| {
                 this.session.drafts = this.drafts(cx);
                 this.session.save();
@@ -158,7 +179,12 @@ impl Workspace {
             themes: None,
             editor: None,
             forward: None,
+            new_chat: None,
+            sticker: None,
+            delete: None,
+            username: None,
             raw: None,
+            poll: None,
             notices,
             dragging: None,
             titled: String::new(),
@@ -184,6 +210,27 @@ impl Workspace {
         cx.subscribe_in(&details, window, |this, _, event: &details::Viewing, window, cx| {
             this.view_media(event.0.clone(), window, cx)
         })
+        .detach();
+        cx.subscribe_in(
+            &details,
+            window,
+            |this, _, event: &details::EditNickname, window, cx| {
+                this.name_nickname(event.0, window, cx)
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            &details,
+            window,
+            |this, _, event: &details::SetBlocked, window, cx| match event.1 {
+                true => this.ask_block(event.0, window, cx),
+                false => {
+                    let who = event.0;
+                    this.store
+                        .update(cx, |store, cx| store.set_blocked(who, false, cx));
+                }
+            },
+        )
         .detach();
 
         // A picture asked for full size opens over everything, so the viewer is
@@ -212,6 +259,30 @@ impl Workspace {
             },
         )
         .detach();
+        cx.subscribe_in(
+            &conversation,
+            window,
+            |this, _, polling: &super::conversation::Polling, window, cx| {
+                this.open_poll(polling.0.clone(), window, cx)
+            },
+        )
+        .detach();
+        cx.subscribe_in(&conversation, window, |this, _, shown: &Stickering, window, cx| {
+            this.open_sticker(*shown.0.clone(), window, cx)
+        })
+        .detach();
+        cx.subscribe_in(&conversation, window, |this, _, deleting: &Deleting, window, cx| {
+            this.ask_delete(deleting.0, window, cx)
+        })
+        .detach();
+        cx.subscribe_in(&conversation, window, |this, _, naming: &Naming, window, cx| {
+            this.name_nickname(naming.0, window, cx)
+        })
+        .detach();
+        cx.subscribe_in(&conversation, window, |this, _, blocking: &Blocking, window, cx| {
+            this.ask_block(blocking.0, window, cx)
+        })
+        .detach();
 
         if let Some(thread) = self.session.active.clone() {
             self.store
@@ -223,6 +294,13 @@ impl Workspace {
             conversation,
             details,
         };
+    }
+
+    /// Drops the whole conversation shell and shows the linking screen again,
+    /// as fresh as the window was on first launch.
+    fn enter_linking(&mut self, cx: &mut Context<Self>) {
+        self.session.active = None;
+        self.screen = Screen::Linking(cx.new(|cx| Linking::new(self.store.clone(), cx)));
     }
 
     fn on_store_event(
@@ -255,6 +333,26 @@ impl Workspace {
                 let message = message.clone();
                 self.notices
                     .update(cx, |notices, cx| notices.raise(message, cx));
+            }
+            StoreEvent::LoggedOut => {
+                self.settings = None;
+                self.confirm = None;
+                self.enter_linking(cx);
+                cx.notify();
+            }
+            // A group this account has just made. Nothing clicked on it, so
+            // nothing else is going to open it.
+            StoreEvent::Opened(thread) => {
+                let thread = thread.clone();
+                self.store.update(cx, |store, cx| store.activate(thread, cx));
+            }
+            // A banner about the conversation somebody is looking at is a banner
+            // about something already in front of them. Whether they are is the
+            // model's answer rather than asked again here: it decides the same
+            // thing about read receipts, and two places asking it separately is
+            // two answers that can disagree.
+            StoreEvent::Notify { notice, on_screen } if !*on_screen => {
+                crate::notify::post(notice);
             }
             _ => {}
         }
@@ -389,6 +487,22 @@ impl Workspace {
                     },
                 )
                 .detach();
+                cx.subscribe_in(
+                    &settings,
+                    window,
+                    |this, _, _: &settings::RequestUsername, window, cx| {
+                        this.name_username(window, cx)
+                    },
+                )
+                .detach();
+                cx.subscribe_in(
+                    &settings,
+                    window,
+                    |this, _, _: &settings::RequestLogOut, window, cx| {
+                        this.confirm_log_out(window, cx)
+                    },
+                )
+                .detach();
                 settings
             })
             .clone();
@@ -431,13 +545,58 @@ impl Workspace {
 
         let delete: menu::thread::Delete = {
             let this = cx.entity();
+            let thread = thread.clone();
             std::rc::Rc::new(move |window, cx| {
                 let thread = thread.clone();
                 this.update(cx, |this, cx| this.confirm_delete(thread, window, cx));
             })
         };
 
-        let items = menu::thread::items(&flags, &folders, now, apply, create, delete);
+        // Only a conversation with one person has somebody to nickname or to
+        // block; a group has neither.
+        let person = match thread {
+            petunia_data::Thread::Contact(contact) => {
+                let who = contact.uuid();
+                Some(menu::thread::Person {
+                    who,
+                    blocked: self
+                        .store
+                        .read(cx)
+                        .state()
+                        .is_some_and(|state| state.is_blocked(who)),
+                })
+            }
+            petunia_data::Thread::Group(_) => None,
+        };
+
+        let name: menu::thread::Name = {
+            let this = cx.entity();
+            std::rc::Rc::new(move |who, window, cx| {
+                this.update(cx, |this, cx| this.name_nickname(who, window, cx));
+            })
+        };
+        let block: menu::thread::Block = {
+            let this = cx.entity();
+            std::rc::Rc::new(move |who, blocked, window, cx| {
+                this.update(cx, |this, cx| match blocked {
+                    true => this.ask_block(who, window, cx),
+                    // No dialog: unblocking is the undo, and asking before an
+                    // undo is asking twice about one decision.
+                    false => this
+                        .store
+                        .update(cx, |store, cx| store.set_blocked(who, false, cx)),
+                });
+            })
+        };
+
+        let acts = menu::thread::Acts {
+            apply,
+            create,
+            delete,
+            name,
+            block,
+        };
+        let items = menu::thread::items(&flags, &folders, now, person, acts);
         self.raise_menu(items, at, window, cx);
     }
 
@@ -483,6 +642,124 @@ impl Workspace {
         cx.notify();
     }
 
+    fn open_poll(&mut self, thread: petunia_data::Thread, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::ui::poll_composer::{Dismissed, PollComposer};
+
+        let poll = cx.new(|cx| PollComposer::new(self.store.clone(), thread, window, cx));
+        cx.subscribe_in(&poll, window, |this, _, _: &Dismissed, window, cx| {
+            this.poll = None;
+            this.dismissed(window, cx);
+        })
+        .detach();
+
+        poll.update(cx, |poll, cx| poll.take_focus(window, cx));
+        self.poll = Some(poll);
+        cx.notify();
+    }
+
+    /// Asks before unlinking this device -- there is no undo once the server
+    /// has heard about it.
+    fn confirm_log_out(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let confirm = cx.new(|cx| {
+            Confirm::new(
+                "Log out of Signal?",
+                "This device is unlinked from your account and everything petunia \
+                 stored here is cleared. You will need to link again from your \
+                 phone.",
+                "Log Out",
+                cx,
+            )
+        });
+
+        cx.subscribe_in(&confirm, window, |this, _, _: &confirm::Dismissed, window, cx| {
+            this.confirm = None;
+            this.dismissed(window, cx);
+        })
+        .detach();
+        cx.subscribe(&confirm, |this, _, _: &confirm::Confirmed, cx| {
+            this.store.update(cx, |store, _| store.log_out());
+        })
+        .detach();
+
+        confirm.update(cx, |confirm, cx| confirm.take_focus(window, cx));
+        self.confirm = Some(confirm);
+        cx.notify();
+    }
+
+    /// Asks for a username, and sends it on to be reserved and confirmed.
+    ///
+    /// Both halves are asked for separately: given the number, that exact
+    /// username is asked for, and given only the name, Signal picks a free number
+    /// for it.
+    fn name_username(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self
+            .store
+            .read(cx)
+            .username
+            .as_ref()
+            .map(|(name, _)| name.clone());
+
+        let sheet = cx.new(|cx| Username::new(current.as_deref(), window, cx));
+
+        cx.subscribe_in(&sheet, window, |this, _, _: &username::Dismissed, window, cx| {
+            this.username = None;
+            this.dismissed(window, cx);
+        })
+        .detach();
+        cx.subscribe(&sheet, |this, _, named: &username::Answered, cx| {
+            this.store
+                .update(cx, |store, _| store.set_username(named.0.clone()));
+        })
+        .detach();
+
+        sheet.update(cx, |sheet, cx| sheet.take_focus(window, cx));
+        self.username = Some(sheet);
+        cx.notify();
+    }
+
+    /// Asks for a nickname, and syncs it through Storage Service. An empty
+    /// answer is a clear rather than a name nobody would want: `Prompt`
+    /// refuses one, so the details panel offers its own "Remove" instead --
+    /// not built here, since nothing yet needs both in the same place.
+    fn name_nickname(&mut self, uuid: uuid::Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        // Kept exactly as it was, since this prompt only ever changes the
+        // name -- there is nowhere yet to edit the note beside it, and typing
+        // a nickname must not silently erase one.
+        let note = self
+            .store
+            .read(cx)
+            .state()
+            .and_then(|state| state.notes.get(&uuid))
+            .cloned();
+
+        // Said here because it is the one thing about a nickname nobody can work
+        // out from the field: it looks exactly like renaming somebody in a shared
+        // address book, and it is not. The record it goes in is encrypted to this
+        // account, so it reaches your own devices and stops.
+        let prompt = cx.new(|cx| {
+            Prompt::new("Nickname", "What you call them", "Save", window, cx).note(
+                "Only you can see this. Nicknames are end-to-end encrypted and \
+                 synced to your own devices — never to them.",
+            )
+        });
+
+        cx.subscribe_in(&prompt, window, |this, _, _: &prompt::Dismissed, window, cx| {
+            this.prompt = None;
+            this.dismissed(window, cx);
+        })
+        .detach();
+        cx.subscribe(&prompt, move |this, _, named: &prompt::Answered, cx| {
+            this.store.update(cx, |store, cx| {
+                store.set_nickname(uuid, Some(named.0.clone()), note.clone(), cx)
+            });
+        })
+        .detach();
+
+        prompt.update(cx, |prompt, cx| prompt.take_focus(window, cx));
+        self.prompt = Some(prompt);
+        cx.notify();
+    }
+
     /// Asks what to call a new folder, and puts the conversation in it.
     fn name_folder(
         &mut self,
@@ -508,6 +785,66 @@ impl Workspace {
             };
             this.store
                 .update(cx, |store, cx| store.set_flags(thread.clone(), flags, cx));
+        })
+        .detach();
+
+        prompt.update(cx, |prompt, cx| prompt.take_focus(window, cx));
+        self.prompt = Some(prompt);
+        cx.notify();
+    }
+
+    /// Asks who a conversation is to be started with, and opens it.
+    ///
+    /// Somebody found by username or phone number has already been recorded by
+    /// the store by the time the picker answers, so opening the thread is all
+    /// there is left to do -- and opening a thread with no messages in it is
+    /// exactly what starting a conversation is.
+    fn open_new_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let picker = cx.new(|cx| NewChat::new(self.store.clone(), cx));
+
+        cx.subscribe_in(&picker, window, |this, _, _: &new_chat::Dismissed, window, cx| {
+            this.new_chat = None;
+            this.dismissed(window, cx);
+        })
+        .detach();
+        cx.subscribe(&picker, |this, _, started: &new_chat::Started, cx| {
+            let thread = started.0.clone();
+            this.store.update(cx, |store, cx| store.activate(thread, cx));
+        })
+        .detach();
+        // The name is asked for after the members rather than before, because who
+        // is in a group is the part somebody came here to decide and the prompt
+        // is the one place a single line of text is typed.
+        cx.subscribe_in(
+            &picker,
+            window,
+            |this, _, grouping: &new_chat::Grouping, window, cx| {
+                this.name_group(grouping.0.clone(), window, cx)
+            },
+        )
+        .detach();
+
+        picker.update(cx, |picker, cx| picker.take_focus(window, cx));
+        self.new_chat = Some(picker);
+        cx.notify();
+    }
+
+    /// Asks what a group is to be called, and creates it.
+    ///
+    /// Nothing opens here: the group does not exist until the server has taken
+    /// it, and the worker says so with `StoreEvent::Opened`.
+    fn name_group(&mut self, members: Vec<uuid::Uuid>, window: &mut Window, cx: &mut Context<Self>) {
+        let prompt = cx.new(|cx| Prompt::new("Name the group", "Group name", "Create", window, cx));
+
+        cx.subscribe_in(&prompt, window, |this, _, _: &prompt::Dismissed, window, cx| {
+            this.prompt = None;
+            this.dismissed(window, cx);
+        })
+        .detach();
+        cx.subscribe(&prompt, move |this, _, named: &prompt::Answered, cx| {
+            let (title, members) = (named.0.clone(), members.clone());
+            this.store
+                .update(cx, |store, _| store.create_group(title, members));
         })
         .detach();
 
@@ -582,6 +919,102 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Asks which deletion, and carries out whichever was chosen.
+    fn ask_delete(
+        &mut self,
+        target: petunia_data::MessageId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(thread) = self.store.read(cx).active().cloned() else {
+            return;
+        };
+        let own = self
+            .store
+            .read(cx)
+            .state()
+            .is_some_and(|state| state.aci == target.sender);
+        let now = chrono::Utc::now().timestamp_millis() as u64;
+
+        let sheet = cx.new(|cx| Delete::new(target, own, now, cx));
+
+        cx.subscribe_in(&sheet, window, |this, _, _: &delete::Dismissed, window, cx| {
+            this.delete = None;
+            this.dismissed(window, cx);
+        })
+        .detach();
+        cx.subscribe(&sheet, move |this, _, chosen: &delete::Chosen, cx| {
+            let thread = thread.clone();
+            this.store.update(cx, |store, cx| match chosen.1 {
+                delete::Chose::ForMe => store.delete_for_me(thread, chosen.0, cx),
+                delete::Chose::ForEveryone => store.delete_for_everyone(thread, chosen.0, cx),
+            });
+        })
+        .detach();
+
+        sheet.update(cx, |sheet, cx| sheet.take_focus(window, cx));
+        self.delete = Some(sheet);
+        cx.notify();
+    }
+
+    /// Asks before blocking, because it is not obvious from the outside what it
+    /// does and it is not something to do by mis-clicking a menu.
+    fn ask_block(&mut self, who: uuid::Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self
+            .store
+            .read(cx)
+            .state()
+            .map(|state| state.name_of(who))
+            .unwrap_or_default();
+
+        let confirm = cx.new(|cx| {
+            Confirm::new(
+                format!("Block {name}?"),
+                "They will not be able to call you or send you messages, and you \
+                 will not see anything they send. This applies to every device on \
+                 your account.",
+                "Block",
+                cx,
+            )
+        });
+
+        cx.subscribe_in(&confirm, window, |this, _, _: &confirm::Dismissed, window, cx| {
+            this.confirm = None;
+            this.dismissed(window, cx);
+        })
+        .detach();
+        cx.subscribe(&confirm, move |this, _, _: &confirm::Confirmed, cx| {
+            this.store
+                .update(cx, |store, cx| store.set_blocked(who, true, cx));
+        })
+        .detach();
+
+        confirm.update(cx, |confirm, cx| confirm.take_focus(window, cx));
+        self.confirm = Some(confirm);
+        cx.notify();
+    }
+
+    /// A sticker, at a size worth looking at, with whatever is known about the
+    /// pack it came from.
+    fn open_sticker(
+        &mut self,
+        sticker: petunia_data::message::Sticker,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let sheet = cx.new(|cx| StickerSheet::new(sticker, self.store.clone(), cx));
+
+        cx.subscribe_in(&sheet, window, |this, _, _: &sticker::Dismissed, window, cx| {
+            this.sticker = None;
+            this.dismissed(window, cx);
+        })
+        .detach();
+
+        sheet.update(cx, |sheet, cx| sheet.take_focus(window, cx));
+        self.sticker = Some(sheet);
+        cx.notify();
+    }
+
     /// cmd+f searches everywhere; cmd+shift+f searches what is on screen. One
     /// surface either way, because they differ only in what they ask.
     fn open_search(&mut self, scope: Scope, window: &mut Window, cx: &mut Context<Self>) {
@@ -644,6 +1077,10 @@ impl Workspace {
         cx.subscribe_in(&viewer, window, |this, _, _: &viewer::Dismissed, window, cx| {
             this.viewer = None;
             this.dismissed(window, cx);
+        })
+        .detach();
+        cx.subscribe_in(&viewer, window, |this, _, raise: &viewer::Raise, window, cx| {
+            this.raise_menu(raise.take(), raise.at, window, cx);
         })
         .detach();
         window.focus(&viewer.read(cx).focus_handle(cx), cx);
@@ -726,6 +1163,11 @@ impl Workspace {
             cx.notify();
             return;
         }
+        if self.new_chat.take().is_some() {
+            window.focus(&self.focus, cx);
+            cx.notify();
+            return;
+        }
         if self.themes.is_some() {
             self.close_themes(cx);
             window.focus(&self.focus, cx);
@@ -759,6 +1201,21 @@ impl Workspace {
             return;
         }
         if self.help.take().is_some() {
+            window.focus(&self.focus, cx);
+            cx.notify();
+            return;
+        }
+        if self.username.take().is_some() {
+            window.focus(&self.focus, cx);
+            cx.notify();
+            return;
+        }
+        if self.delete.take().is_some() {
+            window.focus(&self.focus, cx);
+            cx.notify();
+            return;
+        }
+        if self.sticker.take().is_some() {
             window.focus(&self.focus, cx);
             cx.notify();
             return;
@@ -1077,6 +1534,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|_, _: &actions::Zoom, window: &mut Window, _| {
                 window.zoom_window()
             }))
+            .on_action(cx.listener(|this, _: &actions::NewChat, window, cx| {
+                this.open_new_chat(window, cx)
+            }))
             .on_action(cx.listener(|this, _: &actions::QuickSwitcher, window, cx| {
                 this.open_switcher(window, cx)
             }))
@@ -1152,7 +1612,12 @@ impl Render for Workspace {
             .children(self.themes.clone())
             .children(self.editor.clone())
             .children(self.forward.clone())
+            .children(self.new_chat.clone())
             .children(self.raw.clone())
+            .children(self.poll.clone())
+            .children(self.sticker.clone())
+            .children(self.delete.clone())
+            .children(self.username.clone())
             .child(self.notices.clone())
     }
 }
@@ -1250,7 +1715,10 @@ impl Workspace {
             .gap_2()
             .px_3()
             // Clears the traffic lights when the sidebar is not there to.
-            .when(!panels.sidebar, |this| this.pl(px(TRAFFIC_LIGHTS)))
+            // macOS only -- elsewhere there is no fixed cluster to clear.
+            .when(cfg!(target_os = "macos") && !panels.sidebar, |this| {
+                this.pl(px(TRAFFIC_LIGHTS))
+            })
             .h(px(TITLE_BAR))
             .flex_none()
             .child(kit::icon_button(

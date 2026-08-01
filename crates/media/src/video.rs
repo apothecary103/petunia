@@ -183,35 +183,84 @@ use objc2::rc::Retained;
         }
     }
 
+    /// How large a poster is generated. A poster is a still in a message box a
+    /// few hundred points across, and asking the generator for the frame at its
+    /// own size means decoding, encoding and caching a 4K image to draw it at a
+    /// twelfth of that. Retina, and the viewer's own stage, want more than the
+    /// box: this is the largest either asks for.
+    const POSTER_EDGE: f64 = 1280.0;
+
+    /// Where in the clip the poster is taken from: a tenth of the way in, capped
+    /// at a second.
+    ///
+    /// Not zero -- the first frame of a phone recording is very often black, and
+    /// a black rectangle is no better than the placeholder it replaces. Not a
+    /// flat second either, which is past the end of every clip shorter than one
+    /// and produced no poster at all for them.
+    const POSTER_FRACTION: f64 = 0.1;
+    const POSTER_CAP: f64 = 1.0;
+
     /// The frame a video is shown as before anyone plays it, as PNG bytes.
     ///
-    /// Taken a moment in rather than at zero: the first frame of a phone
-    /// recording is very often black, and a black rectangle is no better than
-    /// the placeholder it replaces. Runs off the main thread, which
-    /// `AVAssetImageGenerator` permits and `AVPlayer` does not.
+    /// Runs off the main thread, which `AVAssetImageGenerator` permits and
+    /// `AVPlayer` does not.
     pub fn poster(path: &Path) -> Option<Vec<u8>> {
         use objc2_av_foundation::{AVAssetImageGenerator, AVURLAsset};
+        use objc2_core_foundation::CGSize;
 
         unsafe {
             let url = NSURL::fileURLWithPath(&NSString::from_str(path.to_str()?));
             let asset = AVURLAsset::URLAssetWithURL_options(&url, None);
             let generator = AVAssetImageGenerator::assetImageGeneratorWithAsset(&asset);
             generator.setAppliesPreferredTrackTransform(true);
+            generator.setMaximumSize(CGSize {
+                width: POSTER_EDGE,
+                height: POSTER_EDGE,
+            });
+            // A poster is a still nobody asked to see a *particular* frame of, so
+            // the generator may snap to whichever keyframe is nearest rather than
+            // decode forward from one to land on the exact time. Left at the
+            // default of zero it decodes every frame in between, which on a long
+            // clip with sparse keyframes is seconds of work for the same picture.
+            let slack = span(0.5);
+            generator.setRequestedTimeToleranceBefore(slack);
+            generator.setRequestedTimeToleranceAfter(slack);
 
-            let at = CMTime {
-                value: 600,
-                timescale: 600,
-                flags: objc2_core_media::CMTimeFlags::Valid,
-                epoch: 0,
-            };
+            let duration = seconds(asset.duration()).as_secs_f64();
+            let at = (duration * POSTER_FRACTION).min(POSTER_CAP);
+
             // The asynchronous replacement takes a completion block, and this
             // already runs on a thread of its own where blocking is the point.
+            //
+            // A second attempt at zero rather than nothing: a clip whose only
+            // decodable frame is its first is still a clip, and a container the
+            // generator cannot seek in fails at every other time and succeeds
+            // there.
             #[allow(deprecated)]
             let image = generator
-                .copyCGImageAtTime_actualTime_error(at, std::ptr::null_mut())
+                .copyCGImageAtTime_actualTime_error(span(at), std::ptr::null_mut())
+                .or_else(|_| {
+                    generator.copyCGImageAtTime_actualTime_error(
+                        span(0.0),
+                        std::ptr::null_mut(),
+                    )
+                })
                 .ok()?;
 
             encode(&image)
+        }
+    }
+
+    /// Seconds as a `CMTime`, on the 600 timescale every AVFoundation example
+    /// uses -- it divides the frame rates video is actually shot at.
+    fn span(seconds: f64) -> CMTime {
+        const TIMESCALE: i32 = 600;
+
+        CMTime {
+            value: (seconds.max(0.0) * f64::from(TIMESCALE)) as i64,
+            timescale: TIMESCALE,
+            flags: objc2_core_media::CMTimeFlags::Valid,
+            epoch: 0,
         }
     }
 

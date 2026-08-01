@@ -75,6 +75,7 @@ fn fields(message: &Message, sender: &str) -> Vec<(String, String)> {
             match &message.content {
                 Content::Text { .. } => "text".to_owned(),
                 Content::Sticker(_) => "sticker".to_owned(),
+                Content::Poll(_) => "poll".to_owned(),
                 Content::Deleted => "deleted".to_owned(),
                 Content::Update(_) => "update".to_owned(),
             },

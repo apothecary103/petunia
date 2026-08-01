@@ -36,6 +36,57 @@ impl Row {
             Self::Day(_) | Self::UnreadMarker => false,
         }
     }
+
+    /// The same row, addressing a history with `by` more messages in front of it.
+    /// A row says which messages it draws by position, so a page of older ones
+    /// arriving renumbers every row in the thread without changing what a single
+    /// one of them draws.
+    fn shifted(&self, by: usize) -> Self {
+        match self {
+            Self::Run { sender, messages } => Self::Run {
+                sender: *sender,
+                messages: messages.start + by..messages.end + by,
+            },
+            Self::Update(at) => Self::Update(at + by),
+            other => other.clone(),
+        }
+    }
+}
+
+/// Which rows a repaint actually changed: the range of `before` that has been
+/// replaced, and how many rows replaced it. `shift` is how many messages went in
+/// at the *front* of the history, which renumbers `before` without rewriting it.
+///
+/// The list addresses its scroll position and its measured row heights by index,
+/// so it has to be told the truth about where rows went in. Told a count instead
+/// — "there are `n` more rows than last time, and they arrived at the front" —
+/// it is wrong whenever a page changes the rows it lands beside, which a page of
+/// older messages almost always does: the message that was the oldest had a day
+/// separator above it and a run header of its own, and once there are messages
+/// above it from the same person on the same day it has neither. Two rows go and
+/// twelve arrive, the count says eleven, and from then on every measured height
+/// in the thread belongs to a different row than the one it was measured from.
+/// That is the shove and the jitter when reading backwards.
+pub fn changed(before: &[Row], after: &[Row], shift: usize) -> (Range<usize>, usize) {
+    let same = |left: &Row, right: &Row| left.shifted(shift) == *right;
+
+    let head = before
+        .iter()
+        .zip(after)
+        .take_while(|(left, right)| same(left, right))
+        .count();
+    // Bounded so a head and a tail cannot claim the same row, which is what
+    // would happen to a thread of nothing but identical rows.
+    let room = before.len().min(after.len()) - head;
+    let tail = before
+        .iter()
+        .rev()
+        .zip(after.iter().rev())
+        .take(room)
+        .take_while(|(left, right)| same(left, right))
+        .count();
+
+    (head..before.len() - tail, after.len() - tail - head)
 }
 
 /// Splits a thread into day separators, runs and update lines. Pure so the
@@ -362,5 +413,93 @@ mod tests {
         let rows = rows(&messages, Some(NOON + 99), GROUP_WITHIN);
 
         assert!(!rows.iter().any(|row| matches!(row, Row::UnreadMarker)));
+    }
+
+    /// A repaint that changed nothing must splice nothing, or the list throws
+    /// away every height it measured on every frame.
+    #[test]
+    fn an_unchanged_thread_reports_no_change() {
+        let alice = Uuid::new_v4();
+        let messages = [message(alice, NOON), message(alice, NOON + 1000)];
+        let rows = rows(&messages, None, GROUP_WITHIN);
+
+        let (rewritten, count) = changed(&rows, &rows, 0);
+
+        assert!(rewritten.is_empty());
+        assert_eq!(count, 0);
+    }
+
+    /// A message arriving is rows added at the back and nothing else touched.
+    #[test]
+    fn a_message_arriving_changes_only_the_end() {
+        let (alice, bob) = (Uuid::new_v4(), Uuid::new_v4());
+        let before = rows(&[message(alice, NOON)], None, GROUP_WITHIN);
+        let after = rows(
+            &[message(alice, NOON), message(bob, NOON + 1000)],
+            None,
+            GROUP_WITHIN,
+        );
+
+        // The day separator and alice's run stay; bob's run is the one arrival.
+        assert_eq!(changed(&before, &after, 0), (2..2, 1));
+    }
+
+    /// The case a count could not describe, and the reason `changed` exists. The
+    /// oldest message loaded carries a day separator and a run header of its own;
+    /// once a page of the same person on the same day arrives above it, it has
+    /// neither. Two rows go where twelve arrive, so "eleven more rows, at the
+    /// front" is wrong about every index behind it.
+    #[test]
+    fn a_page_of_older_messages_rewrites_the_rows_it_landed_beside() {
+        let alice = Uuid::new_v4();
+        let loaded = [message(alice, NOON + 2000)];
+        let paged = [
+            message(alice, NOON),
+            message(alice, NOON + 1000),
+            message(alice, NOON + 2000),
+        ];
+
+        let before = rows(&loaded, None, GROUP_WITHIN);
+        let after = rows(&paged, None, GROUP_WITHIN);
+
+        // Before: [Day, Run(0..1)]. After: [Day, Run(0..3)] -- one run, not two,
+        // so the row that was the whole thread is gone rather than moved.
+        assert_eq!(before.len(), 2);
+        assert_eq!(after.len(), 2);
+        assert_eq!(changed(&before, &after, 2), (1..2, 1));
+    }
+
+    /// A page that does *not* join the run it landed beside leaves that row
+    /// alone, renumbered -- which is what `shift` is for. Without it every row
+    /// in the thread reads as rewritten and the list remeasures all of it.
+    #[test]
+    fn a_page_that_joins_nothing_leaves_the_rows_below_it_alone() {
+        let (alice, bob) = (Uuid::new_v4(), Uuid::new_v4());
+        let loaded = [message(bob, NOON + DAY)];
+        let paged = [message(alice, NOON), message(bob, NOON + DAY)];
+
+        let before = rows(&loaded, None, GROUP_WITHIN);
+        let after = rows(&paged, None, GROUP_WITHIN);
+
+        // Before: [Day(second), Run(bob, 0..1)]. After: [Day(first),
+        // Run(alice, 0..1), Day(second), Run(bob, 1..2)] -- bob's row is
+        // untouched but now addresses message one, so only the two rows in
+        // front of it went in.
+        assert_eq!(changed(&before, &after, 1), (0..0, 2));
+    }
+
+    /// A thread of nothing but the same row must not have a head and a tail
+    /// claiming the same one, which would report more rows replaced than there
+    /// are.
+    #[test]
+    fn a_head_and_a_tail_never_overlap() {
+        let alice = Uuid::new_v4();
+        let before = vec![Row::Run { sender: alice, messages: 0..1 }; 3];
+        let after = vec![Row::Run { sender: alice, messages: 0..1 }; 2];
+
+        let (rewritten, count) = changed(&before, &after, 0);
+
+        assert!(rewritten.end <= before.len());
+        assert_eq!(before.len() - rewritten.len() + count, after.len());
     }
 }

@@ -62,14 +62,47 @@ pub struct Forwarding(pub MessageId);
 #[derive(Debug, Clone)]
 pub struct Inspecting(pub MessageId);
 
+/// A poll was asked for, in this conversation. The workspace owns the dialog
+/// that builds one, same as every other one it hosts.
+#[derive(Debug, Clone)]
+pub struct Polling(pub Thread);
+
+/// A sticker was clicked, and wants looking at.
+#[derive(Debug, Clone)]
+pub struct Stickering(pub Box<petunia_data::message::Sticker>);
+
+/// A message is to be deleted, one way or the other. Which way is asked by a
+/// dialog the workspace owns, like every other one.
+#[derive(Debug, Clone)]
+pub struct Deleting(pub MessageId);
+
+/// Somebody is to be given a nickname.
+#[derive(Debug, Clone)]
+pub struct Naming(pub uuid::Uuid);
+
+/// Somebody is to be blocked, once they have been asked about.
+#[derive(Debug, Clone)]
+pub struct Blocking(pub uuid::Uuid);
+
 impl gpui::EventEmitter<Forwarding> for Conversation {}
 impl gpui::EventEmitter<Inspecting> for Conversation {}
+impl gpui::EventEmitter<Polling> for Conversation {}
+impl gpui::EventEmitter<Stickering> for Conversation {}
+impl gpui::EventEmitter<Deleting> for Conversation {}
+impl gpui::EventEmitter<Naming> for Conversation {}
+impl gpui::EventEmitter<Blocking> for Conversation {}
 
 /// How far beyond the window the list measures. A run is tall and its height is
 /// only known once it is built, so a scroll that outruns the measured region
 /// stutters while it catches up; a window's worth of slack is enough that a
 /// flick never does.
 const OVERDRAW: f32 = 800.0;
+
+/// How far above the plus its menu is put. Roughly the two rows it holds, so it
+/// opens over the composer rather than off the bottom of the window -- `Menu`
+/// itself flips a menu that would run off an edge, and the edge it would run off
+/// here is the one it is anchored to.
+const MORE_MENU: f32 = 76.0;
 
 /// How long a message a search jumped to stays lit. Long enough to find it on
 /// the page, short enough that it is not still lit when you come back.
@@ -108,12 +141,14 @@ pub struct Conversation {
     /// The thread the scroll position belongs to, so switching conversations
     /// starts at the newest message rather than wherever the last one was.
     anchored: Option<Thread>,
-    /// How many rows the list was last told about, and whether the next change
-    /// arrived above what is on screen. The list addresses its scroll position as
-    /// an item and an offset into it, so rows spliced in at the front carry the
-    /// reader with them -- which is why loading older messages no longer needs to
-    /// measure how far it shoved them.
-    counted: usize,
+    /// The rows the list was last told about, and how many messages they were
+    /// built from. Kept in full rather than counted, because the list addresses
+    /// its scroll position *and every measured row height* by index, and a count
+    /// cannot say which rows a repaint rewrote -- see `group::changed`.
+    shown: Vec<group::Row>,
+    messages: usize,
+    /// Whether the next change arrived above what is on screen, which decides
+    /// whether the rows already there have been renumbered.
     prepending: bool,
     /// Runs only while something is playing, because a repaint every tenth of a
     /// second for an idle window is not free.
@@ -167,6 +202,58 @@ impl Conversation {
         )
         .detach();
         let composer = cx.new(|cx| Composer::new(store.clone(), drafts, window, cx));
+        cx.subscribe_in(
+            &composer,
+            window,
+            |this: &mut Self, _, _: &super::composer::RequestPoll, _, cx| {
+                if let Some(thread) = this.store.read(cx).active().cloned() {
+                    cx.emit(Polling(thread));
+                }
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            &composer,
+            window,
+            |_: &mut Self, composer, more: &super::composer::RequestMore, _, cx| {
+                let composer = composer.clone();
+                let items = vec![
+                    crate::ui::menu::Item::new("Photo or file…", {
+                        let composer = composer.clone();
+                        move |window: &mut Window, cx: &mut gpui::App| {
+                            composer.update(cx, |composer, cx| composer.pick_files(window, cx));
+                        }
+                    })
+                    .icon(gpui_component::IconName::Folder),
+                    crate::ui::menu::Item::new("Poll…", {
+                        let this = cx.entity();
+                        move |_, cx: &mut gpui::App| {
+                            this.update(cx, |this, cx| {
+                                if let Some(thread) = this.store.read(cx).active().cloned() {
+                                    cx.emit(Polling(thread));
+                                }
+                            });
+                        }
+                    })
+                    .icon(gpui_component::IconName::ChartPie),
+                ];
+                // Above the click, because the composer sits at the bottom of the
+                // window and a menu dropped from there has nowhere to go. `Menu`
+                // flips it back if that puts it off the top.
+                let at = gpui::point(more.0.x, more.0.y - px(MORE_MENU));
+                cx.emit(Raise::new(items, at));
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            &composer,
+            window,
+            |this: &mut Self, _, raised: &super::composer::RequestStickerMenu, _, cx| {
+                let items = this.sticker_menu(&raised.chosen, cx);
+                cx.emit(Raise::new(items, raised.at));
+            },
+        )
+        .detach();
         Self {
             store,
             composer,
@@ -175,7 +262,8 @@ impl Conversation {
             // at the newest message and stays there as messages arrive.
             list: ListState::new(0, ListAlignment::Bottom, px(OVERDRAW)),
             anchored: None,
-            counted: 0,
+            shown: Vec::new(),
+            messages: 0,
             prepending: false,
             ticking: None,
             aging: None,
@@ -313,9 +401,13 @@ impl Conversation {
             Act::React(target, emoji) => self
                 .store
                 .update(cx, |store, cx| store.react(thread, target, emoji, cx)),
-            Act::Delete(target) => self
+            Act::Delete(target) => cx.emit(Deleting(target)),
+            Act::VotePoll(target, chosen) => self
                 .store
-                .update(cx, |store, cx| store.delete(thread, target, cx)),
+                .update(cx, |store, cx| store.vote_poll(thread, target, chosen, cx)),
+            Act::TerminatePoll(target) => self
+                .store
+                .update(cx, |store, cx| store.terminate_poll(thread, target, cx)),
             Act::Copy(target) => self.copy(target, cx),
             Act::View(path) => cx.emit(Viewing(path)),
             Act::Save(path) => self.save(path, window, cx),
@@ -339,18 +431,79 @@ impl Conversation {
                 }
                 self.player.seek(fraction);
             }
-            Act::InstallStickers { pack_id, key } => self.store.update(cx, |store, _| {
-                store.send(Command::InstallStickerPack { pack_id, key })
-            }),
+            Act::ShowSticker(sticker) => cx.emit(Stickering(sticker)),
             Act::Inspect(who) => self.inspect(who, cx),
             Act::Forward(target) => cx.emit(Forwarding(target)),
             Act::Raw(target) => cx.emit(Inspecting(target)),
+            Act::Nickname(who) => cx.emit(Naming(who)),
+            Act::Block(who, blocked) => match blocked {
+                true => cx.emit(Blocking(who)),
+                // No dialog: unblocking is the undo, and asking before an undo
+                // is asking twice about one decision.
+                false => self
+                    .store
+                    .update(cx, |store, cx| store.set_blocked(who, false, cx)),
+            },
             Act::Menu(target, at) => self.open_menu(target, at, cx),
             Act::MenuFor(who, at) => {
-                let items = crate::ui::menu::message::person(who, &self.dispatch(cx));
+                let blocked = self
+                    .store
+                    .read(cx)
+                    .state()
+                    .is_some_and(|state| state.is_blocked(who));
+                let items = crate::ui::menu::message::person(who, blocked, &self.dispatch(cx));
                 cx.emit(Raise::new(items, at));
             }
         }
+    }
+
+    /// The menu for a sticker in the picker: keep it to hand, or go and look at
+    /// the pack it came from.
+    fn sticker_menu(
+        &self,
+        chosen: &super::composer::stickers::Chosen,
+        cx: &mut Context<Self>,
+    ) -> Vec<crate::ui::menu::Item> {
+        let kept = self
+            .store
+            .read(cx)
+            .favourites
+            .holds(&chosen.pack_id, chosen.sticker_id);
+
+        let keep = {
+            let store = self.store.clone();
+            let pack_id = chosen.pack_id.clone();
+            let sticker_id = chosen.sticker_id;
+            crate::ui::menu::Item::new(
+                match kept {
+                    true => "Remove from favourites",
+                    false => "Add to favourites",
+                },
+                move |_, cx: &mut gpui::App| {
+                    store.update(cx, |store, cx| store.keep_sticker(&pack_id, sticker_id, cx));
+                },
+            )
+            .icon(gpui_component::IconName::Heart)
+            .checked(kept)
+        };
+
+        let show = {
+            let this = cx.entity();
+            let sticker = petunia_data::message::Sticker {
+                pack_id: chosen.pack_id.clone(),
+                pack_key: Some(chosen.key.clone()),
+                sticker_id: chosen.sticker_id,
+                emoji: chosen.emoji.clone(),
+                image: Some(petunia_data::attachment::from_path(chosen.path.clone(), 0)),
+            };
+            crate::ui::menu::Item::new("Show pack…", move |_, cx: &mut gpui::App| {
+                let sticker = sticker.clone();
+                this.update(cx, |_, cx| cx.emit(Stickering(Box::new(sticker))));
+            })
+            .icon(gpui_component::IconName::GalleryVerticalEnd)
+        };
+
+        vec![keep, crate::ui::menu::Item::Separator, show]
     }
 
     /// The menu for a message, built from the message itself.
@@ -419,34 +572,65 @@ impl Conversation {
         .detach();
     }
 
-    /// Tells the list how many rows there are and, when that has changed, which
-    /// end they arrived at.
+    /// Tells the list exactly which rows this repaint rewrote.
     ///
-    /// The distinction is the whole point: rows spliced in at the front carry the
-    /// reader down with them, so what they were reading stays under the pointer,
-    /// while rows appended at the back leave them where they are -- and leave a
-    /// reader who was at the bottom at the bottom, because that is what a
-    /// bottom-anchored list does with no scroll position of its own.
-    fn reconcile(&mut self, thread: &Thread, count: usize) {
+    /// Which is the whole point: rows spliced in at the front carry the reader
+    /// down with them, so what they were reading stays under the pointer, while
+    /// rows appended at the back leave them where they are -- and leave a reader
+    /// who was at the bottom at the bottom, because that is what a bottom-anchored
+    /// list does with no scroll position of its own. Both fall out of naming the
+    /// range rather than the count, and so does the case neither a count nor an
+    /// end could describe: a page of older messages rewriting the rows it landed
+    /// beside.
+    ///
+    /// Row zero is the sentinel and is always row zero, so everything here is
+    /// offset past it.
+    fn reconcile(&mut self, thread: &Thread, rows: &[group::Row], messages: usize) {
         if self.anchored.as_ref() != Some(thread) {
             self.anchored = Some(thread.clone());
-            self.counted = count;
+            self.shown = rows.to_vec();
+            self.messages = messages;
             self.prepending = false;
-            self.list.reset(count);
+            self.list.reset(rows.len() + 1);
             // A voice note belongs to the conversation it was sent in, so it
             // does not follow you into the next one.
             self.player.stop();
             return;
         }
 
-        let was = std::mem::replace(&mut self.counted, count);
         let prepending = std::mem::take(&mut self.prepending);
+        let was = std::mem::replace(&mut self.messages, messages);
+        // Only a page of older messages renumbers the rows already there; a
+        // message arriving at the back leaves every index alone.
+        let shift = match prepending {
+            true => messages.saturating_sub(was),
+            false => 0,
+        };
 
-        match count.checked_sub(was) {
-            None => self.list.reset(count),
-            Some(0) => {}
-            Some(added) if prepending => self.list.splice(0..0, added),
-            Some(added) => self.list.splice(was..was, added),
+        let shown = std::mem::replace(&mut self.shown, rows.to_vec());
+        let (rewritten, count) = group::changed(&shown, rows, shift);
+        if rewritten.is_empty() && count == 0 {
+            return;
+        }
+
+        // Where the reader is, before the indices move under them.
+        let at = self.list.logical_scroll_top();
+        self.list
+            .splice(rewritten.start + 1..rewritten.end + 1, count);
+
+        // `splice` carries a scroll position that sits *after* the range it
+        // rewrote, which is every reader who was below the change. One inside it
+        // has nowhere to be carried to and is left where they were -- at the top,
+        // with the page they just asked for below them and the message they were
+        // reading shoved off the bottom of the window. So is one above it, which
+        // for a prepend is a reader sitting on the sentinel. The first row the
+        // rewrite did not touch is the one thing both lists have in common, and
+        // that is where they go.
+        if shift > 0 && at.item_ix <= rewritten.end {
+            self.list.scroll_to(gpui::ListOffset {
+                item_ix: rewritten.start + count + 1,
+                offset_in_item: px(0.0),
+            });
         }
     }
 
@@ -635,7 +819,7 @@ impl Render for Conversation {
         let older = history.has_more();
         let loading = history.is_loading();
 
-        self.reconcile(&thread, rows.len() + 1);
+        self.reconcile(&thread, &rows, history.messages().len());
         // After reconcile, so the list has heard of the row being asked for.
         if let Some(row) = self.pending_scroll.take() {
             self.list.scroll_to(gpui::ListOffset {

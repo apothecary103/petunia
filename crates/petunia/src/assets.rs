@@ -8,11 +8,25 @@ use std::borrow::Cow;
 
 use gpui::{AssetSource, SharedString};
 
-/// Petunia's own, by the path an `Icon` asks for.
-const OWN: [(&str, &str); 1] = [(
-    "icons/sticker.svg",
-    include_str!("../assets/icons/sticker.svg"),
-)];
+/// Petunia's own, by the path an `Icon` asks for. Most of them are the emoji
+/// picker's categories, which are drawn as icons rather than as one emoji each:
+/// a rail of nine emoji is a rail of nine things the grid below it is also full
+/// of, and the eye cannot tell the label from the contents.
+const OWN: [(&str, &str); 10] = [
+    (
+        "icons/sticker.svg",
+        include_str!("../assets/icons/sticker.svg"),
+    ),
+    ("icons/emoji.svg", include_str!("../assets/icons/emoji.svg")),
+    ("icons/person.svg", include_str!("../assets/icons/person.svg")),
+    ("icons/paw.svg", include_str!("../assets/icons/paw.svg")),
+    ("icons/mug.svg", include_str!("../assets/icons/mug.svg")),
+    ("icons/plane.svg", include_str!("../assets/icons/plane.svg")),
+    ("icons/ball.svg", include_str!("../assets/icons/ball.svg")),
+    ("icons/bulb.svg", include_str!("../assets/icons/bulb.svg")),
+    ("icons/hash.svg", include_str!("../assets/icons/hash.svg")),
+    ("icons/flag.svg", include_str!("../assets/icons/flag.svg")),
+];
 
 pub struct Assets;
 

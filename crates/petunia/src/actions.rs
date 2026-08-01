@@ -6,6 +6,7 @@ actions!(
     petunia,
     [
         QuickSwitcher,
+        NewChat,
         Search,
         SearchThread,
         FocusComposer,
@@ -76,6 +77,7 @@ pub fn bind(keys: &Keys, cx: &mut App) {
 fn binding(keystroke: &str, action: Action) -> KeyBinding {
     match action {
         Action::QuickSwitcher => KeyBinding::new(keystroke, QuickSwitcher, None),
+        Action::NewChat => KeyBinding::new(keystroke, NewChat, None),
         Action::Search => KeyBinding::new(keystroke, Search, None),
         Action::SearchThread => KeyBinding::new(keystroke, SearchThread, None),
         Action::FocusComposer => KeyBinding::new(keystroke, FocusComposer, None),
