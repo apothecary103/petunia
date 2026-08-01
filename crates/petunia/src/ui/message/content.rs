@@ -8,12 +8,12 @@ use gpui_component::highlighter::HighlightTheme;
 
 use super::act::{Act, Dispatch};
 use super::{bar, emoji, format, media};
-use petunia_data::message::markup;
+use petunia_data::message::{latex, markup};
 use petunia_media::audio::Playback;
 use petunia_config::Theme;
 use petunia_config::messages::Spacing;
 use petunia_data::attachment::Blob;
-use petunia_data::message::{Content, Quote, Range, Status, Sticker, Update};
+use petunia_data::message::{Content, Poll, Quote, Range, Status, Sticker, Update};
 use petunia_data::{Message, State};
 use crate::ui::image;
 use crate::ui::kit;
@@ -82,6 +82,7 @@ impl Body<'_> {
                 ))
             }
             Content::Sticker(sticker) => said.child(self.sticker(sticker)),
+            Content::Poll(poll) => said.child(self.poll(poll, own)),
             Content::Deleted => said.child(
                 div()
                     .text_size(px(spacing.body))
@@ -141,46 +142,152 @@ impl Body<'_> {
         bar::with_actions(block, self.message, own, theme, self.act)
     }
 
+    /// The question, then one row per option: a bar filled to its share of the
+    /// vote, the count, and a check on whatever this reader chose. Closed once
+    /// the poll's own author says so, after which nothing here is clickable.
+    fn poll(&self, poll: &Poll, own: bool) -> AnyElement {
+        let theme = self.theme;
+        let spacing = self.spacing;
+        let id = self.message.id;
+        let act = self.act.clone();
+        let total = poll.ballots.len().max(1);
+        let mine = poll
+            .ballot_for(self.state.aci)
+            .map(|ballot| ballot.option_indexes.clone())
+            .unwrap_or_default();
+
+        let mut column = div()
+            .flex()
+            .flex_col()
+            .gap_1p5()
+            .w(px(280.0))
+            .child(
+                div()
+                    .text_size(px(spacing.body))
+                    .font_weight(kit::EMPHASIS)
+                    .text_color(theme.text)
+                    .child(poll.question.clone()),
+            );
+
+        for (index, option) in poll.options.iter().enumerate() {
+            let votes = poll.votes_for(index);
+            let share = votes as f32 / total as f32;
+            let checked = mine.contains(&(index as u32));
+            let act = act.clone();
+            let chosen = match poll.allow_multiple {
+                true if checked => mine.iter().copied().filter(|&i| i != index as u32).collect(),
+                true => {
+                    let mut chosen = mine.clone();
+                    chosen.push(index as u32);
+                    chosen
+                }
+                false if checked => Vec::new(),
+                false => vec![index as u32],
+            };
+
+            let mut row = div()
+                .id(SharedString::from(format!("poll-{}-{index}", id.timestamp)))
+                .relative()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_2p5()
+                .py_1p5()
+                .rounded(px(kit::RADIUS))
+                .border_1()
+                .border_color(match checked {
+                    true => theme.accent,
+                    false => theme.border,
+                })
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .rounded(px(kit::RADIUS))
+                        .bg(kit::tinted(theme.accent))
+                        .w(gpui::relative(share)),
+                )
+                .child(
+                    div()
+                        .relative()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(spacing.body))
+                        .text_color(theme.text)
+                        .child(option.clone()),
+                )
+                .child(
+                    div()
+                        .relative()
+                        .flex_none()
+                        .text_size(px(spacing.small))
+                        .text_color(theme.text_muted)
+                        .child(votes.to_string()),
+                );
+
+            if !poll.terminated {
+                row = row.cursor_pointer().on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    act(Act::VotePoll(id, chosen.clone()), window, cx)
+                });
+            }
+            column = column.child(row);
+        }
+
+        column = column.child(
+            div()
+                .text_size(px(spacing.small))
+                .text_color(theme.text_muted)
+                .child(match poll.terminated {
+                    true => "Poll closed".to_string(),
+                    false if poll.allow_multiple => "Select one or more".to_string(),
+                    false => "Select one".to_string(),
+                }),
+        );
+
+        if own && !poll.terminated {
+            column = column.child(
+                div()
+                    .id(SharedString::from(format!("poll-end-{}", id.timestamp)))
+                    .cursor_pointer()
+                    .text_size(px(spacing.small))
+                    .text_color(theme.danger)
+                    .hover(|this| this.underline())
+                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                        act(Act::TerminatePoll(id), window, cx)
+                    })
+                    .child("End this poll"),
+            );
+        }
+
+        column.into_any_element()
+    }
+
     /// A sticker has no bubble and no chip: a fixed square, and the pack's own
     /// emoji holding the space until the bytes arrive. Fixed rather than capped
     /// because a sticker that will not decode must not collapse to nothing.
     fn sticker(&self, sticker: &Sticker) -> AnyElement {
         let edge = self.spacing.sticker;
         let act = self.act.clone();
-        let pack_id = sticker.pack_id.clone();
-        let key = sticker.pack_key.clone();
+        let opened = Box::new(sticker.clone());
 
+        // Clicking a sticker opens it, the way it does on the phone: the picture
+        // at a size worth looking at, and the pack behind it. Installing is one
+        // of the things offered there rather than what the click itself does.
         let square = div()
             .id(SharedString::from(format!("sticker-{}", sticker.sticker_id)))
             .size(px(edge))
             .flex()
             .flex_none()
             .items_center()
-            .justify_center();
-
-        // Clicking a sticker offers its pack, which is how you come by one.
-        let square = match key {
-            Some(key) => square
-                .cursor_pointer()
-                .tooltip(|window, cx| {
-                    gpui_component::tooltip::Tooltip::new("Add this sticker pack").build(window, cx)
-                })
-                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                    act(
-                        Act::InstallStickers {
-                            pack_id: pack_id.clone(),
-                            key: key.clone(),
-                        },
-                        window,
-                        cx,
-                    )
-                }),
-            None => square,
-        };
+            .justify_center()
+            .cursor_pointer()
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                act(Act::ShowSticker(opened.clone()), window, cx)
+            });
 
         match sticker.image.as_ref().map(|image| &image.blob) {
             Some(Blob::Cached(path)) => square
-                .child(crate::ui::image::picture(path, edge, edge))
+                .child(crate::ui::image::animated("frames", path, edge, edge))
                 .into_any_element(),
             _ => square
                 .text_size(px(edge * 0.35))
@@ -249,9 +356,10 @@ fn ticks(count: usize, tint: gpui::Hsla) -> Div {
 /// The body, split so that a code block gets a box of its own and everything
 /// else stays in the paragraph it belongs to.
 ///
-/// A block is a monospace range covering whole lines, which is the only thing
-/// the wire can say about it: Signal has one monospace style and no way to mark
-/// a block as such.
+/// A code block is a monospace range covering whole lines, which is the only
+/// thing the wire can say about it: Signal has one monospace style and no way to
+/// mark a block as such. Display maths is `$$…$$`, which is the source saying so
+/// itself.
 fn prose(
     body: &str,
     ranges: &[Range],
@@ -260,11 +368,8 @@ fn prose(
     highlights: &HighlightTheme,
     size: f32,
 ) -> Vec<AnyElement> {
-    let mut blocks: Vec<&Range> = ranges
-        .iter()
-        .filter(|range| markup::is_block(body, range))
-        .collect();
-    blocks.sort_by_key(|range| range.start);
+    let mut blocks = blocks(body, ranges);
+    blocks.sort_by_key(|(start, _, _)| *start);
 
     let paragraph = |from: usize, to: usize| {
         (to > from).then(|| {
@@ -301,23 +406,95 @@ fn prose(
 
     let mut parts = Vec::new();
     let mut at = 0;
-    for block in blocks {
-        parts.extend(paragraph(at, block.start).flatten());
-        parts.push(code_block(
-            &body[block.start..block.end()],
-            theme,
-            highlights,
-            size,
-        ));
-        at = block.end();
+    for (start, end, block) in blocks {
+        parts.extend(paragraph(at, start).flatten());
+        parts.push(match block {
+            Block::Code => code_block(&body[start..end], theme, highlights, size),
+            Block::Maths(tex) => maths_block(&tex, theme, size),
+        });
+        at = end;
     }
     parts.extend(paragraph(at, body.len()).flatten());
     parts
 }
 
+/// What comes out of the paragraph it was written in and gets an element of its
+/// own.
+enum Block {
+    Code,
+    /// The source, already cut out of the body: unlike a fence, the delimiters are
+    /// not wanted and the reading is not the characters that were typed.
+    Maths(String),
+}
+
+/// Everything in the body that is not prose, as byte ranges over it.
+///
+/// Maths inside a code block is code -- a listing that happens to contain two
+/// dollars is a listing -- so an overlap is resolved in the block's favour.
+fn blocks(body: &str, ranges: &[Range]) -> Vec<(usize, usize, Block)> {
+    let code: Vec<(usize, usize)> = ranges
+        .iter()
+        .filter(|range| markup::is_block(body, range))
+        .map(|range| (range.start, range.end()))
+        .collect();
+
+    let maths = latex::spans(body)
+        .into_iter()
+        .filter(|span| span.kind == latex::Kind::Display)
+        .filter(|span| {
+            !code
+                .iter()
+                .any(|(start, end)| span.start < *end && *start < span.end)
+        })
+        .map(|span| (span.start, span.end, Block::Maths(span.tex)));
+
+    code.iter()
+        .map(|(start, end)| (*start, *end, Block::Code))
+        .chain(maths)
+        .collect()
+}
+
+/// A display equation, on a line of its own and set larger than the words around
+/// it -- which is the whole of what "display" means, and the one place the size
+/// *can* differ: a text run carries no size of its own in gpui, so maths inside a
+/// sentence is stuck at the sentence's size and this is not.
+///
+/// Left-aligned rather than centred. Centring is what a page does, and a page has
+/// a measure to centre within; a bubble is as wide as its widest line, so centring
+/// an equation in one either does nothing or moves it away from the text it
+/// belongs to.
+fn maths_block(tex: &str, theme: &Theme, size: f32) -> AnyElement {
+    let read = latex::render(tex);
+    if read.is_empty() {
+        return div().into_any_element();
+    }
+
+    // Upright, with the variables in it italicised one run at a time -- the same
+    // distinction inline maths gets, and for the same reason: an italic ∑ is a
+    // symbol nobody sets that way.
+    let italics = latex::variables(&read)
+        .into_iter()
+        .map(|variable| (variable, italicised(HighlightStyle::default())))
+        .collect::<Vec<_>>();
+
+    div()
+        .py_1()
+        .font_family(theme.typography.serif.clone())
+        .text_size(px(size * DISPLAY_MATHS))
+        .line_height(px(size * DISPLAY_MATHS * theme.typography.line_height))
+        .text_color(theme.text)
+        .child(StyledText::new(read).with_highlights(italics))
+        .into_any_element()
+}
+
 /// Code, in a box, in the monospace font, coloured by what it is. Nothing else
 /// in a message gets a background, which is what makes it read as a block
 /// rather than as a word.
+///
+/// The bar across the top is what every place code is quoted has: the language
+/// on the left, and on the right the one thing anybody wants from a listing
+/// somebody else pasted, which is to have it. It is drawn whether or not the
+/// fence declared a language, because the button is the reason it is there.
 fn code_block(
     fenced: &str,
     theme: &Theme,
@@ -327,31 +504,66 @@ fn code_block(
     let Some((language, code)) = markup::block(fenced) else {
         return div().into_any_element();
     };
+    let named = language;
     let language = language.unwrap_or("text");
+    let copied = code.to_owned();
 
     box_of_code(theme)
-        .when(language != "text", |this| {
-            this.child(
-                div()
-                    .text_size(px(size - 3.0))
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from(language.to_owned())),
-            )
-        })
-        .child(lines(code, language, theme, highlights, size))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .px_3()
+                .py_1()
+                .bg(theme.elevated)
+                .border_b_1()
+                .border_color(theme.border)
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(size - 3.0))
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(named.unwrap_or_default().to_owned())),
+                )
+                .child(kit::icon_button(
+                    SharedString::from(format!("copy-code-{:x}", fnv(fenced))),
+                    IconName::Copy,
+                    theme,
+                    move |_, _, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(copied.clone()))
+                    },
+                )),
+        )
+        .child(
+            div()
+                .px_3()
+                .py_2()
+                .child(lines(code, language, theme, highlights, size)),
+        )
         .into_any_element()
 }
 
+/// An element id for a block of code, which has nothing else to be named by:
+/// two identical listings in one message are the same code and may share one.
+fn fnv(text: &str) -> u64 {
+    text.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3)
+    })
+}
+
 /// The box a block of code sits in. Shared with the attachment preview, which is
-/// the same thing arriving as a file rather than as words.
+/// the same thing arriving as a file rather than as words -- so the padding
+/// belongs to what goes inside rather than to this, since a block with a bar
+/// across the top needs the bar to reach both edges.
 pub fn box_of_code(theme: &Theme) -> Div {
     div()
         .w_full()
         .flex()
         .flex_col()
-        .gap_1()
-        .px_3()
-        .py_2()
+        .overflow_hidden()
         .rounded(px(kit::RADIUS))
         .bg(theme.sunken)
         .border_1()
@@ -456,29 +668,42 @@ fn parse(
         .collect()
 }
 
-/// A thin space, which is what inline code is padded with. A normal space would
-/// look like a space in the sentence.
-const PAD: char = '\u{2009}';
+/// How much larger a display equation is set than the words around it.
+///
+/// A serif at the body size reads *smaller* than the interface face beside it --
+/// its x-height is lower for the same nominal size -- so parity here would be a
+/// visible step down, which is the opposite of what `$$` asks for. A third again
+/// puts an equation a little above the text, which is where a display equation
+/// sits on a page.
+const DISPLAY_MATHS: f32 = 1.35;
 
 /// How round inline code is. Discord's own three, which on a box the height of
 /// one line is the difference between a chip and a lozenge.
 const INLINE_RADIUS: f32 = 3.0;
 
+/// How far the chip reaches past the code inside it, left and right. A fifth of
+/// an em at the message size, which is Discord's own measurement.
+const INLINE_PAD: f32 = 2.8;
+
 /// Renders the body with Signal's formatting applied. Mentions carry a
 /// placeholder in the body, so the name is substituted before highlighting and
-/// the offsets are recomputed against the text actually drawn.
+/// the offsets are recomputed against the text actually drawn. So does maths,
+/// which is read out of the source the sender typed and drawn as the symbols it
+/// spells.
 ///
 /// Inline code comes back with a box behind it rather than a wash, drawn the way
 /// Discord draws it: the block's fill, a fifth of an em of padding on every side,
 /// rounded off, and no border -- a hairline around something the width of one
 /// word reads as a box somebody forgot to fill. The block keeps its own, because
 /// a box that size is a box. See `ui::wash` for why none of this can be a
-/// highlight.
+/// highlight, and for why the padding is the box's rather than two thin spaces
+/// nobody typed.
 fn styled(body: &str, ranges: &[Range], state: &State, theme: &Theme) -> crate::ui::wash::Wash {
     let segments = format::segments(body, ranges);
     let mut text = String::new();
     let mut highlights = Vec::new();
     let mut mono = Vec::new();
+    let mut serif = Vec::new();
     let mut boxed = Vec::new();
 
     for segment in segments {
@@ -496,17 +721,45 @@ fn styled(body: &str, ranges: &[Range], state: &State, theme: &Theme) -> crate::
                 text.push('@');
                 text.push_str(&state.sender_name(uuid));
             }
-            // Inline code gets a thin space either side, inside the run that is
-            // washed: a highlight is a colour over a range of text and has no
-            // padding to set, so the only way to keep the wash off the letters is
-            // to give it something else to sit on. `bat` then reads as a chip
-            // rather than as a word somebody spilled grey on.
             (false, None) if styles.monospace => {
-                text.push(PAD);
                 text.push_str(&body[segment.start..segment.end]);
-                text.push(PAD);
             }
-            (false, None) => text.push_str(&body[segment.start..segment.end]),
+            // Maths is the one thing drawn as something other than what was
+            // typed, so it is cut out of the run and put back as its symbols --
+            // which means the highlight over the rest of the segment has to be
+            // cut with it, or two overlapping ranges reach the layout.
+            //
+            // Only `$…$` reaches here. `$$…$$` was taken out of the paragraph by
+            // `prose` and given an element of its own, because a display equation
+            // is set larger and a text run carries no size: inline maths shares
+            // the sentence's size and there is nothing to be done about that
+            // without breaking the one layout a line needs to wrap as a line.
+            (false, None) => {
+                let source = &body[segment.start..segment.end];
+                let mut cut = 0;
+
+                for span in latex::spans(source) {
+                    let plain = text.len();
+                    text.push_str(&source[cut..span.start]);
+                    note(&mut highlights, plain..text.len(), styles, theme);
+
+                    let maths = text.len();
+                    let read = latex::render(&span.tex);
+                    text.push_str(&read);
+                    note_maths(&mut highlights, maths, &read, styles, theme);
+                    // The serif, for the same reason code gets the monospace: a
+                    // family is not something `HighlightStyle` can set, and an
+                    // integral sign in the interface font reads as a glyph
+                    // somebody pasted rather than as an operator.
+                    serif.push((maths..text.len(), theme.typography.serif.clone().into()));
+
+                    cut = span.end;
+                }
+
+                let tail = text.len();
+                text.push_str(&source[cut..]);
+                note(&mut highlights, tail..text.len(), styles, theme);
+            }
         }
 
         // `HighlightStyle` has no family to set, so a monospace *span* cannot be
@@ -518,19 +771,76 @@ fn styled(body: &str, ranges: &[Range], state: &State, theme: &Theme) -> crate::
             mono.push((start..text.len(), theme.typography.mono.clone().into()));
             boxed.push(start..text.len());
         }
-        if let Some(highlight) = highlight(styles, theme) {
-            highlights.push((start..text.len(), highlight));
+        // Everything but the maths branch styles the segment in one piece; that
+        // one has already put its own pieces in.
+        if styles.mention.is_some() || styles.spoiler || styles.monospace {
+            note(&mut highlights, start..text.len(), styles, theme);
         }
     }
 
     crate::ui::wash::wash(
         StyledText::new(text)
             .with_highlights(highlights)
-            .with_font_family_overrides(mono),
+            .with_font_family_overrides(mono.into_iter().chain(serif)),
         boxed,
         theme.sunken,
         INLINE_RADIUS,
+        INLINE_PAD,
     )
+}
+
+/// Records one piece's highlight, if it has one and covers anything at all.
+fn note(
+    highlights: &mut Vec<(std::ops::Range<usize>, HighlightStyle)>,
+    range: std::ops::Range<usize>,
+    styles: format::Styles,
+    theme: &Theme,
+) {
+    if range.is_empty() {
+        return;
+    }
+    if let Some(highlight) = highlight(styles, theme) {
+        highlights.push((range, highlight));
+    }
+}
+
+/// The same for a rendered equation, which is not one piece: the variables in it
+/// are italic and everything else is upright, so it goes in as a run per stretch
+/// of each. Setting the whole thing in italics -- which is what this did -- put
+/// a slant on the digits, the brackets and the ∑, none of which is slanted in
+/// any book, and made the equation read as an italicised sentence rather than as
+/// maths. `latex::variables` is where the distinction is decided.
+///
+/// The ranges have to arrive in order and must not overlap, which is why the
+/// upright stretches are emitted between the italic ones rather than as one
+/// range underneath them.
+fn note_maths(
+    highlights: &mut Vec<(std::ops::Range<usize>, HighlightStyle)>,
+    at: usize,
+    rendered: &str,
+    styles: format::Styles,
+    theme: &Theme,
+) {
+    let base = highlight(styles, theme);
+    let mut cut = 0;
+
+    for variable in latex::variables(rendered) {
+        note(highlights, at + cut..at + variable.start, styles, theme);
+        highlights.push((
+            at + variable.start..at + variable.end,
+            italicised(base.unwrap_or_default()),
+        ));
+        cut = variable.end;
+    }
+
+    note(highlights, at + cut..at + rendered.len(), styles, theme);
+}
+
+/// A variable is set in italics, the way every typesetter sets one and the one
+/// distinction available without a maths font.
+fn italicised(mut highlight: HighlightStyle) -> HighlightStyle {
+    highlight.font_style = Some(FontStyle::Italic);
+    highlight
 }
 
 fn highlight(styles: format::Styles, theme: &Theme) -> Option<HighlightStyle> {
@@ -806,6 +1116,42 @@ mod tests {
 
     fn theme() -> HighlightTheme {
         petunia_config::theme::dark().highlights()
+    }
+
+    /// Display maths comes out of the paragraph so it can be set larger; inline
+    /// maths stays in it, because a text run carries no size of its own.
+    #[test]
+    fn display_maths_is_a_block_and_inline_maths_is_not() {
+        let body = "before $$x^2$$ after $y$ end";
+        let found = blocks(body, &[]);
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(&body[found[0].0..found[0].1], "$$x^2$$");
+        assert!(matches!(&found[0].2, Block::Maths(tex) if tex == "x^2"));
+    }
+
+    /// A listing that happens to contain two dollars is a listing. The block wins,
+    /// or the code would be cut in half by something inside it.
+    #[test]
+    fn maths_inside_a_code_block_stays_code() {
+        let (body, ranges) = markup::parse("```\ncost = $$5\n```");
+        let found = blocks(&body, &ranges);
+
+        assert_eq!(found.len(), 1);
+        assert!(matches!(found[0].2, Block::Code));
+    }
+
+    /// Both kinds in one message, each getting its own element, in the order they
+    /// were written.
+    #[test]
+    fn a_code_block_and_an_equation_are_both_blocks() {
+        let (body, ranges) = markup::parse("```\nhi\n```\nand $$a+b$$\n");
+        let mut found = blocks(&body, &ranges);
+        found.sort_by_key(|(start, _, _)| *start);
+
+        assert_eq!(found.len(), 2);
+        assert!(matches!(found[0].2, Block::Code));
+        assert!(matches!(found[1].2, Block::Maths(_)));
     }
 
     /// The point of the memo: the second ask is the same answer without the

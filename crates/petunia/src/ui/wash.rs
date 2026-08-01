@@ -6,6 +6,14 @@
 //! still wraps as a line rather than becoming a row of elements that wrap at
 //! their own edges — and paints the boxes underneath it from the glyph positions
 //! that layout settled on.
+//!
+//! The padding is the box's, not the text's. Widening the chip by inserting thin
+//! spaces around the code was the other way to get it, and it puts characters
+//! into the message that nobody typed: they land in a copy, they count towards
+//! the length, and every offset after them is one more thing to keep in step.
+//! Inflating the painted rectangle instead leaves the string alone. It overhangs
+//! its neighbours by a fifth of an em, which is what a chip drawn around a word
+//! in running text does everywhere else.
 
 use std::ops::Range;
 
@@ -29,16 +37,25 @@ pub struct Wash {
     spans: Vec<Range<usize>>,
     fill: Hsla,
     radius: Pixels,
+    /// How far the box reaches past the glyphs, left and right.
+    pad: Pixels,
 }
 
 /// Text with a box behind each of `spans`. With no spans it is the text and
 /// nothing else, so the caller never has to decide whether to wrap it.
-pub fn wash(text: StyledText, spans: Vec<Range<usize>>, fill: Hsla, radius: f32) -> Wash {
+pub fn wash(
+    text: StyledText,
+    spans: Vec<Range<usize>>,
+    fill: Hsla,
+    radius: f32,
+    pad: f32,
+) -> Wash {
     Wash {
         text,
         spans,
         fill,
         radius: px(radius),
+        pad: px(pad),
     }
 }
 
@@ -131,13 +148,18 @@ impl Wash {
             // the text's: a wrapped row's width is not something the layout
             // reports, and a span that wraps at all is the rare case.
             let mut top = from.y;
-            let mut left = from.x;
+            let mut left = from.x - self.pad;
             while top < to.y {
                 boxes.push(rect(left, top + breathe, bounds.right(), line - breathe * 2.0));
                 top += line;
                 left = bounds.left();
             }
-            boxes.push(rect(left, top + breathe, to.x, line - breathe * 2.0));
+            boxes.push(rect(
+                left,
+                top + breathe,
+                to.x + self.pad,
+                line - breathe * 2.0,
+            ));
         }
 
         boxes
