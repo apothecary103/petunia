@@ -84,6 +84,9 @@ pub enum Appearance {
 pub struct Typography {
     pub family: String,
     pub mono: String,
+    /// What maths is set in. Nothing else uses it: a serif in the middle of an
+    /// interface built on one sans face would be a second voice.
+    pub serif: String,
     pub ui_size: f32,
     pub message_size: f32,
     pub line_height: f32,
@@ -94,6 +97,7 @@ impl Default for Typography {
         Self {
             family: system_ui().into(),
             mono: system_mono().into(),
+            serif: system_serif().into(),
             ui_size: 13.0,
             message_size: 14.0,
             line_height: 1.5,
@@ -124,6 +128,22 @@ const fn system_mono() -> &'static str {
         "Consolas"
     } else {
         "monospace"
+    }
+}
+
+/// What maths is set in. Every typesetter sets it in a serif, and the interface
+/// font it was falling back to made an integral sign look like a stray glyph
+/// rather than an operator.
+///
+/// Times New Roman rather than the newer system serifs: it is on macOS and on
+/// Windows, it has the whole of the mathematical operator block, and its italic
+/// is a real italic rather than a slanted roman -- which is what a variable set
+/// in it depends on.
+const fn system_serif() -> &'static str {
+    if cfg!(target_os = "macos") || cfg!(target_os = "windows") {
+        "Times New Roman"
+    } else {
+        "serif"
     }
 }
 
@@ -756,7 +776,7 @@ mod tests {
     /// must not drift from the struct definition.
     #[test]
     fn the_example_theme_parses() {
-        let example = include_str!("../../../themes.example.toml");
+        let example = include_str!("../../../examples/themes.example.toml");
 
         let theme: Theme = toml::from_str(example).expect("example theme parses");
 

@@ -57,8 +57,20 @@ pub fn to_toml(config: &Config) -> String {
     let _ = writeln!(out, "groups = {:?}", groups(notifications.groups));
 
     let _ = writeln!(out, "\n[keys]");
-    for (chord, action) in config.keys.written() {
-        let _ = writeln!(out, "{action} = {chord:?}");
+    for (action, chords) in config.keys.written() {
+        // A bare string for the common case, a list for an action reached more
+        // than one way. Two lines naming the same action would be a duplicate
+        // key, which TOML rejects.
+        match chords.as_slice() {
+            [one] => {
+                let _ = writeln!(out, "{action} = {one:?}");
+            }
+            many => {
+                let listed: Vec<String> =
+                    many.iter().map(|chord| format!("{chord:?}")).collect();
+                let _ = writeln!(out, "{action} = [{}]", listed.join(", "));
+            }
+        }
     }
 
     out
@@ -118,7 +130,7 @@ fn groups(groups: GroupNotifications) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keys::{Keys, Preset};
+    use crate::keys::Keys;
 
     /// The round trip is the whole contract: what settings writes has to be
     /// what the loader reads, or the window and the file disagree about what is
@@ -193,7 +205,7 @@ mod tests {
     #[test]
     fn keybindings_round_trip() {
         let config = Config {
-            keys: Keys::preset(Preset::Emacs),
+            keys: Keys::shipped(),
             ..Default::default()
         };
 
@@ -214,19 +226,33 @@ mod tests {
         assert_eq!(keymap(&read), keymap(&config));
     }
 
-    /// A preset chosen in settings is written as the bindings it produced, not
-    /// as its name -- so a later change to what "emacs" means cannot silently
-    /// move someone's keys.
+    /// The bindings are written as chords rather than as the name of a set, so
+    /// that a later change to what the defaults are cannot silently move keys
+    /// somebody has already learned. An action reached several ways is written as
+    /// a list, since two lines naming one action is a duplicate TOML key.
     #[test]
-    fn a_preset_is_written_as_its_bindings() {
-        let config = Config {
-            keys: Keys::preset(Preset::Vim),
-            ..Default::default()
-        };
+    fn bindings_are_written_as_chords() {
+        let written = to_toml(&Config::default());
 
-        let written = to_toml(&config);
-
+        assert!(written.contains("help = \"cmd+/\""), "{written}");
+        assert!(written.contains("next-conversation = ["), "{written}");
+        assert!(written.contains("\"ctrl+n\""), "{written}");
         assert!(!written.contains("preset"), "{written}");
-        assert!(written.contains("scroll-down = \"ctrl+d\""), "{written}");
+    }
+
+    /// An action with several chords has to write all of them, or a rewrite is a
+    /// quiet way to lose the ones the file did not mention.
+    #[test]
+    fn every_chord_for_an_action_survives_a_rewrite() {
+        let read: Config = toml::from_str(&to_toml(&Config::default())).unwrap();
+
+        assert_eq!(keymap(&read), keymap(&Config::default()));
+        assert!(
+            keymap(&read)
+                .iter()
+                .filter(|(_, action)| *action == crate::keys::Action::NextConversation)
+                .count()
+                >= 3
+        );
     }
 }

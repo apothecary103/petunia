@@ -11,6 +11,7 @@ use serde::{Deserialize, Deserializer};
 #[serde(rename_all = "kebab-case")]
 pub enum Action {
     QuickSwitcher,
+    NewChat,
     Search,
     SearchThread,
     FocusComposer,
@@ -33,6 +34,36 @@ pub enum Action {
     ThemePicker,
 }
 
+impl Action {
+    /// Every variant, so "is everything reachable from the keyboard" is a
+    /// question something can actually ask. Written out rather than derived,
+    /// which is what makes forgetting to bind a new one a failing test.
+    pub const EVERY: [Self; 22] = [
+        Self::QuickSwitcher,
+        Self::NewChat,
+        Self::Search,
+        Self::SearchThread,
+        Self::FocusComposer,
+        Self::ToggleSidebar,
+        Self::ToggleDetails,
+        Self::ScrollUp,
+        Self::ScrollDown,
+        Self::ScrollToTop,
+        Self::ScrollToBottom,
+        Self::NextUnread,
+        Self::NextConversation,
+        Self::PreviousConversation,
+        Self::MarkRead,
+        Self::ReplyToLast,
+        Self::EditLast,
+        Self::AttachFile,
+        Self::Cancel,
+        Self::Help,
+        Self::Settings,
+        Self::ThemePicker,
+    ];
+}
+
 /// A parsed chord. `cmd` is the platform key on macOS and control elsewhere, so
 /// one config file works on both.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -49,15 +80,30 @@ pub struct Keys {
 }
 
 impl Keys {
-    /// Every binding as `action = "chord"`, for writing the config back out.
-    /// Sorted, so a rewrite does not reshuffle the file.
-    pub fn written(&self) -> Vec<(String, String)> {
-        let mut written: Vec<_> = self
-            .bindings
-            .iter()
-            .map(|(bind, action)| (bind.to_string(), name(*action).to_string()))
+    /// Every action and the chords that reach it, for writing the config back
+    /// out. Sorted, so a rewrite does not reshuffle the file.
+    ///
+    /// Grouped by *action* rather than one line per chord, because the file keys
+    /// on the action: two lines naming the same one would be a duplicate key,
+    /// which is not valid TOML and would have made the second chord for anything
+    /// unwritable.
+    pub fn written(&self) -> Vec<(String, Vec<String>)> {
+        let mut grouped: HashMap<&'static str, Vec<String>> = HashMap::new();
+        for (bind, action) in &self.bindings {
+            grouped
+                .entry(name(*action))
+                .or_default()
+                .push(bind.to_string());
+        }
+
+        let mut written: Vec<(String, Vec<String>)> = grouped
+            .into_iter()
+            .map(|(action, mut chords)| {
+                chords.sort();
+                (action.to_owned(), chords)
+            })
             .collect();
-        written.sort_by(|a, b| a.1.cmp(&b.1));
+        written.sort_by(|a, b| a.0.cmp(&b.0));
         written
     }
 
@@ -69,13 +115,10 @@ impl Keys {
             .collect()
     }
 
-    /// Which preset these came from, when they came from one unchanged. The
-    /// settings window shows it, and shows nothing rather than lying when the
-    /// bindings have been edited into something that is no preset at all.
-    pub fn matches(&self) -> Option<Preset> {
-        Preset::every()
-            .into_iter()
-            .find(|preset| Self::preset(*preset).bindings == self.bindings)
+    /// Whether these are the shipped bindings, unedited. The settings window says
+    /// so rather than offering a control that would undo an edit nobody made.
+    pub fn are_default(&self) -> bool {
+        Self::default().bindings == self.bindings
     }
 
     /// Every binding, for the help overlay, sorted so the list is stable.
@@ -90,135 +133,83 @@ impl Keys {
     }
 }
 
-/// Which set of bindings to start from. Overrides in the config merge on top of
-/// whichever is chosen, so a preset is a starting point rather than a cage.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Preset {
-    /// What the platform's own applications do.
-    #[default]
-    Standard,
-    /// Control chords, in the places emacs puts them.
-    Emacs,
-    /// Motions where vim puts them, on the understanding that a chat window has
-    /// no modes to be in.
-    Vim,
-}
-
-impl Preset {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Standard => "Standard",
-            Self::Emacs => "Emacs",
-            Self::Vim => "Vim",
-        }
-    }
-
-    pub fn every() -> [Self; 3] {
-        [Self::Standard, Self::Emacs, Self::Vim]
-    }
-
-    fn bindings(self) -> &'static [(&'static str, Action)] {
-        match self {
-            Self::Standard => &STANDARD,
-            Self::Emacs => &EMACS,
-            Self::Vim => &VIM,
-        }
-    }
-}
-
-const STANDARD: [(&str, Action); 20] = [
-    ("cmd+shift+t", Action::ThemePicker),
+/// What every key does out of the box.
+///
+/// One set, not a choice of three. The emacs and vim presets were a promise this
+/// cannot keep: a preset is only a preset if it goes all the way down, and a chat
+/// window has no modal editing, no kill ring and no buffer list to bind — so what
+/// they actually were was the same twenty verbs under unfamiliar chords, three
+/// tables to keep in step, and a settings row asking a question with no good
+/// answer. What people wanted from them was `ctrl+p` and `ctrl+n`, which are here
+/// for everybody instead.
+///
+/// Several chords may name the same action, and several do: the platform chord for
+/// people who know it, and the control chord and the arrow beside it for people
+/// whose hands are already there. `written` and `listing` both cope, and a config
+/// override replaces every chord for the action it names.
+const DEFAULTS: &[(&str, Action)] = &[
+    // Windows and panels.
     ("cmd+,", Action::Settings),
-    ("cmd+f", Action::Search),
-    ("cmd+shift+f", Action::SearchThread),
-    ("cmd+k", Action::QuickSwitcher),
-    ("cmd+l", Action::FocusComposer),
+    ("cmd+/", Action::Help),
+    ("cmd+shift+t", Action::ThemePicker),
     ("cmd+b", Action::ToggleSidebar),
     ("cmd+i", Action::ToggleDetails),
-    ("pageup", Action::ScrollUp),
-    ("pagedown", Action::ScrollDown),
-    ("cmd+home", Action::ScrollToTop),
-    ("cmd+end", Action::ScrollToBottom),
+    // Getting somewhere.
+    ("cmd+k", Action::QuickSwitcher),
+    ("ctrl+space", Action::QuickSwitcher),
+    ("cmd+n", Action::NewChat),
+    ("cmd+f", Action::Search),
+    ("cmd+shift+f", Action::SearchThread),
     ("cmd+j", Action::NextUnread),
+    // Moving between conversations. `ctrl+n` and `ctrl+p` are the two chords
+    // people reach for wherever a list has a cursor, and the arrows are what
+    // everybody else tries first.
+    ("ctrl+n", Action::NextConversation),
+    ("ctrl+p", Action::PreviousConversation),
+    ("alt+down", Action::NextConversation),
+    ("alt+up", Action::PreviousConversation),
     ("cmd+shift+down", Action::NextConversation),
     ("cmd+shift+up", Action::PreviousConversation),
-    ("cmd+shift+r", Action::MarkRead),
+    // Moving through one. Bare arrows and bare page keys reach the list only when
+    // nothing else has the focus, since a text field consumes them first -- which
+    // is exactly the arrangement wanted: they scroll the conversation when you are
+    // reading it and move the caret when you are writing.
+    ("up", Action::ScrollUp),
+    ("down", Action::ScrollDown),
+    ("pageup", Action::ScrollUp),
+    ("pagedown", Action::ScrollDown),
+    ("ctrl+alt+p", Action::ScrollUp),
+    ("ctrl+alt+n", Action::ScrollDown),
+    ("home", Action::ScrollToTop),
+    ("end", Action::ScrollToBottom),
+    ("cmd+home", Action::ScrollToTop),
+    ("cmd+end", Action::ScrollToBottom),
+    // Doing something about it.
+    ("cmd+l", Action::FocusComposer),
     ("cmd+r", Action::ReplyToLast),
     ("cmd+e", Action::EditLast),
     ("cmd+u", Action::AttachFile),
-    ("cmd+/", Action::Help),
-];
-
-/// emacs by way of a chat window: `C-s` searches, `C-v`/`M-v` page, `C-x b`
-/// switches buffers -- except that gpui binds single chords, so the two-key
-/// sequences become one.
-const EMACS: [(&str, Action); 20] = [
-    ("ctrl+alt+t", Action::ThemePicker),
-    ("ctrl+alt+,", Action::Settings),
-    ("ctrl+s", Action::Search),
-    ("alt+ctrl+s", Action::SearchThread),
-    ("ctrl+x", Action::QuickSwitcher),
-    ("ctrl+j", Action::FocusComposer),
-    ("ctrl+b", Action::ToggleSidebar),
-    ("alt+i", Action::ToggleDetails),
-    ("alt+v", Action::ScrollUp),
-    ("ctrl+v", Action::ScrollDown),
-    ("alt+shift+,", Action::ScrollToTop),
-    ("alt+shift+.", Action::ScrollToBottom),
-    ("ctrl+n", Action::NextUnread),
-    ("ctrl+alt+n", Action::NextConversation),
-    ("ctrl+alt+p", Action::PreviousConversation),
-    ("alt+r", Action::MarkRead),
-    ("ctrl+r", Action::ReplyToLast),
-    ("ctrl+alt+e", Action::EditLast),
-    ("ctrl+alt+a", Action::AttachFile),
-    ("ctrl+h", Action::Help),
-];
-
-/// vim's motions where vim puts them. A composer has no normal mode to leave,
-/// so these are the chords that do not collide with typing: `ctrl+d`/`ctrl+u`
-/// page, `g`/`G` become `cmd+g` and `cmd+shift+g`, and `/` searches.
-const VIM: [(&str, Action); 20] = [
-    ("cmd+shift+t", Action::ThemePicker),
-    ("cmd+,", Action::Settings),
-    ("cmd+/", Action::Search),
-    ("cmd+shift+/", Action::SearchThread),
-    ("ctrl+p", Action::QuickSwitcher),
-    ("cmd+i", Action::FocusComposer),
-    ("cmd+shift+e", Action::ToggleSidebar),
-    ("cmd+shift+i", Action::ToggleDetails),
-    ("ctrl+u", Action::ScrollUp),
-    ("ctrl+d", Action::ScrollDown),
-    ("cmd+g", Action::ScrollToTop),
-    ("cmd+shift+g", Action::ScrollToBottom),
-    ("cmd+n", Action::NextUnread),
-    ("ctrl+j", Action::NextConversation),
-    ("ctrl+k", Action::PreviousConversation),
     ("cmd+shift+r", Action::MarkRead),
-    ("cmd+r", Action::ReplyToLast),
-    ("cmd+e", Action::EditLast),
-    ("cmd+u", Action::AttachFile),
-    ("cmd+shift+h", Action::Help),
 ];
 
 impl Keys {
-    pub fn preset(preset: Preset) -> Self {
-        let mut bindings: HashMap<KeyBind, Action> = preset
-            .bindings()
+    /// The shipped bindings.
+    pub fn shipped() -> Self {
+        let mut bindings: HashMap<KeyBind, Action> = DEFAULTS
             .iter()
             .map(|(chord, action)| {
                 (
                     chord
                         .parse()
-                        .unwrap_or_else(|_| panic!("{preset:?} binding {chord}")),
+                        .unwrap_or_else(|_| panic!("default binding {chord}")),
                     *action,
                 )
             })
             .collect();
 
-        // Escape means the same thing everywhere. A preset that rebound it
-        // would leave whichever overlay is up with no way out.
+        // Escape means the same thing everywhere, and it is not in the table
+        // above because it is not up for discussion: rebinding it would leave
+        // whichever overlay is up with no way out.
         bindings.insert("escape".parse().expect("escape parses"), Action::Cancel);
         Self { bindings }
     }
@@ -229,6 +220,7 @@ impl Keys {
 fn name(action: Action) -> &'static str {
     match action {
         Action::QuickSwitcher => "quick-switcher",
+        Action::NewChat => "new-chat",
         Action::Search => "search",
         Action::SearchThread => "search-thread",
         Action::FocusComposer => "focus-composer",
@@ -254,7 +246,25 @@ fn name(action: Action) -> &'static str {
 
 impl Default for Keys {
     fn default() -> Self {
-        Self::preset(Preset::default())
+        Self::shipped()
+    }
+}
+
+/// One chord, or several. An action reached two ways is the normal case here, so
+/// the file says so in the shape a person would write it.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Chords {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl Chords {
+    fn all(self) -> Vec<String> {
+        match self {
+            Self::One(chord) => vec![chord],
+            Self::Many(chords) => chords,
+        }
     }
 }
 
@@ -262,28 +272,27 @@ impl Default for Keys {
 /// fifteen. A binding may be cleared by pointing it at `"none"`.
 impl<'de> Deserialize<'de> for Keys {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let mut overrides = HashMap::<String, String>::deserialize(deserializer)?;
+        let overrides = HashMap::<String, Chords>::deserialize(deserializer)?;
+        let mut keys = Self::shipped();
 
-        let preset = match overrides.remove("preset") {
-            Some(name) => serde_json::from_value(serde_json::Value::String(name.clone()))
-                .map_err(|_| serde::de::Error::custom(format!("unknown key preset: {name}")))?,
-            None => Preset::default(),
-        };
-        let mut keys = Self::preset(preset);
-
-        for (action, chord) in overrides {
+        for (action, chords) in overrides {
             let action: Action = serde_json::from_value(serde_json::Value::String(action.clone()))
                 .map_err(|_| serde::de::Error::custom(format!("unknown action: {action}")))?;
 
-            // Rebinding replaces wherever that action used to live.
+            // Rebinding replaces wherever that action used to live -- all of it,
+            // since an action may have arrived here with several chords and
+            // naming one of them is not a request to keep the rest.
             keys.bindings.retain(|_, bound| *bound != action);
-            if chord.eq_ignore_ascii_case("none") {
-                continue;
+
+            for chord in chords.all() {
+                if chord.eq_ignore_ascii_case("none") {
+                    continue;
+                }
+                let bind: KeyBind = chord
+                    .parse()
+                    .map_err(|error| serde::de::Error::custom(format!("{chord}: {error}")))?;
+                keys.bindings.insert(bind, action);
             }
-            let bind: KeyBind = chord
-                .parse()
-                .map_err(|error| serde::de::Error::custom(format!("{chord}: {error}")))?;
-            keys.bindings.insert(bind, action);
         }
         Ok(keys)
     }
@@ -553,18 +562,6 @@ mod tests {
         assert!(toml::from_str::<Keys>(r#"quick-switcher = "cmd+nope""#).is_err());
     }
 
-    #[test]
-    fn every_default_action_is_bound_exactly_once() {
-        let keys = Keys::default();
-        let listing = keys.listing();
-
-        let mut actions: Vec<_> = listing.iter().map(|(_, action)| *action).collect();
-        let before = actions.len();
-        actions.sort_by_key(|action| format!("{action:?}"));
-        actions.dedup();
-
-        assert_eq!(before, actions.len(), "an action is bound twice");
-    }
 
     #[test]
     fn no_two_default_bindings_share_a_chord() {
@@ -596,93 +593,82 @@ mod tests {
         }
     }
 
-    /// Every preset has to bind every action, or choosing one silently takes
-    /// features away.
-    #[test]
-    fn every_preset_binds_every_action() {
-        let standard: std::collections::HashSet<_> =
-            Keys::preset(Preset::Standard).bindings.values().copied().collect();
 
-        for preset in Preset::every() {
-            let bound: std::collections::HashSet<_> =
-                Keys::preset(preset).bindings.values().copied().collect();
-            assert_eq!(bound, standard, "{preset:?}");
+    /// Every action has to be reachable, or a verb exists with no way to ask for
+    /// it. Escape is in the set too: it is inserted rather than tabled.
+    #[test]
+    fn every_action_is_bound() {
+        let bound: std::collections::HashSet<_> =
+            Keys::shipped().bindings.values().copied().collect();
+
+        for action in Action::EVERY {
+            assert!(bound.contains(&action), "{action:?} is bound to nothing");
         }
     }
 
-    /// A preset that bound one chord twice would silently lose an action.
+    /// One chord may not mean two things. A `HashMap` keyed by the chord makes
+    /// that impossible to represent, which is the point -- so what this really
+    /// checks is that the table did not *silently lose* an entry to a collision.
     #[test]
-    fn no_preset_binds_one_chord_to_two_actions() {
-        for preset in Preset::every() {
-            let keys = Keys::preset(preset);
-            assert_eq!(
-                keys.bindings.len(),
-                keys.bindings.values().collect::<std::collections::HashSet<_>>().len(),
-                "{preset:?}"
-            );
-        }
+    fn no_chord_is_written_twice() {
+        assert_eq!(
+            DEFAULTS.len() + 1,
+            Keys::shipped().bindings.len(),
+            "two default chords collide, so one of them was dropped"
+        );
     }
 
-    /// Whatever else a preset moves, escape stays where it is: it is the way out
-    /// of every overlay, and there would be none if a preset took it.
+    /// Several chords for one action is deliberate, and the two chords people
+    /// actually asked for are the ones worth pinning.
+    #[test]
+    fn the_control_chords_move_between_conversations() {
+        let keys = Keys::shipped();
+
+        assert_eq!(bound(&keys, "ctrl-n"), Some(Action::NextConversation));
+        assert_eq!(bound(&keys, "ctrl-p"), Some(Action::PreviousConversation));
+        assert_eq!(bound(&keys, "alt-down"), Some(Action::NextConversation));
+        assert_eq!(bound(&keys, "alt-up"), Some(Action::PreviousConversation));
+    }
+
+    /// The bare arrows and page keys reach the list only when no field has the
+    /// focus, which is what makes them safe to bind at all.
+    #[test]
+    fn the_arrows_scroll_the_conversation() {
+        let keys = Keys::shipped();
+
+        assert_eq!(bound(&keys, "up"), Some(Action::ScrollUp));
+        assert_eq!(bound(&keys, "down"), Some(Action::ScrollDown));
+        assert_eq!(bound(&keys, "home"), Some(Action::ScrollToTop));
+        assert_eq!(bound(&keys, "end"), Some(Action::ScrollToBottom));
+    }
+
+    /// Escape is the way out of every overlay, and rebinding it would leave
+    /// none.
     #[test]
     fn escape_always_cancels() {
-        for preset in Preset::every() {
-            assert_eq!(bound(&Keys::preset(preset), "escape"), Some(Action::Cancel));
-        }
+        assert_eq!(bound(&Keys::shipped(), "escape"), Some(Action::Cancel));
     }
 
+    /// An override replaces *every* chord the action had, or rebinding one of a
+    /// pair would leave the other answering the old way.
     #[test]
-    fn every_preset_binding_is_a_valid_gpui_keystroke() {
-        for preset in Preset::every() {
-            for (keystroke, action) in Keys::preset(preset).bindings() {
-                Keystroke::parse(&keystroke).unwrap_or_else(|error| {
-                    panic!("{preset:?} bound {action:?} to {keystroke:?}: {error:?}")
-                });
-            }
-        }
+    fn an_override_replaces_every_chord_for_its_action() {
+        let keys: Keys = toml::from_str(r#"next-conversation = "cmd+]""#).unwrap();
+
+        assert_eq!(bound(&keys, "cmd-]"), Some(Action::NextConversation));
+        assert_eq!(bound(&keys, "ctrl-n"), None);
+        assert_eq!(bound(&keys, "alt-down"), None);
+        // And nothing else moved.
+        assert_eq!(bound(&keys, "ctrl-p"), Some(Action::PreviousConversation));
     }
 
+    /// The settings window says whether the keymap is the shipped one, and must
+    /// not say so once it has been edited.
     #[test]
-    fn a_preset_is_chosen_by_name() {
-        let keys: Keys = toml::from_str(r#"preset = "emacs""#).unwrap();
-
-        assert_eq!(bound(&keys, "ctrl-s"), Some(Action::Search));
-        assert_eq!(bound(&keys, "cmd-f"), None);
-    }
-
-    /// A preset is a starting point, not a cage.
-    #[test]
-    fn overrides_merge_over_a_preset() {
-        let keys: Keys = toml::from_str(
-            r#"
-                preset = "vim"
-                help = "cmd+?"
-            "#,
-        )
-        .unwrap();
-
-        assert_eq!(bound(&keys, "ctrl-d"), Some(Action::ScrollDown));
-        assert_eq!(bound(&keys, "cmd-?"), Some(Action::Help));
-        assert_eq!(bound(&keys, "cmd-shift-h"), None);
-    }
-
-    #[test]
-    fn an_unknown_preset_is_reported() {
-        let error = toml::from_str::<Keys>(r#"preset = "dvorak""#).unwrap_err();
-
-        assert!(error.to_string().contains("unknown key preset"), "{error}");
-    }
-
-    /// The settings window names the preset in force, and must not name one when
-    /// the bindings have been edited away from it.
-    #[test]
-    fn an_edited_keymap_matches_no_preset() {
-        for preset in Preset::every() {
-            assert_eq!(Keys::preset(preset).matches(), Some(preset));
-        }
+    fn an_edited_keymap_is_not_the_default_one() {
+        assert!(Keys::shipped().are_default());
 
         let edited: Keys = toml::from_str(r#"help = "cmd+?""#).unwrap();
-        assert_eq!(edited.matches(), None);
+        assert!(!edited.are_default());
     }
 }
