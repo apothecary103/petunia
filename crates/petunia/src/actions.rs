@@ -32,8 +32,45 @@ actions!(
         HideOthers,
         Minimize,
         Zoom,
+        ViewerPrevious,
+        ViewerNext,
+        ViewerZoomIn,
+        ViewerZoomOut,
+        ViewerActualSize,
+        ViewerPlayPause,
+        ViewerCopy,
+        ViewerSave,
+        ViewerOpen,
     ]
 );
+
+/// The chords that only mean anything while a picture is open.
+///
+/// Fixed rather than configurable, and scoped to the viewer's own key context:
+/// `left`, `space` and a bare `0` are the keys a picture viewer has everywhere,
+/// and offering them in `config.toml` would put three more lines in the file for
+/// a mode that lasts as long as one picture. The context is what keeps them out
+/// of the conversation's way -- `up` and `down` already scroll it.
+pub const VIEWER_CONTEXT: &str = "Viewer";
+
+fn viewer_bindings() -> Vec<KeyBinding> {
+    let scope = Some(VIEWER_CONTEXT);
+
+    vec![
+        KeyBinding::new("left", ViewerPrevious, scope),
+        KeyBinding::new("right", ViewerNext, scope),
+        KeyBinding::new("=", ViewerZoomIn, scope),
+        KeyBinding::new("+", ViewerZoomIn, scope),
+        KeyBinding::new("-", ViewerZoomOut, scope),
+        KeyBinding::new("0", ViewerActualSize, scope),
+        KeyBinding::new("space", ViewerPlayPause, scope),
+        KeyBinding::new("cmd-c", ViewerCopy, scope),
+        KeyBinding::new("ctrl-c", ViewerCopy, scope),
+        KeyBinding::new("cmd-s", ViewerSave, scope),
+        KeyBinding::new("ctrl-s", ViewerSave, scope),
+        KeyBinding::new("enter", ViewerOpen, scope),
+    ]
+}
 
 /// The chords the menu bar needs that are not preferences.
 ///
@@ -69,6 +106,7 @@ pub fn bind(keys: &Keys, cx: &mut App) {
         })
         .map(|(keystroke, action)| binding(&keystroke, action))
         .chain(platform_bindings())
+        .chain(viewer_bindings())
         .collect::<Vec<_>>();
 
     cx.bind_keys(bindings);

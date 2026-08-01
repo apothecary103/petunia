@@ -7,9 +7,13 @@ license.workspace = true
 [dependencies]
 petunia-data.workspace = true
 
+lofty.workspace = true
 rodio.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation.workspace = true

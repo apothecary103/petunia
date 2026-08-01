@@ -340,8 +340,9 @@ pub fn light() -> Theme {
     }
 }
 
-/// The themes that need no files on disk: petunia's own two, and Zed's, which
-/// are converted by `script/zed-themes.py` and compiled in.
+/// The themes that need no files on disk: petunia's own two, Zed's -- converted
+/// by `script/zed-themes.py` -- and Signal's own dark palette, which is written
+/// by hand because there is no Zed theme behind it.
 pub const BUILT_IN: &[(&str, &str)] = &[
     ("one-dark", include_str!("../../../themes/one-dark.toml")),
     ("one-light", include_str!("../../../themes/one-light.toml")),
@@ -354,6 +355,7 @@ pub const BUILT_IN: &[(&str, &str)] = &[
     ("gruvbox-light", include_str!("../../../themes/gruvbox-light.toml")),
     ("gruvbox-light-hard", include_str!("../../../themes/gruvbox-light-hard.toml")),
     ("gruvbox-light-soft", include_str!("../../../themes/gruvbox-light-soft.toml")),
+    ("signal-dark", include_str!("../../../themes/signal-dark.toml")),
 ];
 
 /// Every theme that can be chosen without writing a file, for the settings

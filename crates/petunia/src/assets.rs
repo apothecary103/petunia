@@ -12,7 +12,8 @@ use gpui::{AssetSource, SharedString};
 /// picker's categories, which are drawn as icons rather than as one emoji each:
 /// a rail of nine emoji is a rail of nine things the grid below it is also full
 /// of, and the eye cannot tell the label from the contents.
-const OWN: [(&str, &str); 10] = [
+const OWN: [(&str, &str); 11] = [
+    ("icons/music.svg", include_str!("../assets/icons/music.svg")),
     (
         "icons/sticker.svg",
         include_str!("../assets/icons/sticker.svg"),

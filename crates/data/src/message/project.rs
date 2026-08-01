@@ -66,6 +66,20 @@ pub fn classify(envelope: &Envelope) -> Option<(Thread, Fragment)> {
     Some(((&thread).into(), fragment))
 }
 
+/// Whether a stored row is part of a conversation at all.
+///
+/// presage keeps more than messages in a thread's rows: a receipt is saved, and
+/// it is saved under `Thread::Contact(sender)` because a receipt carries no group
+/// context to say otherwise. So everybody in a group you share sends you rows in
+/// a one-to-one thread you have never used -- and a scan looking only for "does
+/// this thread have rows" then listed all of them in the sidebar, each with
+/// nothing to read and no history behind it. A reaction, an edit and a tombstone
+/// are the opposite case and have to keep counting: they say something happened
+/// here even though they project onto no message of their own.
+pub fn conversational(envelope: &Envelope) -> bool {
+    matches!(classify(envelope), Some((_, fragment)) if !matches!(fragment, Fragment::Ignored))
+}
+
 pub fn project(rows: impl IntoIterator<Item = Envelope>) -> Vec<Message> {
     let mut fragments: Vec<(u64, Fragment)> = rows
         .into_iter()

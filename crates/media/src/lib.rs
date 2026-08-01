@@ -2,4 +2,5 @@
 //! touch, and neither knows the framework exists.
 
 pub mod audio;
+pub mod song;
 pub mod video;

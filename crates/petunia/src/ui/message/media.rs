@@ -69,9 +69,20 @@ impl Frame<'_> {
                 },
                 Blob::Cached(path),
             ) => self.video(*size, *duration, poster.as_deref(), path),
-            (Kind::Audio { waveform, .. }, Blob::Cached(path)) => {
-                self.audio(attached, waveform.as_deref(), path)
-            }
+            // A record is drawn as one and a voice note as one, and the sender
+            // says which: `voice_note` is Signal's own mark, and a mark outranks
+            // anything read out of the bytes.
+            (
+                Kind::Audio {
+                    waveform,
+                    voice_note,
+                    ..
+                },
+                Blob::Cached(path),
+            ) => match song(path).filter(|song| !voice_note && song.is_a_record()) {
+                Some(song) => self.record(attached, &song, path),
+                None => self.audio(attached, waveform.as_deref(), path),
+            },
             (_, Blob::Cached(path)) => match text::language(path).zip(text::head(path)) {
                 Some((language, head)) => self.text(attached, path, language, &head),
                 None => self.file(attached, path),
@@ -180,6 +191,156 @@ impl Frame<'_> {
             .into_any_element()
     }
 
+    /// A record as a record: the cover, what it is called, who made it, and the
+    /// numbers that say what was kept of it.
+    ///
+    /// The waveform is left off deliberately. Signal ships one with a voice note
+    /// and nothing else, so on a track it is forty-four identical grey bars — a
+    /// picture of no information, standing where the cover belongs. What replaces
+    /// it is a bar that fills, which is the one thing about a playing track the
+    /// interface actually knows.
+    fn record(
+        &self,
+        attached: &Attachment,
+        song: &petunia_media::song::Song,
+        path: &Path,
+    ) -> AnyElement {
+        let theme = self.theme;
+        let mine = self.playback.is(path);
+        let playing = mine && self.playback.playing;
+        let progress = if mine {
+            self.playback.fraction().unwrap_or(0.0)
+        } else {
+            0.0
+        };
+        let elapsed = match mine {
+            true => Some(self.playback.position),
+            false => song.duration.or_else(|| length(attached)),
+        };
+
+        let act = self.act.clone();
+        let target = path.to_path_buf();
+        let seek = self.act.clone();
+        let seek_target = path.to_path_buf();
+
+        // Who made it and what it is off, joined only when both are known: a
+        // separator with nothing on one side of it is a separator reporting a
+        // field that is missing.
+        let credit = [song.artist.as_deref(), song.album.as_deref()]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" — ");
+
+        chip_shell(theme)
+            .w(px(320.0))
+            .items_start()
+            .child(
+                div()
+                    .size(px(COVER))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .overflow_hidden()
+                    .rounded(px(kit::RADIUS))
+                    .bg(theme.sunken)
+                    // Rounded on the picture as well as on the well behind it:
+                    // `overflow_hidden` clips a child to the parent's rectangle
+                    // rather than to its corners, so a square cover in a rounded
+                    // box keeps its own square corners.
+                    .when(song.cover, |this| {
+                        this.child(image::artwork(path, COVER).rounded(px(kit::RADIUS)))
+                    })
+                    // A record with no artwork gets the mark a record gets, not
+                    // the bell an attached sound gets.
+                    .when(!song.cover, |this| {
+                        this.child(kit::glyph("icons/music.svg", 18.0, theme.text_dim))
+                    }),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(theme.typography.ui_size))
+                            .font_weight(kit::EMPHASIS)
+                            .text_color(theme.text)
+                            .child(SharedString::from(
+                                song.title.clone().unwrap_or_else(|| label(attached)),
+                            )),
+                    )
+                    .when(!credit.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .truncate()
+                                .text_size(px(self.spacing.small))
+                                .text_color(theme.text_muted)
+                                .child(SharedString::from(credit)),
+                        )
+                    })
+                    .when_some(song.quality(), |this, quality| {
+                        this.child(
+                            div()
+                                .truncate()
+                                .text_size(px(self.spacing.small))
+                                .text_color(theme.text_dim)
+                                .child(SharedString::from(quality)),
+                        )
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .pt_1()
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!(
+                                        "track-{}",
+                                        attached.id.as_str()
+                                    )))
+                                    .size(px(26.0))
+                                    .flex()
+                                    .flex_none()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_full()
+                                    .cursor_pointer()
+                                    .bg(theme.accent)
+                                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                                        act(Act::Play(target.clone()), window, cx)
+                                    })
+                                    .child(kit::icon(
+                                        if playing {
+                                            IconName::Pause
+                                        } else {
+                                            IconName::Play
+                                        },
+                                        12.0,
+                                        theme.on_accent,
+                                    )),
+                            )
+                            .child(track(attached, progress, theme, seek, seek_target))
+                            .when_some(elapsed, |this, elapsed| {
+                                this.child(
+                                    div()
+                                        .flex_none()
+                                        .text_size(px(self.spacing.small))
+                                        .text_color(theme.text_muted)
+                                        .child(SharedString::from(audio::clock(elapsed))),
+                                )
+                            }),
+                    ),
+            )
+            .into_any_element()
+    }
+
     /// A voice note as Signal draws one: a play control, the shape of the sound,
     /// and how long it runs.
     fn audio(&self, attached: &Attachment, waveform: Option<&[u8]>, path: &Path) -> AnyElement {
@@ -243,8 +404,11 @@ impl Frame<'_> {
     }
 
     /// A text file as its own first lines, the way it would read if it had been
-    /// pasted into the message instead of attached to it. The name and the way in
-    /// stay on top, because it is still a file.
+    /// pasted into the message instead of attached to it -- which is why it is
+    /// drawn in the very box a pasted listing gets, down to the strip across the
+    /// top. What the strip carries is the difference between the two: a file has
+    /// an icon, a name and a size where a listing has the language it is in, and
+    /// the button on the right saves it rather than copying it.
     fn text(
         &self,
         attached: &Attachment,
@@ -258,40 +422,41 @@ impl Frame<'_> {
         let save = self.act.clone();
         let saved = path.to_path_buf();
 
-        div()
-            .flex()
-            .flex_col()
-            .gap_1p5()
+        content::box_of_code(theme)
             // Wider than a picture, because a line of code is longer than it is
             // tall and wrapping one is what makes a preview unreadable.
-            .w_full()
             .max_w(px(self.max_image.0.max(520.0)))
             .child(
-                div()
-                    .id(SharedString::from(format!("open-{}", attached.id.as_str())))
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .cursor_pointer()
-                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                        act(Act::Open(target.clone()), window, cx)
-                    })
-                    .child(kit::icon(IconName::File, 14.0, theme.text_muted))
+                content::bar_of_code(theme)
                     .child(
                         div()
+                            .id(SharedString::from(format!("open-{}", attached.id.as_str())))
+                            .flex()
                             .flex_1()
                             .min_w_0()
-                            .truncate()
-                            .text_size(px(theme.typography.ui_size))
-                            .text_color(theme.text)
-                            .child(SharedString::from(label(attached))),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(px(self.spacing.small))
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from(size(attached.size))),
+                            .items_center()
+                            .gap_2()
+                            .cursor_pointer()
+                            .hover(|this| this.text_color(theme.text))
+                            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                                act(Act::Open(target.clone()), window, cx)
+                            })
+                            .child(kit::icon(IconName::File, 13.0, theme.text_muted))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(self.spacing.small))
+                                    .text_color(theme.text)
+                                    .child(SharedString::from(label(attached))),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(self.spacing.small))
+                                    .text_color(theme.text_muted)
+                                    .child(SharedString::from(size(attached.size))),
+                            ),
                     )
                     .child(kit::icon_button(
                         SharedString::from(format!("save-{}", attached.id.as_str())),
@@ -301,32 +466,30 @@ impl Frame<'_> {
                     )),
             )
             .child(
-                content::box_of_code(theme).child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .px_3()
-                        .py_2()
-                        .child(content::lines(
-                            &head.code,
-                            language,
-                            theme,
-                            self.highlights,
-                            self.spacing.body,
-                        ))
-                        .when(head.remaining > 0, |this| {
-                            this.child(
-                                div()
-                                    .text_size(px(self.spacing.small))
-                                    .text_color(theme.text_muted)
-                                    .child(SharedString::from(match head.remaining {
-                                        1 => "1 more line".to_owned(),
-                                        more => format!("{more} more lines"),
-                                    })),
-                            )
-                        }),
-                ),
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .px_3()
+                    .py_2()
+                    .child(content::lines(
+                        &head.code,
+                        language,
+                        theme,
+                        self.highlights,
+                        self.spacing.body,
+                    ))
+                    .when(head.remaining > 0, |this| {
+                        this.child(
+                            div()
+                                .text_size(px(self.spacing.small))
+                                .text_color(theme.text_muted)
+                                .child(SharedString::from(match head.remaining {
+                                    1 => "1 more line".to_owned(),
+                                    more => format!("{more} more lines"),
+                                })),
+                        )
+                    }),
             )
             .into_any_element()
     }
@@ -493,6 +656,105 @@ fn waveform_strip(
             },
         )
         .children(bars(waveform, progress, theme))
+}
+
+/// How large the cover is drawn. Square, and tall enough for the three lines
+/// beside it.
+const COVER: f32 = 64.0;
+
+/// A plain progress bar, seekable the same way the waveform is. What a track has
+/// instead of a shape, because nothing ships one for it.
+fn track(
+    attached: &Attachment,
+    progress: f32,
+    theme: &Theme,
+    act: Dispatch,
+    path: std::path::PathBuf,
+) -> gpui::Stateful<Div> {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    let bounds: Rc<Cell<gpui::Bounds<gpui::Pixels>>> = Rc::new(Cell::new(gpui::Bounds::default()));
+    let measured = bounds.clone();
+
+    div()
+        .id(SharedString::from(format!("scrub-{}", attached.id.as_str())))
+        .relative()
+        .flex()
+        .flex_1()
+        .min_w_0()
+        .items_center()
+        .h(px(16.0))
+        .cursor_pointer()
+        .child(
+            gpui::canvas(move |at, _, _| measured.set(at), |_, _: (), _, _| {})
+                .absolute()
+                .size_full(),
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            move |event: &gpui::MouseDownEvent, window, cx| {
+                let at = bounds.get();
+                if at.size.width <= px(0.0) {
+                    return;
+                }
+                let fraction = ((event.position.x - at.origin.x) / at.size.width).clamp(0.0, 1.0);
+                act(Act::Seek(path.clone(), fraction), window, cx)
+            },
+        )
+        .child(
+            div()
+                .w_full()
+                .h(px(3.0))
+                .rounded_full()
+                .bg(theme.border_focus)
+                .child(
+                    div()
+                        .w(gpui::relative(progress.clamp(0.0, 1.0)))
+                        .h_full()
+                        .rounded_full()
+                        .bg(theme.accent),
+                ),
+        )
+}
+
+/// What an audio file says it is, read once per file.
+///
+/// A visible row is rebuilt every frame, and reading the tags is a file read and
+/// a parse -- so doing it where it is drawn would be one per frame per
+/// attachment. Keyed on the metadata as well as the path, the same way the text
+/// preview is, because a file being sent is one somebody may still be writing.
+fn song(path: &Path) -> Option<std::rc::Rc<petunia_media::song::Song>> {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::rc::Rc;
+
+    /// Enough for what is on screen and the overdraw around it.
+    const CAPACITY: usize = 64;
+
+    type Key = (std::path::PathBuf, u64, Option<std::time::SystemTime>);
+
+    thread_local! {
+        static CACHE: RefCell<HashMap<Key, Option<Rc<petunia_media::song::Song>>>> =
+            RefCell::new(HashMap::new());
+    }
+
+    let metadata = std::fs::metadata(path).ok()?;
+    let key = (path.to_path_buf(), metadata.len(), metadata.modified().ok());
+
+    CACHE.with(|cache| {
+        if let Some(known) = cache.borrow().get(&key) {
+            return known.clone();
+        }
+
+        let read = petunia_media::song::read(path).map(Rc::new);
+        let mut cache = cache.borrow_mut();
+        if cache.len() >= CAPACITY {
+            cache.clear();
+        }
+        cache.insert(key, read.clone());
+        read
+    })
 }
 
 /// Signal ships a waveform with a voice note, so the shape of the sound is drawn

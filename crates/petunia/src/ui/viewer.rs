@@ -43,11 +43,15 @@ const ZOOM: std::ops::RangeInclusive<f32> = 0.2..=8.0;
 const PANEL: f32 = 0.86;
 
 /// What the panel spends on its own chrome: the strip of controls above the
-/// picture, and the rail and transport below it. Subtracted from the panel to get
-/// the box a picture is resampled for, since the stage's real size is not
-/// knowable until after it has been laid out.
+/// picture, and the rail and transport below it. Only the first frame is drawn
+/// against this guess -- `stage` measures the real thing and every frame after
+/// uses that.
 const CHROME: f32 = super::workspace::TITLE_BAR + 24.0;
 const RAIL: f32 = 72.0;
+
+/// How much of the stage is left clear around the picture, so nothing ever meets
+/// the strip above it or the rail below.
+const INSET: f32 = 12.0;
 
 pub struct Viewer {
     /// Everything of this kind in the thread, so left and right walk it.
@@ -60,6 +64,16 @@ pub struct Viewer {
     /// Present only while the picture on screen is a video, so nothing decodes
     /// in the background.
     playing: Option<video::Player>,
+    /// What the stage was actually laid out at, recorded by a `canvas` behind it.
+    ///
+    /// A picture has to be resampled for a box, and the box was arithmetic on the
+    /// window size: the panel's fraction, less a guess at what the strip, the
+    /// transport and the rail come to. Every one of those guesses was a few pixels
+    /// out, and a guess that is too generous is a picture drawn taller than the
+    /// stage it is in -- clipped at the bottom by the stage's own `overflow_hidden`,
+    /// which looks exactly like something covering it. Measured, the fit is
+    /// whatever the layout settled on.
+    stage: std::rc::Rc<std::cell::Cell<gpui::Bounds<gpui::Pixels>>>,
     focus: gpui::FocusHandle,
 }
 
@@ -74,6 +88,7 @@ impl Viewer {
             pan: gpui::point(0.0, 0.0),
             dragging: None,
             playing: None,
+            stage: std::rc::Rc::new(std::cell::Cell::new(gpui::Bounds::default())),
             focus: cx.focus_handle(),
         };
         viewer.open_video();
@@ -121,6 +136,42 @@ impl Viewer {
             self.pan = gpui::point(0.0, 0.0);
         }
         cx.notify();
+    }
+
+    /// Plays or pauses whatever is on the stage. Nothing at all when the picture
+    /// is a picture, which is what the transport not being drawn already says.
+    fn toggle(&self, cx: &mut Context<Self>) {
+        let Some(player) = self.playing.as_ref() else {
+            return;
+        };
+        player.toggle();
+        cx.notify();
+    }
+
+    /// The box the picture is resampled for.
+    ///
+    /// The stage as it was actually laid out, once there has been a frame to
+    /// measure. Before that there is only the arithmetic -- the panel's fraction
+    /// of the window, less what the chrome around the stage is expected to come
+    /// to -- which is close enough for one frame and a few pixels out after that.
+    fn box_for_the_picture(&self, window: &Window, railed: bool) -> (f32, f32) {
+        let measured = self.stage.get().size;
+        if measured.width > px(0.0) && measured.height > px(0.0) {
+            return (
+                (f32::from(measured.width) - INSET * 2.0).max(120.0),
+                (f32::from(measured.height) - INSET * 2.0).max(120.0),
+            );
+        }
+
+        let viewport = window.viewport_size();
+        (
+            (f32::from(viewport.width) * PANEL - INSET * 2.0).max(120.0),
+            (f32::from(viewport.height) * PANEL
+                - CHROME
+                - if railed { RAIL } else { 0.0 }
+                - if self.playing.is_some() { RAIL } else { 0.0 })
+            .max(120.0),
+        )
     }
 
     fn copy(&self, cx: &mut Context<Self>) {
@@ -238,18 +289,8 @@ impl Render for Viewer {
         let zoom = self.zoom;
         let pan = self.pan;
         let railed = self.reel.len() > 1;
-        // A picture has to be resampled for a box, and the stage's own size is
-        // not known until it has been laid out. The window is the measurement
-        // there is here, and the panel is a fraction of it.
-        let viewport = window.viewport_size();
-        let stage = (
-            (f32::from(viewport.width) * PANEL - 24.0).max(120.0),
-            (f32::from(viewport.height) * PANEL
-                - CHROME
-                - if railed { RAIL } else { 0.0 }
-                - if self.playing.is_some() { RAIL } else { 0.0 })
-                .max(120.0),
-        );
+        let stage = self.box_for_the_picture(window, railed);
+        let measured = self.stage.clone();
 
         let panel = div()
             .id("viewer-panel")
@@ -283,8 +324,10 @@ impl Render for Viewer {
             .child(
                 div()
                     .id("stage")
+                    .relative()
                     .flex_1()
                     .min_h_0()
+                    .p(px(INSET))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -294,6 +337,11 @@ impl Render for Viewer {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|_, _, _, cx| cx.emit(Dismissed)),
+                    )
+                    .child(
+                        gpui::canvas(move |at, _, _| measured.set(at), |_, _: (), _, _| {})
+                            .absolute()
+                            .size_full(),
                     )
                     .child(
                         div()
@@ -344,6 +392,9 @@ impl Render for Viewer {
         div()
             .id("viewer")
             .track_focus(&self.focus)
+            // Every chord below is scoped to this, so `left` walks the reel here
+            // and scrolls the conversation everywhere else.
+            .key_context(crate::actions::VIEWER_CONTEXT)
             .absolute()
             .inset_0()
             .occlude()
@@ -361,6 +412,29 @@ impl Render for Viewer {
                 cx.listener(|_, _, _, cx| cx.emit(Dismissed)),
             )
             .on_action(cx.listener(|_, _: &crate::actions::Cancel, _, cx| cx.emit(Dismissed)))
+            .on_action(cx.listener(|this, _: &crate::actions::ViewerPrevious, _, cx| {
+                this.step(-1, cx)
+            }))
+            .on_action(cx.listener(|this, _: &crate::actions::ViewerNext, _, cx| {
+                this.step(1, cx)
+            }))
+            .on_action(cx.listener(|this, _: &crate::actions::ViewerZoomIn, _, cx| {
+                this.scale_by(1.25, cx)
+            }))
+            .on_action(cx.listener(|this, _: &crate::actions::ViewerZoomOut, _, cx| {
+                this.scale_by(1.0 / 1.25, cx)
+            }))
+            .on_action(cx.listener(|this, _: &crate::actions::ViewerActualSize, _, cx| {
+                this.reset(cx)
+            }))
+            .on_action(cx.listener(|this, _: &crate::actions::ViewerPlayPause, _, cx| {
+                this.toggle(cx)
+            }))
+            .on_action(cx.listener(|this, _: &crate::actions::ViewerCopy, _, cx| this.copy(cx)))
+            .on_action(cx.listener(
+                |this, _: &crate::actions::ViewerSave, window, cx| this.save(window, cx),
+            ))
+            .on_action(cx.listener(|this, _: &crate::actions::ViewerOpen, _, _| this.open()))
             .child(panel)
             .into_any_element()
     }

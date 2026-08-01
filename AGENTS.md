@@ -17,7 +17,11 @@ Petunia is a native Signal client, named after the flower.
   own `dark` and `light` are neutral greys, no hue, spending their only bright
   value on the send button — not Catppuccin, and not any other borrowed scheme.
   Zed's eleven ship alongside them, converted by `script/zed-themes.py` and
-  compiled in.
+  compiled in, and so does `signal-dark` — Signal's own near-black and
+  ultramarine, for somebody who wants petunia to look like the client they came
+  from. Hand-written rather than converted, since there is no Zed theme behind
+  it, and the one shipped theme that names its `accents`: Signal's conversation
+  colours are part of what it looks like.
 
 ## Layout
 
@@ -68,8 +72,21 @@ version is gone and its arrangement is not a precedent for anything.
   secondary text.
 - **Attachments.** A text file is drawn as its own first lines, highlighted, the
   way it would read had it been pasted rather than attached — `ui/message/text.rs`
-  decides what counts as text and reads the head of it once. Everything else is
-  the chip in `ui/message/media.rs`.
+  decides what counts as text and reads the head of it once. Which is why it is
+  drawn in the very box a pasted listing gets, `content::bar_of_code` across the
+  top and all: the two are one object arriving two ways, and the name floating on
+  a line above a box was a second header for it. What the bar carries is the whole
+  difference — an icon, the file's name and its size where a listing has the
+  language it is in, and a button that saves it where a listing has one that
+  copies it. An audio file that
+  turns out to be a *record* — `crates/media/src/song.rs` reads its tags — is drawn
+  as one: the cover — rounded on the picture as well as on the well behind it,
+  since `overflow_hidden` clips a child to the parent's rectangle rather than to
+  its corners — the title, who made it, and the bit depth and sampling rate,
+  with a bar that fills where the waveform would be. A waveform is Signal's shape
+  for a voice note and there is none for a track, so drawing one is forty-four grey
+  bars saying nothing where the cover belongs. Everything else is the chip in
+  `ui/message/media.rs`.
 - **Messages.** Three layouts, chosen under *Appearance* — what shape a message is
   drawn in is what it looks like, not what it says — and built from shared parts in
   `ui/message/run.rs`: **standard**, Discord-style runs with an avatar gutter, one
@@ -340,11 +357,24 @@ Every one of these has already cost a debugging session.
   photograph per size it was drawn at, with an animation up to `MAX_FRAMES` of
   them. Reading back through a thread of pictures therefore only ever grew, which
   was the whole of "memory use is high". `image::Cache` holds them instead, keyed
-  the same way, and drops the least recently drawn past `RESIDENT` — both the
+  the same way, and drops the least recently drawn past `BUDGET` — both the
   buffers and the atlas tile, which is a second copy on the GPU and is only
-  reclaimed by `App::drop_image`. `RESIDENT` has to stay comfortably above what a
+  reclaimed by `App::drop_image`. `BUDGET` has to stay comfortably above what a
   window can show at once: evicting something on screen is asking to decode it
   again next frame, forever.
+- **A cache counted in entries is a cache for one size of thing.** The ceiling was
+  a count, and a photograph and a sticker tile are three orders of magnitude apart
+  — so a number generous for a page of photographs was a number the sticker picker
+  blew through in one frame, asking for a thousand entries against a couple of
+  hundred and evicting every avatar in the window to get them. Each was then asked
+  for again on the next frame and evicted again on the one after: *"opening the
+  stickers makes every picture in the application disappear"*. The budget is bytes.
+  And a picker tile is drawn with `image::picture` rather than `image::animated`,
+  because `Kind::Animated` is the only request that decodes past the first frame
+  and a grid of a hundred stickers at `MAX_FRAMES` apiece is a hundredfold of the
+  memory for something nothing but an id could ever play anyway. Cover art is the
+  third kind: it lives *inside* an audio file, so it is a `Kind` on the request
+  rather than a second cache or a file written out beside the audio.
 - **A layout closure does not know how wide it ended up.** Anything that turns a
   click into a fraction of an element — the waveform, the video scrubber — needs
   a `canvas` behind it to record the bounds it was laid out at.
@@ -535,15 +565,81 @@ Every one of these has already cost a debugging session.
   in — which left `` `bat` `` as a wash the shape of the letters. `ui::wash` is the
   answer: one text layout, unchanged, so a line still wraps as a line, with the
   boxes painted underneath it from the glyph positions that layout settled on.
-  The padding is the box's, not the text's: `wash` inflates each rectangle by a
-  fifth of an em, which is what widening the run with thin spaces used to buy at
-  the cost of two characters nobody typed in every copy of the message. Discord's
-  own measurements otherwise — three pixels of radius, and no border, because a
-  hairline drawn around one word reads as a box somebody forgot to fill. The
-  fenced block keeps its border and adds a bar across the top: the language on
-  the left, and on the right the one thing anybody wants from somebody else's
-  listing, which is to have it. Which is why `box_of_code` holds no padding of
-  its own — a bar has to reach both edges, so what goes inside pads itself.
+  The padding is the box's, not the text's: `wash` inflates each rectangle rather
+  than widening the run with thin spaces, which is what that used to take — two
+  characters nobody typed, in every copy of the message. What it paints is the
+  *same object the fenced block is*, only the size of a word: the block's fill,
+  the block's hairline, and half the block's radius, since the full one on a box
+  a single line tall is a lozenge rather than a chip. Filled and unbordered —
+  which is what this was — `` `bat` `` read as a highlighter pen that happened to
+  be monospace rather than as code, and the point of marking it at all is that it
+  is the same kind of thing as the block. The block adds a bar across the top:
+  the language on the left, and on the right the one thing anybody wants from
+  somebody else's listing, which is to have it. Which is why `box_of_code` holds
+  no padding of its own — a bar has to reach both edges, so what goes inside pads
+  itself, and `bar_of_code` is that bar, shared with the text attachment.
+- **A box arrived at by arithmetic is a box that is wrong.** The viewer resamples
+  a picture for the stage, and the stage's size was the panel's fraction of the
+  window less a *guess* at what the strip above it, the transport and the rail
+  come to. Every one of those was a few pixels out, and too generous by any of
+  them is a picture drawn taller than the stage — clipped at the bottom by the
+  stage's own `overflow_hidden`, which on screen is indistinguishable from
+  something covering it. Which is the same lesson the waveform's `canvas` teaches:
+  a layout closure does not know what it ended up as, so `Viewer::stage` records
+  the bounds and `box_for_the_picture` reads them, falling back to the arithmetic
+  for the one frame there is nothing yet to read.
+- **A viewer's keys are the viewer's.** `left`, `space` and a bare `0` are what
+  every picture viewer binds, and three of them are already spoken for by the
+  conversation — `up` and `down` scroll it. So `actions::viewer_bindings` is
+  scoped to `VIEWER_CONTEXT` and the panel declares it with `key_context`, which
+  is how the same key means one thing over a picture and another behind it. Fixed
+  rather than configurable, like `cmd-q`: a mode that lasts as long as one picture
+  is not worth twelve lines in `config.toml`.
+- **A font family override only reaches a run a highlight has cut.** gpui applies
+  `with_font_family_overrides` to whole `TextRun`s, and the runs are built from the
+  *highlights* — so a span with nothing to highlight is a span the override slides
+  straight past. Inline code has nothing: it is a family and a box and no colour,
+  deliberately. So `` `bat` `` was named as monospace over a range no run ever
+  lined up with, and came out in the body font with a faint box behind it. `cut` is
+  the answer — a highlight that may well be empty, present only to start a run —
+  and the maths serif needed exactly the same thing for the upright stretches of an
+  unstyled equation. The overrides also have to arrive **sorted**, which two
+  independent sources are not between themselves.
+- **A receipt is a row in a thread you have never used.** presage saves receipts,
+  and saves them under `Thread::Contact(sender)` whatever the message they
+  acknowledge was in — a group message read by ten people is ten rows in ten
+  one-to-one threads. So "does this thread have rows" is not "is there a
+  conversation here", and asking it that way listed every member of every shared
+  group in the sidebar with nothing to read and no history behind them.
+  `data::conversational` is the real question, and `recent_rows` counts nothing
+  else. A row that will not *decode* still counts: unknowable is not
+  uninteresting.
+- **Two authenticated websockets are one too many.** presage keeps one and hands it
+  out, except to `receive_messages`, which needs an unused socket because one
+  already carrying requests cannot also carry the stream. So a socket opened by a
+  startup crawl is a socket the stream refuses, and the stream opens a second —
+  two connections as the same device, which Signal answers with `4409 Connected
+  elsewhere`. The loser reconnects, kicks the winner, and the two fight at the
+  reconnect interval forever, with nothing but petunia at either end. `session`
+  therefore starts the stream *before* anything else touches the network, and
+  `receive` backs off rather than retrying on a fixed five seconds — a fixed
+  interval is what keeps a fight going at that interval.
+- **macOS asks who is asking, with a file chooser.** `notify-rust`'s backend needs
+  a bundle identifier and looks one up by name when it has not been given one; the
+  name it looks up is the literal string `use_default`, nothing is called that, and
+  an unresolvable application reference opens the "Choose Application" panel. Every
+  notification therefore put a chooser on screen naming a document nobody has ever
+  had — *"a file chooser keeps appearing at random"*. `notify::name_the_application`
+  hands over this process's own identifier once, before any notification is posted.
+- **A voice note is marked, a record is read.** Signal has one kind of attached
+  sound and draws it one way, which is right for somebody talking and wrong for an
+  album track: forty-four identical grey bars where the cover belongs, and none of
+  the title, the artist or the numbers that say what was kept. `media::song` reads
+  the tags (`lofty`) and `Song::is_a_record` decides — a title *and* somebody named,
+  because every phone recording carries a filename in its title tag. `voice_note`
+  still wins outright: a mark from the sender outranks anything guessed from bytes.
+  And the tags are read once per file, not per frame, for the same reason the text
+  preview is.
 
 ## Coding rules
 

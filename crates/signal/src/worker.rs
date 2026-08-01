@@ -124,6 +124,40 @@ async fn session(
     // run is on screen by the time the window is, and the fetches below are then
     // a refresh rather than the only source there has ever been.
     send_names(db, events).await;
+
+    // The message stream goes up *before* anything else touches the network, and
+    // the order is not a preference.
+    //
+    // presage keeps one authenticated websocket and hands it out; `receive_messages`
+    // is the one caller that will not share, because a socket already carrying
+    // requests cannot also carry the stream. So a socket opened by a profile crawl
+    // is a socket the stream refuses, and the stream opens a second one — two
+    // connections authenticated as the same device, which is precisely what Signal
+    // answers with `4409 Connected elsewhere`. Whichever loses the race is closed
+    // by the server, its owner opens another, and that one closes the first: the
+    // reconnect-every-five-seconds loop, with nothing but petunia at either end of
+    // it. Starting the stream first means the crawls join the socket it already
+    // holds.
+    let (prepared_tx, mut prepared_rx) = unbounded_channel();
+    let media = Media {
+        manager: manager.clone(),
+        cache: cache.clone(),
+        db: db.clone(),
+        events: events.clone(),
+        limiter: limiter.clone(),
+        prepared: prepared_tx,
+        policy: media_policy,
+    };
+    let (queue_tx, mut queue_rx) = oneshot::channel();
+    let receive_task = tokio::task::spawn_local(receive(
+        manager.clone(),
+        db.clone(),
+        cache.clone(),
+        media.clone(),
+        events.clone(),
+        queue_tx,
+    ));
+
     tokio::task::spawn_local(show_cached_avatars(manager.clone(), cache.clone(), events.clone()));
     tokio::task::spawn_local(refresh_profiles(
         manager.clone(),
@@ -152,27 +186,6 @@ async fn session(
     {
         warn!(%error, "failed to request contact sync");
     }
-
-    let (prepared_tx, mut prepared_rx) = unbounded_channel();
-    let media = Media {
-        manager: manager.clone(),
-        cache: cache.clone(),
-        db: db.clone(),
-        events: events.clone(),
-        limiter: limiter.clone(),
-        prepared: prepared_tx,
-        policy: media_policy,
-    };
-
-    let (queue_tx, mut queue_rx) = oneshot::channel();
-    let receive_task = tokio::task::spawn_local(receive(
-        manager.clone(),
-        db.clone(),
-        cache.clone(),
-        media.clone(),
-        events.clone(),
-        queue_tx,
-    ));
 
     let mut queue_drained = false;
     let mut pending = Vec::new();
@@ -570,7 +583,9 @@ async fn receive(
     queue_tx: oneshot::Sender<()>,
 ) {
     let mut queue_signal = Some(queue_tx);
+    let mut wait = RECONNECT_MIN;
     loop {
+        let started = tokio::time::Instant::now();
         match receive_once(
             &mut manager,
             &db,
@@ -581,7 +596,7 @@ async fn receive(
         )
         .await
         {
-            Ok(()) => warn!("message stream ended, reconnecting"),
+            Ok(()) => warn!(?wait, "message stream ended, reconnecting"),
             Err(error) => {
                 error!(%error, "failed to receive messages");
                 emit(
@@ -592,9 +607,29 @@ async fn receive(
             }
         }
         emit(&mut events, Event::Connection(Connection::Reconnecting)).await;
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        tokio::time::sleep(wait).await;
+
+        // A stream that ran for a while and then dropped is an ordinary
+        // reconnect, and the next one should be immediate. One that dies as fast
+        // as it is made is a fight -- with another client, or with a second
+        // connection of our own -- and reconnecting on a fixed interval keeps a
+        // fight going at that interval forever. Backing off hands whichever side
+        // is not ours the connection and stops asking the server for it several
+        // times a minute.
+        wait = match started.elapsed() >= SETTLED {
+            true => RECONNECT_MIN,
+            false => (wait * 2).min(RECONNECT_MAX),
+        };
     }
 }
+
+/// How long to wait before reconnecting, and how far that grows while the stream
+/// keeps failing.
+const RECONNECT_MIN: Duration = Duration::from_secs(5);
+const RECONNECT_MAX: Duration = Duration::from_secs(120);
+
+/// How long a stream has to have lasted to count as having worked.
+const SETTLED: Duration = Duration::from_secs(60);
 
 async fn receive_once(
     manager: &mut RegisteredManager,

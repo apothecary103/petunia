@@ -141,10 +141,15 @@ pub fn content_type(path: &Path) -> String {
         "mp4" => "video/mp4",
         "mov" => "video/quicktime",
         "webm" => "video/webm",
-        "m4a" => "audio/mp4",
+        "m4a" | "aac" | "alac" => "audio/mp4",
         "mp3" => "audio/mpeg",
         "ogg" | "opus" => "audio/ogg",
         "wav" => "audio/wav",
+        // The lossless formats, which are the ones with a bit depth worth
+        // reporting -- and the ones that went out as octet-stream and arrived as
+        // a file to download rather than as something to play.
+        "flac" => "audio/flac",
+        "aiff" | "aif" => "audio/aiff",
         "pdf" => "application/pdf",
         "txt" => "text/plain",
         _ => "application/octet-stream",

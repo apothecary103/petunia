@@ -1,0 +1,91 @@
+# Signal's own dark palette, as the official client draws it: near-black
+# surfaces and ultramarine for the one thing that has to be pressed.
+#
+# Hand-written rather than converted, so `script/zed-themes.py` does not touch
+# it -- there is no Zed theme behind this one.
+name = "Signal Dark"
+appearance = "dark"
+
+background = "#1b1c1f"
+surface = "#1b1c1f"
+elevated = "#2c2c2e"
+sunken = "#121316"
+border = "#3b3d42"
+border_focus = "#3a76f0"
+
+text = "#f7f7f7"
+text_dim = "#b0b3ba"
+text_muted = "#84878f"
+
+hover = "#26282c"
+active = "#303236"
+selected = "#2a3242"
+
+accent = "#3a76f0"
+on_accent = "#ffffff"
+success = "#4caf50"
+warning = "#e9b949"
+danger = "#e2626b"
+
+# Signal's own conversation colours, lifted a little so they read against a
+# near-black background rather than against a bubble.
+accents = [
+  "#7a9ef5",
+  "#e8607f",
+  "#e8794f",
+  "#6fbf83",
+  "#5cc3a2",
+  "#4fbbd1",
+  "#9a93e8",
+  "#c77be0",
+]
+
+# Signal has no opinion about a code block, so this is One Dark's -- the same
+# palette petunia's own dark theme carries.
+[syntax]
+"attribute" = "#74ade8"
+"boolean" = "#bf956a"
+"comment" = "#5d636f"
+"comment.doc" = "#878e98"
+"constant" = "#dfc184"
+"constructor" = "#73ade9"
+"diff.minus" = "#e06c75"
+"diff.plus" = "#98c379"
+"embedded" = "#dce0e5"
+"emphasis" = "#74ade8"
+"emphasis.strong" = "#bf956a"
+"enum" = "#6eb4bf"
+"function" = "#73ade9"
+"hint" = "#788ca6"
+"keyword" = "#b477cf"
+"label" = "#74ade8"
+"link_text" = "#73ade9"
+"link_uri" = "#6eb4bf"
+"namespace" = "#dce0e5"
+"number" = "#bf956a"
+"operator" = "#6eb4bf"
+"predictive" = "#5a6a87"
+"preproc" = "#b477cf"
+"primary" = "#acb2be"
+"property" = "#d07277"
+"punctuation" = "#acb2be"
+"punctuation.bracket" = "#b2b9c6"
+"punctuation.delimiter" = "#b2b9c6"
+"punctuation.list_marker" = "#d07277"
+"punctuation.markup" = "#d07277"
+"punctuation.special" = "#b1574b"
+"selector" = "#dfc184"
+"selector.pseudo" = "#74ade8"
+"string" = "#a1c181"
+"string.escape" = "#878e98"
+"string.regex" = "#bf956a"
+"string.special" = "#bf956a"
+"string.special.symbol" = "#bf956a"
+"tag" = "#74ade8"
+"text.literal" = "#a1c181"
+"title" = "#d07277"
+"type" = "#6eb4bf"
+"variable" = "#acb2be"
+"variable.parameter" = "#d07277"
+"variable.special" = "#bf956a"
+"variant" = "#73ade9"

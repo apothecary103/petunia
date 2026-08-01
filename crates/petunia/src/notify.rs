@@ -9,6 +9,9 @@
 //! looking at. A banner about the message already on screen is a banner about
 //! nothing, and it is the one case a notification is guaranteed to be wrong.
 
+use std::sync::OnceLock;
+use std::sync::mpsc::{self, Sender};
+
 use petunia_config::{GroupNotifications, Notifications};
 use petunia_data::{Message, State, Thread};
 
@@ -81,7 +84,33 @@ pub fn wanted(
 /// Failures are logged and nothing else. A notification centre that has been
 /// told not to show anything from this application is a preference the person
 /// set, and it is not the message list's problem.
+/// Posted from a thread of its own, and never from the one drawing the window.
+/// macOS delivers a banner asynchronously and the backend waits for the
+/// confirmation — on the main thread by spinning a *nested* run loop for up to
+/// two seconds, which is the window frozen for two seconds per message with
+/// gpui's `App` still borrowed underneath it, so every AppKit callback that
+/// arrives in the meantime logs `RefCell already borrowed` and is dropped. Off
+/// the main thread the same wait is a condvar, which blocks nobody. One thread
+/// rather than one per notice: banners appear one after another anyway.
 pub fn post(notice: &Notice) {
+    static POSTING: OnceLock<Sender<Notice>> = OnceLock::new();
+
+    let sender = POSTING.get_or_init(|| {
+        let (sender, receiver) = mpsc::channel::<Notice>();
+        std::thread::spawn(move || {
+            for notice in receiver {
+                show(&notice);
+            }
+        });
+        sender
+    });
+
+    if sender.send(notice.clone()).is_err() {
+        tracing::debug!("the notifying thread is gone");
+    }
+}
+
+fn show(notice: &Notice) {
     let shown = notify_rust::Notification::new()
         .summary(&notice.title)
         .body(&notice.body)
@@ -90,6 +119,42 @@ pub fn post(notice: &Notice) {
 
     if let Err(error) = shown {
         tracing::debug!(%error, "could not post a notification");
+    }
+}
+
+/// Names the application the notifications come from, once, before any of them
+/// are posted.
+///
+/// Without this, macOS asks *who is asking* — with a file chooser. The backend
+/// needs a bundle identifier and looks one up by name if it has not been given
+/// one; the name it looks up is the string `use_default`, there is no
+/// application called that, and an unresolvable application reference on macOS
+/// opens the "Choose Application" panel. So every notification put a chooser on
+/// screen naming a document nobody has ever had, which is the whole of "a file
+/// chooser keeps appearing at random".
+///
+/// The identifier is this process's own when petunia is a bundle. When it is not
+/// — a binary run from a shell — there is none to have, and the fallback is an
+/// application that certainly exists: the notification arrives under somebody
+/// else's name, which is worse than it might be and better than a dialog.
+pub fn name_the_application() {
+    #[cfg(target_os = "macos")]
+    {
+        let bundle = mac::identifier().unwrap_or_else(|| "com.apple.Finder".to_owned());
+        if let Err(error) = notify_rust::set_application(&bundle) {
+            tracing::debug!(%error, %bundle, "could not name the notifying application");
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod mac {
+    /// This process's bundle identifier, or `None` when it is not running from a
+    /// bundle.
+    pub fn identifier() -> Option<String> {
+        objc2_foundation::NSBundle::mainBundle()
+            .bundleIdentifier()
+            .map(|identifier| identifier.to_string())
     }
 }
 

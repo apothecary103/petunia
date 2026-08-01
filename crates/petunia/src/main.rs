@@ -44,6 +44,7 @@ fn main() {
         cx.on_action(|_: &actions::Hide, cx| cx.hide());
         cx.on_action(|_: &actions::HideOthers, cx| cx.hide_other_apps());
         menus::install(cx);
+        notify::name_the_application();
 
         let config = Arc::new(loaded.config);
         let store = cx.new(|_| Store::new(config.clone()));

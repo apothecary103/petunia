@@ -510,18 +510,10 @@ fn code_block(
 
     box_of_code(theme)
         .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap_2()
-                .px_3()
-                .py_1()
-                .bg(theme.elevated)
-                .border_b_1()
-                .border_color(theme.border)
+            bar_of_code(theme)
                 .child(
                     div()
+                        .flex_1()
                         .min_w_0()
                         .truncate()
                         .text_size(px(size - 3.0))
@@ -567,6 +559,25 @@ pub fn box_of_code(theme: &Theme) -> Div {
         .rounded(px(kit::RADIUS))
         .bg(theme.sunken)
         .border_1()
+        .border_color(theme.border)
+}
+
+/// The strip across the top of a box of code: what it is on the left, and the
+/// one thing to be done with it on the right.
+///
+/// Shared with the attachment preview, which is the same box with a file's name
+/// and icon in the strip where a listing has its language -- a previewed text
+/// file and a pasted listing are the same object arriving two ways, and two
+/// headers for them would be two shapes for one thing.
+pub fn bar_of_code(theme: &Theme) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .px_3()
+        .py_1()
+        .bg(theme.elevated)
+        .border_b_1()
         .border_color(theme.border)
 }
 
@@ -677,13 +688,14 @@ fn parse(
 /// sits on a page.
 const DISPLAY_MATHS: f32 = 1.35;
 
-/// How round inline code is. Discord's own three, which on a box the height of
-/// one line is the difference between a chip and a lozenge.
-const INLINE_RADIUS: f32 = 3.0;
+/// How round inline code is. Half the block's, because the same radius on a box
+/// the height of one line turns a chip into a lozenge.
+const INLINE_RADIUS: f32 = kit::RADIUS / 2.0;
 
-/// How far the chip reaches past the code inside it, left and right. A fifth of
-/// an em at the message size, which is Discord's own measurement.
-const INLINE_PAD: f32 = 2.8;
+/// How far the chip reaches past the code inside it, left and right. Wider than
+/// the fifth of an em a wash needs: a box with a hairline around it has to hold
+/// the code clear of its own edge, the way the fenced block does.
+const INLINE_PAD: f32 = 4.0;
 
 /// Renders the body with Signal's formatting applied. Mentions carry a
 /// placeholder in the body, so the name is substituted before highlighting and
@@ -691,14 +703,40 @@ const INLINE_PAD: f32 = 2.8;
 /// which is read out of the source the sender typed and drawn as the symbols it
 /// spells.
 ///
-/// Inline code comes back with a box behind it rather than a wash, drawn the way
-/// Discord draws it: the block's fill, a fifth of an em of padding on every side,
-/// rounded off, and no border -- a hairline around something the width of one
-/// word reads as a box somebody forgot to fill. The block keeps its own, because
-/// a box that size is a box. See `ui::wash` for why none of this can be a
-/// highlight, and for why the padding is the box's rather than two thin spaces
-/// nobody typed.
+/// Inline code comes back as the same object the fenced block is, only the size
+/// of a word: the block's fill, the block's hairline, and half the block's
+/// radius, since the full one on a box a single line tall is a lozenge rather
+/// than a chip. Anything less than the border made `` `bat` `` read as a
+/// highlighter pen over monospace rather than as code. See `ui::wash` for why
+/// none of this can be a highlight, and for why the padding is the box's rather
+/// than two thin spaces nobody typed.
 fn styled(body: &str, ranges: &[Range], state: &State, theme: &Theme) -> crate::ui::wash::Wash {
+    let runs = runs(body, ranges, state, theme);
+
+    crate::ui::wash::wash(
+        StyledText::new(runs.text)
+            .with_highlights(runs.highlights)
+            .with_font_family_overrides(runs.families),
+        runs.boxed,
+        theme.sunken,
+        theme.border,
+        INLINE_RADIUS,
+        INLINE_PAD,
+    )
+}
+
+/// What one paragraph comes to: the text actually drawn, and the three things
+/// said about stretches of it.
+struct Runs {
+    text: String,
+    highlights: Vec<(std::ops::Range<usize>, HighlightStyle)>,
+    /// Which stretches are set in another family, sorted by where they start.
+    families: Vec<(std::ops::Range<usize>, SharedString)>,
+    /// Which stretches get a box painted behind them.
+    boxed: Vec<std::ops::Range<usize>>,
+}
+
+fn runs(body: &str, ranges: &[Range], state: &State, theme: &Theme) -> Runs {
     let segments = format::segments(body, ranges);
     let mut text = String::new();
     let mut highlights = Vec::new();
@@ -736,11 +774,11 @@ fn styled(body: &str, ranges: &[Range], state: &State, theme: &Theme) -> crate::
             // without breaking the one layout a line needs to wrap as a line.
             (false, None) => {
                 let source = &body[segment.start..segment.end];
-                let mut cut = 0;
+                let mut upto = 0;
 
                 for span in latex::spans(source) {
                     let plain = text.len();
-                    text.push_str(&source[cut..span.start]);
+                    text.push_str(&source[upto..span.start]);
                     note(&mut highlights, plain..text.len(), styles, theme);
 
                     let maths = text.len();
@@ -753,11 +791,11 @@ fn styled(body: &str, ranges: &[Range], state: &State, theme: &Theme) -> crate::
                     // somebody pasted rather than as an operator.
                     serif.push((maths..text.len(), theme.typography.serif.clone().into()));
 
-                    cut = span.end;
+                    upto = span.end;
                 }
 
                 let tail = text.len();
-                text.push_str(&source[cut..]);
+                text.push_str(&source[upto..]);
                 note(&mut highlights, tail..text.len(), styles, theme);
             }
         }
@@ -773,20 +811,45 @@ fn styled(body: &str, ranges: &[Range], state: &State, theme: &Theme) -> crate::
         }
         // Everything but the maths branch styles the segment in one piece; that
         // one has already put its own pieces in.
-        if styles.mention.is_some() || styles.spoiler || styles.monospace {
+        if styles.mention.is_some() || styles.spoiler {
             note(&mut highlights, start..text.len(), styles, theme);
+        } else if styles.monospace {
+            cut(&mut highlights, start..text.len(), styles, theme);
         }
     }
 
-    crate::ui::wash::wash(
-        StyledText::new(text)
-            .with_highlights(highlights)
-            .with_font_family_overrides(mono.into_iter().chain(serif)),
+    // Sorted, because gpui requires it of the overrides and the two sources
+    // arrive in an order of their own: a message with an equation before a word
+    // in code hands over a serif range that starts after a monospace one and
+    // sits before it, which the override pass then walks straight past.
+    let mut families: Vec<_> = mono.into_iter().chain(serif).collect();
+    families.sort_by_key(|(range, _)| range.start);
+
+    Runs {
+        text,
+        highlights,
+        families,
         boxed,
-        theme.sunken,
-        INLINE_RADIUS,
-        INLINE_PAD,
-    )
+    }
+}
+
+/// Makes a span a run of its own, whether or not it has anything to highlight.
+///
+/// A family override is applied to whole runs, and a run is only cut where a
+/// highlight begins — so a span that highlights nothing is a span the override
+/// slides straight past. That is why inline code was drawn in the body font: the
+/// monospace family was named for a range no run ever lined up with. The style
+/// may well be empty; being there is the whole job.
+fn cut(
+    highlights: &mut Vec<(std::ops::Range<usize>, HighlightStyle)>,
+    range: std::ops::Range<usize>,
+    styles: format::Styles,
+    theme: &Theme,
+) {
+    if range.is_empty() {
+        return;
+    }
+    highlights.push((range, highlight(styles, theme).unwrap_or_default()));
 }
 
 /// Records one piece's highlight, if it has one and covers anything at all.
@@ -822,18 +885,22 @@ fn note_maths(
     theme: &Theme,
 ) {
     let base = highlight(styles, theme);
-    let mut cut = 0;
+    let mut upto = 0;
 
     for variable in latex::variables(rendered) {
-        note(highlights, at + cut..at + variable.start, styles, theme);
+        // `cut` rather than `note`: the serif is a family override, and one only
+        // reaches a run a highlight has cut. Left to `note`, the upright stretches
+        // of an unstyled equation carried no highlight, so no run began at them
+        // and the serif landed on the variables alone.
+        cut(highlights, at + upto..at + variable.start, styles, theme);
         highlights.push((
             at + variable.start..at + variable.end,
             italicised(base.unwrap_or_default()),
         ));
-        cut = variable.end;
+        upto = variable.end;
     }
 
-    note(highlights, at + cut..at + rendered.len(), styles, theme);
+    cut(highlights, at + upto..at + rendered.len(), styles, theme);
 }
 
 /// A variable is set in italics, the way every typesetter sets one and the one
@@ -1116,6 +1183,45 @@ mod tests {
 
     fn theme() -> HighlightTheme {
         petunia_config::theme::dark().highlights()
+    }
+
+    fn drawn(input: &str) -> Runs {
+        let (body, ranges) = markup::parse(input);
+        let palette = petunia_config::theme::dark();
+        runs(&body, &ranges, &State::new(uuid::Uuid::nil()), &palette)
+    }
+
+    /// gpui applies a family override to whole runs, and cuts a run only where a
+    /// highlight begins. Inline code highlights nothing — it is a family and a box
+    /// and no colour — so without a cut of its own the override lined up with no
+    /// run and slid off, and `` `bat` `` came out in the body font.
+    #[test]
+    fn inline_code_is_a_run_of_its_own() {
+        let runs = drawn("`bat` is a modern replacement for `cat`");
+
+        assert_eq!(runs.text, "bat is a modern replacement for cat");
+        assert_eq!(runs.families.len(), 2);
+        for (range, _) in &runs.families {
+            assert!(
+                runs.highlights.iter().any(|(cut, _)| cut == range),
+                "no run begins at {range:?}: {:?}",
+                runs.highlights
+            );
+        }
+        assert_eq!(runs.boxed, [0..3, 32..35]);
+    }
+
+    /// The overrides have to arrive in order or the pass that applies them walks
+    /// past one, and the two sources are not in order between themselves.
+    #[test]
+    fn family_overrides_are_sorted() {
+        let runs = drawn("$x^2$ and then `code`");
+
+        assert!(
+            runs.families.windows(2).all(|pair| pair[0].0.start <= pair[1].0.start),
+            "{:?}",
+            runs.families.iter().map(|(range, _)| range.clone()).collect::<Vec<_>>()
+        );
     }
 
     /// Display maths comes out of the paragraph so it can be set larger; inline

@@ -68,6 +68,19 @@ pub struct Run<'a> {
 }
 
 impl Run<'_> {
+    /// What the sender's name is called as an element, which is the sender and
+    /// nothing about the run -- so the underline under the pointer appears on
+    /// every line this person said and on nobody else's.
+    ///
+    /// gpui keeps hover state against the element's id, and one literal id shared
+    /// by every run underlined the whole conversation at once; one per message
+    /// underlined a single line, which says nothing a highlight is for. An id has
+    /// to be unique among its siblings and these are each an only child of their
+    /// own row, so a name is free to be named after the person.
+    fn named(&self) -> SharedString {
+        SharedString::from(format!("sender-{}", self.sender))
+    }
+
     pub fn render(self) -> Div {
         match self.layout {
             Layout::Standard => self.standard(),
@@ -122,7 +135,7 @@ impl Run<'_> {
                     }))
                     .child(
                         div()
-                            .id(SharedString::from(format!("nick-{}", message.timestamp())))
+                            .id(self.named())
                             .flex_none()
                             .w(px(self.spacing.name_column))
                             .truncate()
@@ -227,7 +240,7 @@ impl Run<'_> {
                 .when(named, |this| {
                     this.child(
                         div()
-                            .id("sender")
+                            .id(self.named())
                             .cursor_pointer()
                             .text_size(px(self.spacing.body))
                             .line_height(px(self.line()))

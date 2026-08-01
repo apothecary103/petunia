@@ -181,7 +181,13 @@ impl Picker<'_> {
             .on_mouse_down(MouseButton::Right, move |event: &gpui::MouseDownEvent, window, cx| {
                 menu(&(raised.clone(), event.position), window, cx)
             })
-            .child(image::animated("frames", &sticker.path, TILE - 12.0, TILE - 12.0))
+            // Still, not animated. A pack is a hundred stickers and an animated
+            // one is up to `MAX_FRAMES` resamples: a grid of them playing at once
+            // is both unreadable and a hundredfold of the memory, which is what
+            // pushed every avatar and every photograph out of the image cache the
+            // moment the picker opened. What it looks like moving is what the
+            // message shows.
+            .child(image::picture(&sticker.path, TILE - 12.0, TILE - 12.0))
     }
 
     /// The packs, as their own first sticker. A pack with nothing to draw is not

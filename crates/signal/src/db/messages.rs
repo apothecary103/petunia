@@ -15,8 +15,10 @@ use crate::Error;
 /// slots, so a page is over-fetched and the caller folds it down.
 const OVERFETCH: u32 = 3;
 
-/// How far back to look for a thread's newest renderable message.
-const PREVIEW_DEPTH: u32 = 20;
+/// How far back to look for a thread's newest renderable message. Deep enough
+/// that the receipts and reactions interleaved with it do not use up the window:
+/// one message sent to a group of ten comes back as a receipt per device.
+const PREVIEW_DEPTH: u32 = 60;
 
 pub struct Page {
     pub rows: Vec<Envelope>,
@@ -106,11 +108,17 @@ impl Db {
     /// path walked every contact and group and loaded each thread in full,
     /// which cost O(all messages) at startup.
     ///
-    /// `at` is the newest row's timestamp read off the `ts` column, and is not
-    /// derived from `rows`: a row that fails to decode is still a row, and a
-    /// thread whose newest rows all decode into nothing renderable still has
-    /// something in it. That distinction is the difference between a quiet
+    /// `at` is the newest row's timestamp read off the `ts` column rather than
+    /// derived from a decoded message: a row that fails to decode is still a row,
+    /// and a thread whose newest rows all project into nothing renderable still
+    /// has something in it. That distinction is the difference between a quiet
     /// conversation and one the sidebar stops listing.
+    ///
+    /// A row that is not part of a conversation is the other side of it, and does
+    /// not count: presage saves receipts, and saves them under the sender's
+    /// one-to-one thread whatever they are receipts *for*. So every member of
+    /// every group you share writes rows into a thread you have never spoken in,
+    /// and counting those listed all of them in the sidebar.
     pub async fn recent_rows(&self) -> Result<Vec<Recent>, Error> {
         // The window runs over (thread_id, ts) alone so it is answered from the
         // covering index; bodies are then fetched only for the rows that qualify.
@@ -150,11 +158,18 @@ impl Db {
                     threads.last_mut().expect("just pushed")
                 }
             };
-            recent.at = recent.at.max(at);
-            if let Some(envelope) = decode(row) {
-                recent.rows.push(envelope);
+            match decode(row) {
+                Some(envelope) if petunia_data::conversational(&envelope) => {
+                    recent.at = recent.at.max(at);
+                    recent.rows.push(envelope);
+                }
+                // A row nothing could be made of is unknowable rather than
+                // uninteresting, and a row is a row.
+                None => recent.at = recent.at.max(at),
+                Some(_) => {}
             }
         }
+        threads.retain(|recent| recent.at > 0);
         Ok(threads)
     }
 }
@@ -358,7 +373,8 @@ mod tests {
 
     #[tokio::test]
     async fn recent_rows_return_one_thread_with_its_newest_rows() {
-        let (db, thread, _dir) = seeded(25).await;
+        let messages = PREVIEW_DEPTH + 5;
+        let (db, thread, _dir) = seeded(messages as u64).await;
         let recent = db.recent_rows().await.unwrap();
 
         assert_eq!(recent.len(), 1);
@@ -367,7 +383,52 @@ mod tests {
         // Bounded by PREVIEW_DEPTH, newest last so `project(..).pop()` is the latest.
         assert_eq!(recent[0].rows.len(), PREVIEW_DEPTH as usize);
         let latest = data::project(recent[0].rows.clone()).pop().unwrap();
-        assert_eq!(latest.text(), Some("message 25"));
+        assert_eq!(latest.text(), Some(format!("message {messages}").as_str()));
+    }
+
+    /// presage saves a receipt under the sender's own one-to-one thread, whatever
+    /// the message it acknowledges was in -- so everybody in every group you share
+    /// writes rows into a thread you have never spoken in. Counted, each of them
+    /// became a row in the sidebar with nothing to read and no history behind it.
+    #[tokio::test]
+    async fn a_thread_of_nothing_but_receipts_is_not_a_conversation() {
+        let (db, _, _dir) = seeded_receipts().await;
+
+        assert!(db.recent_rows().await.unwrap().is_empty());
+    }
+
+    async fn seeded_receipts() -> (Db, Thread, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.db3");
+        let store = SqliteStore::open(path.to_str().unwrap(), OnNewIdentity::Trust)
+            .await
+            .unwrap();
+
+        let sender = Uuid::new_v4();
+        let time = Utc.timestamp_millis_opt(1_000).unwrap();
+        let envelope = Envelope::from_body(
+            proto::ReceiptMessage {
+                r#type: Some(proto::receipt_message::Type::Delivery.into()),
+                timestamp: vec![500],
+            },
+            Metadata {
+                sender: ServiceId::Aci(sender.into()),
+                destination: ServiceId::Aci(sender.into()),
+                sender_device: DeviceId::new(1).unwrap(),
+                timestamp: time,
+                server_timestamp: time,
+                needs_receipt: false,
+                unidentified_sender: false,
+                was_plaintext: false,
+                server_guid: None,
+            },
+        );
+        let thread = presage::store::Thread::try_from(&envelope).unwrap();
+        store.save_message(&thread, envelope).await.unwrap();
+        drop(store);
+
+        let db = Db::open_at(path.to_str().unwrap()).await.unwrap();
+        (db, Thread::Contact(ContactId::Aci(sender)), dir)
     }
 
     /// What the scan reports a thread's activity as is a property of its rows,

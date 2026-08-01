@@ -35,6 +35,24 @@ pub struct Request {
     width: u32,
     height: u32,
     fit: Fit,
+    kind: Kind,
+}
+
+/// Which picture, and how much of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Kind {
+    /// The file, first frame only. Nothing without an element id can show a
+    /// second one, so decoding the rest is a hundred resamples nobody will ever
+    /// see -- which is what a grid of animated stickers spent.
+    Still,
+    /// The file, every frame of it.
+    Animated,
+    /// The picture *inside* the file: an album cover in an audio file's tags.
+    /// Part of the key rather than a second cache, so a track's artwork is
+    /// resampled and evicted like everything else -- and the alternative was
+    /// writing covers out as files of their own into a cache directory whose
+    /// layout means something.
+    Cover,
 }
 
 /// Which way the box is honoured. `Contain` is the whole picture inside it;
@@ -73,14 +91,29 @@ struct Cache {
 struct Entry {
     decoding: Shared<Task<Decoded>>,
     drawn: u64,
+    /// What it costs, once it has finished decoding. Zero while it is still being
+    /// made, which is also the only honest answer then.
+    bytes: usize,
 }
 
 impl Global for Cache {}
 
-/// Comfortably more than any window can show at once, so nothing on screen is
-/// ever the least recently drawn — evicting a picture this frame is asking to
-/// draw it again next frame, forever.
-const RESIDENT: usize = 192;
+/// What the resamples may take between them.
+///
+/// A budget in bytes rather than in entries, because the two have no fixed
+/// relation: a photograph in a conversation is a megabyte or two and a sticker
+/// tile is twelve kilobytes, so any single count is either far too small for a
+/// grid of the second or far too generous for a page of the first. Counted, a
+/// sticker picker asked for a thousand entries against a ceiling of a couple of
+/// hundred and evicted everything else in the window to get them -- including
+/// every avatar on screen, which was then asked for again on the next frame and
+/// evicted again on the one after. That is the whole of "opening the stickers
+/// makes every picture in the application disappear".
+///
+/// Comfortably more than any one frame can ask for, which is the invariant that
+/// matters: evicting something being drawn now is asking to decode it again next
+/// frame, forever.
+const BUDGET: usize = 256 * 1024 * 1024;
 
 impl Cache {
     /// The resample for this request, or `None` while it is still being made.
@@ -119,6 +152,7 @@ impl Cache {
             cache.entries.insert(request.clone(), Entry {
                 decoding: decoding.clone(),
                 drawn,
+                bytes: 0,
             });
         });
         Self::evict(window, cx);
@@ -138,25 +172,40 @@ impl Cache {
         decoding.now_or_never()
     }
 
-    /// Gives back everything past `RESIDENT`, oldest first.
+    /// Gives back the least recently drawn resamples until the rest fit in
+    /// `BUDGET`.
     fn evict(window: &mut Window, cx: &mut App) {
-        let over = cx.global::<Cache>().entries.len().saturating_sub(RESIDENT);
-        if over == 0 {
-            return;
-        }
-
         let stale = cx.update_global(|cache: &mut Cache, _| {
-            let mut by_age: Vec<_> = cache
-                .entries
-                .iter()
-                .map(|(request, entry)| (entry.drawn, request.clone()))
-                .collect();
+            let mut total = 0;
+            let mut by_age = Vec::with_capacity(cache.entries.len());
+            for (request, entry) in cache.entries.iter_mut() {
+                // What a decode cost is only knowable once it has finished, and
+                // a task is polled here rather than awaited: an entry still
+                // being made weighs nothing yet, which it does not.
+                if entry.bytes == 0
+                    && let Some(Ok(image)) = entry.decoding.clone().now_or_never()
+                {
+                    entry.bytes = weight(&image);
+                }
+                total += entry.bytes;
+                by_age.push((entry.drawn, request.clone()));
+            }
+            if total <= BUDGET {
+                return Vec::new();
+            }
             by_age.sort_unstable_by_key(|(drawn, _)| *drawn);
-            by_age
-                .into_iter()
-                .take(over)
-                .filter_map(|(_, request)| cache.entries.remove(&request)?.decoding.now_or_never())
-                .collect::<Vec<_>>()
+
+            let mut freed = Vec::new();
+            for (_, request) in by_age {
+                if total <= BUDGET {
+                    break;
+                }
+                if let Some(entry) = cache.entries.remove(&request) {
+                    total = total.saturating_sub(entry.bytes);
+                    freed.extend(entry.decoding.now_or_never());
+                }
+            }
+            freed
         });
 
         // The buffers go with the task above; this is the copy in the atlas,
@@ -167,16 +216,35 @@ impl Cache {
     }
 }
 
+/// What a resample takes, every frame of it. Uncompressed BGRA, so this is the
+/// pixels and nothing else.
+fn weight(image: &RenderImage) -> usize {
+    (0..image.frame_count())
+        .filter_map(|frame| image.as_bytes(frame))
+        .map(<[u8]>::len)
+        .sum()
+}
+
 /// An animation longer than this is almost certainly not worth the memory: a
 /// 512-square frame is a megabyte of RGBA, and a sticker pack full of them will
 /// exhaust the atlas before it entertains anyone.
 const MAX_FRAMES: usize = 120;
 
 fn decode(request: &Request) -> Result<Arc<RenderImage>, ImageCacheError> {
-    let bytes = std::fs::read(&request.path)?;
+    let bytes = match request.kind {
+        Kind::Cover => petunia_media::song::cover(&request.path).ok_or_else(|| {
+            ImageCacheError::Asset(
+                format!("{} has no cover art", request.path.display()).into(),
+            )
+        })?,
+        _ => std::fs::read(&request.path)?,
+    };
     let format = image::guess_format(&bytes)?;
 
     let frames = match format {
+        _ if request.kind != Kind::Animated => {
+            vec![still(image::load_from_memory_with_format(&bytes, format)?, request)]
+        }
         ImageFormat::Gif => resample_all(GifDecoder::new(Cursor::new(&bytes))?.into_frames(), request),
         ImageFormat::WebP => {
             let mut decoder = WebPDecoder::new(Cursor::new(&bytes))?;
@@ -290,13 +358,27 @@ pub fn shape(path: &Path) -> Option<petunia_data::attachment::Size> {
 /// letting the layout infer one from the other is how a screenshot ends up
 /// thousands of units wide.
 pub fn picture(path: impl AsRef<Path>, width: f32, height: f32) -> Img {
-    sized(path.as_ref().to_path_buf(), width, height, Fit::Contain)
+    contained(path.as_ref().to_path_buf(), width, height, Kind::Still)
+}
+
+fn contained(path: PathBuf, width: f32, height: f32, kind: Kind) -> Img {
+    sized(path, width, height, Fit::Contain, kind)
         .w(px(width))
         .h(px(height))
         .object_fit(ObjectFit::Contain)
 }
 
-/// The same, for a file that might be animated.
+/// The cover art inside an audio file, filling a square the way an album cover
+/// is always reproduced.
+pub fn artwork(path: impl AsRef<Path>, edge: f32) -> Img {
+    sized(path.as_ref().to_path_buf(), edge, edge, Fit::Cover, Kind::Cover)
+        .size(px(edge))
+        .object_fit(ObjectFit::Cover)
+}
+
+/// The same, for a file that might be animated. Which is also the only call that
+/// decodes past the first frame: `picture` cannot show a second one, so a GIF
+/// drawn through it used to cost a hundred resamples to display one of them.
 ///
 /// An `Img` keeps which frame it is showing in gpui's element state, and element
 /// state is keyed by the element's id — so an image with no id is handed `None`
@@ -311,12 +393,12 @@ pub fn animated(
     width: f32,
     height: f32,
 ) -> gpui::Stateful<Img> {
-    picture(path, width, height).id(id.into())
+    contained(path.as_ref().to_path_buf(), width, height, Kind::Animated).id(id.into())
 }
 
 /// A picture filling a square and cropped to it, for avatars and thumbnails.
 pub fn cropped(path: impl AsRef<Path>, edge: f32) -> Img {
-    sized(path.as_ref().to_path_buf(), edge, edge, Fit::Cover)
+    sized(path.as_ref().to_path_buf(), edge, edge, Fit::Cover, Kind::Still)
         .size(px(edge))
         .object_fit(ObjectFit::Cover)
 }
@@ -324,7 +406,7 @@ pub fn cropped(path: impl AsRef<Path>, edge: f32) -> Img {
 /// The scale factor is only knowable inside a window, so the request is built
 /// per frame rather than at construction. Requests are cheap; the resampled
 /// result behind them is cached by the asset system.
-fn sized(path: PathBuf, width: f32, height: f32, fit: Fit) -> Img {
+fn sized(path: PathBuf, width: f32, height: f32, fit: Fit, kind: Kind) -> Img {
     img(move |window: &mut Window, cx: &mut App| {
         let scale = window.scale_factor().max(1.0);
         let device = |value: f32| ((value * scale).ceil() as u32).max(1);
@@ -334,6 +416,7 @@ fn sized(path: PathBuf, width: f32, height: f32, fit: Fit) -> Img {
             width: device(width),
             height: device(height),
             fit,
+            kind,
         };
         Cache::load(&request, window, cx)
     })
@@ -358,6 +441,7 @@ mod tests {
             width,
             height,
             fit: Fit::Contain,
+            kind: Kind::Still,
         }
     }
 
@@ -432,6 +516,41 @@ mod tests {
         let pixel = &decoded.as_bytes(0).unwrap()[..4];
 
         assert_eq!(pixel, [30, 20, 10, 255]);
+    }
+
+    /// An element with no id cannot show a second frame, so decoding one is a
+    /// megabyte a piece for nothing -- which is what a grid of animated stickers
+    /// spent, and what emptied the cache of every other picture in the window.
+    #[test]
+    fn a_still_request_decodes_one_frame_of_an_animation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("animation.gif");
+        std::fs::write(&path, gif(3)).unwrap();
+
+        assert_eq!(decode(&request(&path, 8, 8)).unwrap().frame_count(), 1);
+        assert_eq!(
+            decode(&Request {
+                kind: Kind::Animated,
+                ..request(&path, 8, 8)
+            })
+            .unwrap()
+            .frame_count(),
+            3
+        );
+    }
+
+    fn gif(frames: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = image::codecs::gif::GifEncoder::new(Cursor::new(&mut bytes));
+            encoder.set_repeat(image::codecs::gif::Repeat::Infinite).unwrap();
+            for _ in 0..frames {
+                encoder
+                    .encode_frame(Frame::new(RgbaImage::from_pixel(8, 8, Rgba([1, 2, 3, 255]))))
+                    .unwrap();
+            }
+        }
+        bytes
     }
 
     #[test]

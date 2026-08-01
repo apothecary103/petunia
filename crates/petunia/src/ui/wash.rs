@@ -36,6 +36,9 @@ pub struct Wash {
     /// wherever a mention was substituted or a spoiler replaced.
     spans: Vec<Range<usize>>,
     fill: Hsla,
+    /// The hairline around the box, so inline code is drawn as the same object
+    /// the fenced block is rather than as a wash that happens to be monospace.
+    border: Hsla,
     radius: Pixels,
     /// How far the box reaches past the glyphs, left and right.
     pad: Pixels,
@@ -47,6 +50,7 @@ pub fn wash(
     text: StyledText,
     spans: Vec<Range<usize>>,
     fill: Hsla,
+    border: Hsla,
     radius: f32,
     pad: f32,
 ) -> Wash {
@@ -54,6 +58,7 @@ pub fn wash(
         text,
         spans,
         fill,
+        border,
         radius: px(radius),
         pad: px(pad),
     }
@@ -116,9 +121,9 @@ impl gpui::Element for Wash {
                 box_,
                 self.radius,
                 self.fill,
-                px(0.0),
-                gpui::transparent_black(),
-                gpui::BorderStyle::default(),
+                px(1.0),
+                self.border,
+                gpui::BorderStyle::Solid,
             ));
         }
 
