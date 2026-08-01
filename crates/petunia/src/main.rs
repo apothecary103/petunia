@@ -2,7 +2,9 @@ mod actions;
 mod assets;
 mod bridge;
 mod demo;
+mod favourites;
 mod menus;
+mod notify;
 mod session;
 mod store;
 mod theme;
@@ -65,11 +67,17 @@ fn main() {
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 // The traffic lights float over petunia's own header strip,
-                // which is where the panel toggles live.
+                // which is where the panel toggles live. Only macOS draws
+                // them; elsewhere the platform titlebar has no fixed control
+                // cluster to clear.
                 titlebar: Some(TitlebarOptions {
                     title: Some("Petunia".into()),
                     appears_transparent: true,
-                    traffic_light_position: Some(point(px(14.0), px(14.0))),
+                    traffic_light_position: if cfg!(target_os = "macos") {
+                        Some(point(px(14.0), px(14.0)))
+                    } else {
+                        None
+                    },
                 }),
                 window_min_size: Some(size(px(560.0), px(420.0))),
                 // Whole-window, because that is the only granularity there is:

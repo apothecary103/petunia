@@ -1,0 +1,249 @@
+//! Telling the desktop something arrived.
+//!
+//! What `[notifications]` in `config.toml` has always described and nothing has
+//! ever read. The policy lives in `wanted` — a pure function over the preference,
+//! the thread and the message — so it can be tested without a notification centre
+//! and without a window; posting is the two lines at the bottom.
+//!
+//! Nothing is posted for the conversation you are looking at in a window you are
+//! looking at. A banner about the message already on screen is a banner about
+//! nothing, and it is the one case a notification is guaranteed to be wrong.
+
+use petunia_config::{GroupNotifications, Notifications};
+use petunia_data::{Message, State, Thread};
+
+/// A notification to post: what it says, and which conversation it came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Notice {
+    pub title: String,
+    pub body: String,
+}
+
+/// Whether this message earns a notification, and what it would say.
+///
+/// `attending` is "this conversation is on screen in a window with the focus".
+/// Everything else is the preference and what the message is.
+pub fn wanted(
+    settings: &Notifications,
+    state: &State,
+    thread: &Thread,
+    message: &Message,
+    attending: bool,
+    now: u64,
+) -> Option<Notice> {
+    if !settings.enabled || attending {
+        return None;
+    }
+    // Our own message, arriving as the echo of a send or as a sync from another
+    // device. Notifying somebody about what they just typed is absurd.
+    if message.sender() == state.aci {
+        return None;
+    }
+    // A tombstone, a reaction's own row, or anything else with nothing to say.
+    if !message.is_addressable() {
+        return None;
+    }
+    if state.index.flags(thread).muted(now) {
+        return None;
+    }
+
+    if thread.is_group() {
+        let mentioned = message.mentions(state.aci);
+        match settings.groups {
+            GroupNotifications::None => return None,
+            GroupNotifications::Mentions if !mentioned => return None,
+            _ => {}
+        }
+    }
+
+    let who = state.name_of(message.sender());
+    let where_ = state.title(thread);
+    // In a group, both: which conversation is as much of the answer as who, and
+    // one without the other has you opening the app to find out.
+    let title = match (settings.show_sender, thread.is_group()) {
+        (true, true) => format!("{who} in {where_}"),
+        (true, false) => who,
+        (false, true) => where_,
+        (false, false) => "Petunia".to_owned(),
+    };
+    let body = match settings.show_content {
+        true => message.summary(),
+        // Deliberately not "1 new message": a count implies this is a digest of
+        // several, and it is one banner per message.
+        false => "New message".to_owned(),
+    };
+
+    Some(Notice { title, body })
+}
+
+/// Hands the notice to the desktop.
+///
+/// Failures are logged and nothing else. A notification centre that has been
+/// told not to show anything from this application is a preference the person
+/// set, and it is not the message list's problem.
+pub fn post(notice: &Notice) {
+    let shown = notify_rust::Notification::new()
+        .summary(&notice.title)
+        .body(&notice.body)
+        .appname("Petunia")
+        .show();
+
+    if let Err(error) = shown {
+        tracing::debug!(%error, "could not post a notification");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use petunia_data::{ContactId, MessageId};
+    use uuid::Uuid;
+
+    fn state() -> State {
+        State::new(Uuid::from_u128(1))
+    }
+
+    fn thread() -> Thread {
+        Thread::Contact(ContactId::Aci(Uuid::from_u128(2)))
+    }
+
+    fn from(sender: Uuid, body: &str) -> Message {
+        Message::plain(
+            MessageId {
+                timestamp: 1_000,
+                sender,
+            },
+            body.into(),
+        )
+    }
+
+    fn settings() -> Notifications {
+        Notifications::default()
+    }
+
+    #[test]
+    fn a_message_from_somebody_else_is_worth_a_banner() {
+        let notice = wanted(
+            &settings(),
+            &state(),
+            &thread(),
+            &from(Uuid::from_u128(2), "hi"),
+            false,
+            0,
+        );
+
+        assert!(notice.is_some());
+        assert_eq!(notice.unwrap().body, "hi");
+    }
+
+    /// The one case a notification is certainly wrong.
+    #[test]
+    fn the_conversation_on_screen_gets_none() {
+        assert!(
+            wanted(
+                &settings(),
+                &state(),
+                &thread(),
+                &from(Uuid::from_u128(2), "hi"),
+                true,
+                0,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn our_own_message_gets_none() {
+        assert!(
+            wanted(
+                &settings(),
+                &state(),
+                &thread(),
+                &from(Uuid::from_u128(1), "hi"),
+                false,
+                0,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn disabled_means_disabled() {
+        let mut settings = settings();
+        settings.enabled = false;
+
+        assert!(
+            wanted(&settings, &state(), &thread(), &from(Uuid::from_u128(2), "hi"), false, 0)
+                .is_none()
+        );
+    }
+
+    /// Withheld content still notifies -- that something arrived is the part
+    /// somebody who turned the preview off still wants.
+    #[test]
+    fn content_can_be_withheld_without_withholding_the_notification() {
+        let mut settings = settings();
+        settings.show_content = false;
+
+        let notice = wanted(
+            &settings,
+            &state(),
+            &thread(),
+            &from(Uuid::from_u128(2), "secret"),
+            false,
+            0,
+        )
+        .expect("still notified");
+
+        assert_eq!(notice.body, "New message");
+        assert!(!notice.body.contains("secret"));
+    }
+
+    #[test]
+    fn a_withheld_sender_is_not_in_the_title() {
+        let mut settings = settings();
+        settings.show_sender = false;
+
+        let notice = wanted(
+            &settings,
+            &state(),
+            &thread(),
+            &from(Uuid::from_u128(2), "hi"),
+            false,
+            0,
+        )
+        .expect("still notified");
+
+        assert_eq!(notice.title, "Petunia");
+    }
+
+    #[test]
+    fn a_muted_conversation_gets_none() {
+        let mut state = state();
+        let thread = thread();
+        // The index only carries flags for a conversation it has heard of, so
+        // there has to be one before it can be muted.
+        state.record(&thread, &from(Uuid::from_u128(2), "earlier"));
+        state.index.set_flags(
+            &thread,
+            petunia_data::index::Flags {
+                muted_until: Some(u64::MAX),
+                ..Default::default()
+            },
+        );
+
+        assert!(
+            wanted(&settings(), &state, &thread, &from(Uuid::from_u128(2), "hi"), false, 0)
+                .is_none()
+        );
+    }
+
+    /// A tombstone is a row, not something anybody wants told about.
+    #[test]
+    fn an_unaddressable_message_gets_none() {
+        let mut deleted = from(Uuid::from_u128(2), "");
+        deleted.content = petunia_data::message::Content::Deleted;
+
+        assert!(wanted(&settings(), &state(), &thread(), &deleted, false, 0).is_none());
+    }
+}
