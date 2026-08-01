@@ -13,7 +13,10 @@ petunia-data = { path = "crates/data" }
 petunia-media = { path = "crates/media" }
 petunia-signal = { path = "crates/signal" }
 
-presage = { git = "https://github.com/whisperfish/presage", rev = "63482efd0cbdc0780baf0650517c7d55f1cac05d" }
+# `cdsi` is Signal's contact discovery service, which is the only way to resolve
+# a phone number to an account -- what starting a new chat with somebody not in
+# the contact list needs.
+presage = { git = "https://github.com/whisperfish/presage", rev = "63482efd0cbdc0780baf0650517c7d55f1cac05d", features = ["cdsi"] }
 presage-store-sqlite = { git = "https://github.com/whisperfish/presage", rev = "63482efd0cbdc0780baf0650517c7d55f1cac05d" }
 # Deliberately unpinned: gpui-component declares the same bare git source, and
 # cargo treats `git = url` and `git = url, rev = ...` as different sources --
@@ -38,6 +41,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 open = "5.4.0"
 toml = "1.1.4"
 notify = "8.2.0"
+notify-rust = "4.18.0"
+emojis = "0.9.0"
 rodio = { version = "0.22.2", default-features = false, features = ["playback", "symphonia-all"] }
 objc2-av-foundation = { version = "0.3.2", features = ["objc2-core-media", "objc2-core-video"] }
 objc2-core-media = "0.3.2"
@@ -52,9 +57,21 @@ objc2-core-foundation = "0.3.2"
 objc2-app-kit = { version = "0.3.2", features = ["NSAppearance", "NSVisualEffectView", "NSView", "NSWindow", "NSApplication", "NSResponder", "NSGraphics"] }
 filetime = "0.2.29"
 tempfile = "3.27.0"
+# The store's passphrase, kept where the platform keeps secrets: the Keychain on
+# macOS, the Secret Service on Linux -- which is what GNOME Keyring and KWallet
+# both are, so a modern desktop has one without being asked to install anything.
+keyring = { version = "3", features = ["apple-native", "sync-secret-service", "crypto-rust"] }
+rand = "0.9"
 
 [patch.crates-io]
 curve25519-dalek = { git = "https://github.com/signalapp/curve25519-dalek", tag = "signal-curve25519-4.1.3" }
+
+[patch."https://github.com/whisperfish/presage"]
+presage = { path = "vendor/presage/presage" }
+presage-store-sqlite = { path = "vendor/presage/presage-store-sqlite" }
+
+[patch."https://github.com/whisperfish/libsignal-service-rs"]
+libsignal-service = { path = "vendor/libsignal-service-rs" }
 
 # [profile.release]
 # opt-level = 3           # Max speed optimizations (SIMD, aggressive inlining, unrolling)
