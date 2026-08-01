@@ -1,0 +1,299 @@
+use std::{convert::TryFrom, convert::TryInto};
+
+use libsignal_protocol::{Aci, Pni, ServiceId};
+use serde::{Deserialize, Serialize};
+use zkgroup::profiles::{ExpiringProfileKeyCredential, ProfileKey};
+
+use crate::sender::GroupV2Id;
+
+use super::GroupDecodingError;
+
+/// A candidate member for group creation/modification.
+///
+/// If credential is Some, member will be added with a presentation.
+/// If credential is None, member will be added as pending (invite).
+#[derive(Clone)]
+pub struct GroupMemberCandidate {
+    pub service_id: ServiceId,
+    pub credential: Option<ExpiringProfileKeyCredential>,
+}
+
+impl std::fmt::Debug for GroupMemberCandidate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GroupCandidate")
+            .field("service_id", &self.service_id)
+            .field(
+                "credential",
+                &self.credential.as_ref().map(|_| "[credential]"),
+            )
+            .finish()
+    }
+}
+
+#[derive(Copy, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum Role {
+    Unknown,
+    Default,
+    Administrator,
+}
+
+#[derive(derive_more::Debug, Clone, Deserialize, Serialize)]
+pub struct Member {
+    #[serde(with = "aci_serde")]
+    pub aci: Aci,
+    pub role: Role,
+    #[debug(ignore)]
+    pub profile_key: ProfileKey,
+    pub joined_at_version: u32,
+    pub label: Option<String>,
+    pub label_emoji: Option<String>,
+}
+
+impl PartialEq for Member {
+    fn eq(&self, other: &Self) -> bool {
+        self.aci == other.aci
+    }
+}
+
+mod aci_serde {
+    use super::*;
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S>(p: &Aci, s: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        s.serialize_str(&p.service_id_string())
+    }
+
+    pub fn deserialize<'de, D>(d: D) -> Result<Aci, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // We have to go through String deserialization,
+        // because Aci does not implement Deserialize (duh).
+        let s = std::borrow::Cow::<str>::deserialize(d)?;
+        match Aci::parse_from_service_id_string(&s) {
+            Some(aci) => Ok(aci),
+            None => Err(serde::de::Error::custom("Invalid ACI string")),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingMember {
+    pub address: ServiceId,
+    pub role: Role,
+    pub added_by_aci: Aci,
+    pub timestamp: u64,
+}
+
+#[derive(derive_more::Debug, Clone)]
+pub struct RequestingMember {
+    pub aci: Aci,
+    #[debug(ignore)]
+    pub profile_key: ProfileKey,
+    pub timestamp: u64,
+}
+
+impl PartialEq for RequestingMember {
+    fn eq(&self, other: &Self) -> bool {
+        self.aci == other.aci
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct BannedMember {
+    pub user_id: ServiceId,
+    pub timestamp: u64,
+}
+
+impl PartialEq for BannedMember {
+    fn eq(&self, other: &Self) -> bool {
+        self.user_id == other.user_id
+    }
+}
+
+#[derive(derive_more::Debug, Clone)]
+pub struct PromotedMember {
+    pub aci: Aci,
+    pub pni: Pni,
+    #[debug(ignore)]
+    pub profile_key: ProfileKey,
+}
+
+impl PartialEq for PromotedMember {
+    fn eq(&self, other: &Self) -> bool {
+        self.aci == other.aci && self.pni == other.pni
+    }
+}
+
+#[derive(Copy, Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum AccessRequired {
+    Unknown,
+    Any,
+    Member,
+    Administrator,
+    Unsatisfiable,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccessControl {
+    pub attributes: AccessRequired,
+    pub members: AccessRequired,
+    pub add_from_invite_link: AccessRequired,
+    pub member_label: AccessRequired,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Group {
+    pub title: String,
+    pub avatar: String,
+    pub disappearing_messages_timer: Option<Timer>,
+    pub access_control: Option<AccessControl>,
+    pub version: u32,
+    pub members: Vec<Member>,
+    pub members_pending_profile_key: Vec<PendingMember>,
+    pub members_pending_admin_approval: Vec<RequestingMember>,
+    pub invite_link_password: Vec<u8>,
+    pub description_text: Option<String>,
+    pub announcements_only: bool,
+    pub members_banned: Vec<BannedMember>,
+}
+
+#[derive(Debug, Clone)]
+pub struct GroupChanges {
+    pub group_id: GroupV2Id,
+    pub editor: Aci,
+    pub version: u32,
+    pub changes: Vec<GroupChange>,
+    pub change_epoch: u32,
+}
+
+#[derive(derive_more::Debug, Clone)]
+pub enum GroupChange {
+    NewMember(Member),
+    DeleteMember(Aci),
+    ModifyMemberRole {
+        aci: Aci,
+        role: Role,
+    },
+    ModifyMemberProfileKey {
+        aci: Aci,
+        #[debug(ignore)]
+        profile_key: ProfileKey,
+    },
+    NewPendingMember(PendingMember),
+    DeletePendingMember(ServiceId),
+    PromotePendingMember {
+        address: ServiceId,
+        #[debug(ignore)]
+        profile_key: ProfileKey,
+    },
+    Title(String),
+    Avatar(String),
+    Timer(Option<Timer>),
+    AttributeAccess(AccessRequired),
+    MemberAccess(AccessRequired),
+    InviteLinkAccess(AccessRequired),
+    NewRequestingMember(RequestingMember),
+    DeleteRequestingMember(Aci),
+    PromoteRequestingMember {
+        aci: Aci,
+        role: Role,
+    },
+    InviteLinkPassword(String),
+    Description(Option<String>),
+    AnnouncementOnly(bool),
+    AddBannedMember(BannedMember),
+    DeleteBannedMember(ServiceId),
+    PromotePendingPniAciMemberProfileKey(PromotedMember),
+    MemberLabel {
+        user_id: ServiceId,
+        label_emoji: Option<String>,
+        label_string: Option<String>,
+    },
+    MemberLabelAccess(AccessRequired),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct Timer {
+    pub duration: u32,
+}
+
+// Conversion from and to protobuf definitions
+
+impl TryFrom<i32> for Role {
+    type Error = GroupDecodingError;
+
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        use crate::proto::member::Role as ProtoRole;
+        match crate::proto::member::Role::try_from(value) {
+            Ok(ProtoRole::Unknown) => Ok(Role::Unknown),
+            Ok(ProtoRole::Default) => Ok(Role::Default),
+            Ok(ProtoRole::Administrator) => Ok(Role::Administrator),
+            Err(_e) => Err(GroupDecodingError::WrongEnumValue),
+        }
+    }
+}
+
+impl From<Role> for i32 {
+    fn from(val: Role) -> Self {
+        use crate::proto::member::Role::*;
+        match val {
+            Role::Unknown => Unknown,
+            Role::Default => Default,
+            Role::Administrator => Administrator,
+        }
+        .into()
+    }
+}
+
+impl TryFrom<i32> for AccessRequired {
+    type Error = GroupDecodingError;
+
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        use crate::proto::access_control::AccessRequired as ProtoAccessRequired;
+        match crate::proto::access_control::AccessRequired::try_from(value) {
+            Ok(ProtoAccessRequired::Unknown) => Ok(AccessRequired::Unknown),
+            Ok(ProtoAccessRequired::Any) => Ok(AccessRequired::Any),
+            Ok(ProtoAccessRequired::Member) => Ok(AccessRequired::Member),
+            Ok(ProtoAccessRequired::Administrator) => {
+                Ok(AccessRequired::Administrator)
+            },
+            Ok(ProtoAccessRequired::Unsatisfiable) => {
+                Ok(AccessRequired::Unsatisfiable)
+            },
+            Err(_e) => Err(GroupDecodingError::WrongEnumValue),
+        }
+    }
+}
+
+impl From<AccessRequired> for i32 {
+    fn from(val: AccessRequired) -> Self {
+        use crate::proto::access_control::AccessRequired::*;
+        match val {
+            AccessRequired::Unknown => Unknown,
+            AccessRequired::Any => Any,
+            AccessRequired::Member => Member,
+            AccessRequired::Administrator => Administrator,
+            AccessRequired::Unsatisfiable => Unsatisfiable,
+        }
+        .into()
+    }
+}
+
+impl TryFrom<crate::proto::AccessControl> for AccessControl {
+    type Error = GroupDecodingError;
+
+    fn try_from(
+        value: crate::proto::AccessControl,
+    ) -> Result<Self, Self::Error> {
+        Ok(Self {
+            attributes: value.attributes.try_into()?,
+            members: value.members.try_into()?,
+            add_from_invite_link: value.add_from_invite_link.try_into()?,
+            member_label: value.member_label.try_into()?,
+        })
+    }
+}
