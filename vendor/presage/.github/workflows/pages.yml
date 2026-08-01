@@ -1,0 +1,30 @@
+on:
+  push:
+    branches:
+      - main
+
+name: GitHub Pages
+
+jobs:
+  pages:
+    name: Update
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install protobuf
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+      - run: cargo doc --no-deps -p presage -p libsignal-service -p libsignal-protocol -p zkgroup
+      - uses: JamesIves/github-pages-deploy-action@3.7.1
+        with:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: gh-pages
+          FOLDER: target/doc
+          CLEAN: true # Automatically remove deleted files from the deploy branch
