@@ -21,6 +21,12 @@ const PREVIEW_DEPTH: u32 = 20;
 pub struct Page {
     pub rows: Vec<Envelope>,
     pub more: bool,
+    /// The oldest row this page reached, read off the `ts` column rather than
+    /// derived from `rows`. A row that fails to decode is still a row that was
+    /// covered, and deriving this from the decoded ones left the next request
+    /// asking from in front of it -- forever, once reaching the top of the list
+    /// became the request.
+    pub covered: Option<u64>,
 }
 
 const COLUMNS: &str = "m.ts, m.server_ts, m.sender_service_id, m.sender_device_id,
@@ -58,14 +64,20 @@ impl Db {
             .await?;
 
         let more = rows.len() > requested as usize;
-        let mut rows: Vec<Envelope> = rows
-            .iter()
-            .take(requested as usize)
-            .filter_map(decode)
-            .collect();
+        let reached = &rows[..rows.len().min(requested as usize)];
+        // The query is newest first, so the oldest row of the page is its last.
+        let covered = reached
+            .last()
+            .and_then(|row| row.try_get::<i64, _>("ts").ok())
+            .map(|ts| ts as u64);
+        let mut rows: Vec<Envelope> = reached.iter().filter_map(decode).collect();
         rows.reverse();
 
-        Ok(Page { rows, more })
+        Ok(Page {
+            rows,
+            more,
+            covered,
+        })
     }
 
     /// A single stored row, so an attachment download can recover the pointer
@@ -93,7 +105,13 @@ impl Db {
     /// The newest rows of every thread that has any, in one statement. The old
     /// path walked every contact and group and loaded each thread in full,
     /// which cost O(all messages) at startup.
-    pub async fn previews(&self) -> Result<Vec<(Thread, Vec<Envelope>)>, Error> {
+    ///
+    /// `at` is the newest row's timestamp read off the `ts` column, and is not
+    /// derived from `rows`: a row that fails to decode is still a row, and a
+    /// thread whose newest rows all decode into nothing renderable still has
+    /// something in it. That distinction is the difference between a quiet
+    /// conversation and one the sidebar stops listing.
+    pub async fn recent_rows(&self) -> Result<Vec<Recent>, Error> {
         // The window runs over (thread_id, ts) alone so it is answered from the
         // covering index; bodies are then fetched only for the rows that qualify.
         let sql = format!(
@@ -115,21 +133,38 @@ impl Db {
             .fetch_all(&self.pool)
             .await?;
 
-        let mut threads: Vec<(Thread, Vec<Envelope>)> = Vec::new();
+        let mut threads: Vec<Recent> = Vec::new();
         for row in &rows {
             let Some(thread) = row_thread(row) else {
                 continue;
             };
-            let Some(envelope) = decode(row) else {
-                continue;
+            let at = row.try_get::<i64, _>("ts").unwrap_or_default() as u64;
+            let recent = match threads.last_mut() {
+                Some(last) if last.thread == thread => last,
+                _ => {
+                    threads.push(Recent {
+                        thread,
+                        at: 0,
+                        rows: Vec::new(),
+                    });
+                    threads.last_mut().expect("just pushed")
+                }
             };
-            match threads.last_mut() {
-                Some((last, envelopes)) if *last == thread => envelopes.push(envelope),
-                _ => threads.push((thread, vec![envelope])),
+            recent.at = recent.at.max(at);
+            if let Some(envelope) = decode(row) {
+                recent.rows.push(envelope);
             }
         }
         Ok(threads)
     }
+}
+
+/// A thread that has rows, and what could be read of its newest ones.
+pub struct Recent {
+    pub thread: Thread,
+    /// The newest row's timestamp, decoded or not.
+    pub at: u64,
+    pub rows: Vec<Envelope>,
 }
 
 fn keys(thread: &Thread) -> (Option<Vec<u8>>, Option<Uuid>) {
@@ -285,6 +320,32 @@ mod tests {
         highest * 1000 < oldest_seen
     }
 
+    /// What the page reached is a property of the rows it read, not of the ones
+    /// that decoded into something. Anchoring the next request on the decoded
+    /// ones stalls reading backwards the moment a row cannot be decoded.
+    #[tokio::test]
+    async fn covers_the_oldest_row_it_read() {
+        let (db, thread, _dir) = seeded(30).await;
+        let page = db.page(&thread, None, 2).await.unwrap();
+
+        // Six rows over-fetched out of thirty, so the page reaches row 25.
+        assert_eq!(page.covered, Some(25 * 1000));
+
+        let older = db.page(&thread, page.covered, 2).await.unwrap();
+        assert_eq!(older.covered, Some(19 * 1000));
+        assert_eq!(bodies(&older).last().unwrap(), "message 24");
+    }
+
+    #[tokio::test]
+    async fn an_exhausted_page_covers_nothing() {
+        let (db, thread, _dir) = seeded(3).await;
+        let page = db.page(&thread, Some(1000), 50).await.unwrap();
+
+        assert!(page.rows.is_empty());
+        assert_eq!(page.covered, None);
+        assert!(!page.more);
+    }
+
     #[tokio::test]
     async fn an_unknown_thread_has_an_empty_page() {
         let (db, _, _dir) = seeded(3).await;
@@ -296,22 +357,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn previews_return_one_thread_with_its_newest_rows() {
+    async fn recent_rows_return_one_thread_with_its_newest_rows() {
         let (db, thread, _dir) = seeded(25).await;
-        let previews = db.previews().await.unwrap();
+        let recent = db.recent_rows().await.unwrap();
 
-        assert_eq!(previews.len(), 1);
-        assert_eq!(previews[0].0, thread);
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].thread, thread);
 
         // Bounded by PREVIEW_DEPTH, newest last so `project(..).pop()` is the latest.
-        assert_eq!(previews[0].1.len(), PREVIEW_DEPTH as usize);
-        let latest = data::project(previews[0].1.clone()).pop().unwrap();
+        assert_eq!(recent[0].rows.len(), PREVIEW_DEPTH as usize);
+        let latest = data::project(recent[0].rows.clone()).pop().unwrap();
         assert_eq!(latest.text(), Some("message 25"));
     }
 
+    /// What the scan reports a thread's activity as is a property of its rows,
+    /// not of the ones that decoded -- which is what keeps a conversation listed
+    /// when nothing in it can be drawn.
     #[tokio::test]
-    async fn previews_are_empty_without_messages() {
+    async fn recent_rows_report_the_newest_row_whatever_it_is() {
+        let (db, _, _dir) = seeded(25).await;
+        let recent = db.recent_rows().await.unwrap();
+
+        assert_eq!(recent[0].at, 25 * 1000);
+    }
+
+    #[tokio::test]
+    async fn recent_rows_are_empty_without_messages() {
         let db = Db::open_in_memory().await.unwrap();
-        assert!(db.previews().await.unwrap().is_empty());
+        assert!(db.recent_rows().await.unwrap().is_empty());
     }
 }

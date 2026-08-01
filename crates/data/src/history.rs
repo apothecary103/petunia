@@ -10,6 +10,11 @@ pub struct History {
     oldest: Option<u64>,
     more: bool,
     loading: bool,
+    /// Whether a page has ever been read from the store for this thread. A live
+    /// message arriving creates the history without one, and the two must not be
+    /// confused: a thread whose only messages came off the receive queue has a
+    /// history and yet has never been read from disk.
+    paged: bool,
     /// Where the "new" divider sits. Pinned when the thread is opened rather
     /// than recomputed, so it does not jump as messages are read.
     first_unread: Option<u64>,
@@ -30,6 +35,12 @@ impl History {
 
     pub fn has_more(&self) -> bool {
         self.more
+    }
+
+    /// Whether the stored history behind this thread has ever been asked for.
+    /// False for a thread built entirely out of messages that arrived live.
+    pub fn has_page(&self) -> bool {
+        self.paged
     }
 
     pub fn oldest(&self) -> Option<u64> {
@@ -77,6 +88,7 @@ impl History {
         self.sort();
         self.more = more;
         self.loading = false;
+        self.paged = true;
         self.reached(covered);
     }
 
@@ -89,6 +101,7 @@ impl History {
         self.sort();
         self.more = more;
         self.loading = false;
+        self.paged = true;
         self.reached(covered);
     }
 
@@ -155,6 +168,31 @@ impl History {
     pub fn apply_delete(&mut self, target: &MessageId) {
         if let Some(index) = self.index_of(target) {
             project::apply_delete(&mut self.messages[index]);
+        }
+    }
+
+    /// Takes a message out of the history rather than leaving a tombstone where
+    /// it was, which is the difference between "delete for me" and a withdrawal:
+    /// nobody was told anything, so there is nothing for a line of text to say.
+    pub fn remove(&mut self, target: &MessageId) -> bool {
+        match self.index_of(target) {
+            Some(index) => {
+                self.messages.remove(index);
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn apply_poll_vote(&mut self, target: &MessageId, ballot: super::message::Ballot) {
+        if let Some(index) = self.index_of(target) {
+            project::apply_poll_vote(&mut self.messages[index], ballot);
+        }
+    }
+
+    pub fn apply_poll_terminate(&mut self, target: &MessageId) {
+        if let Some(index) = self.index_of(target) {
+            project::apply_poll_terminate(&mut self.messages[index]);
         }
     }
 
@@ -304,6 +342,21 @@ mod tests {
 
         assert_eq!(history.oldest(), Some(120));
         assert!(history.has_more());
+    }
+
+    /// A message arriving live builds a history, but not a *read* one. Telling
+    /// the two apart is what stops a conversation talked in while petunia was
+    /// closed from opening with only the handful the receive queue delivered.
+    #[test]
+    fn a_live_message_alone_is_not_a_loaded_page() {
+        let sender = Uuid::new_v4();
+        let mut history = History::default();
+
+        history.insert(message(100, sender, "live"));
+        assert!(!history.has_page());
+
+        history.merge(vec![message(50, sender, "stored")], true, Some(50));
+        assert!(history.has_page());
     }
 
     #[test]

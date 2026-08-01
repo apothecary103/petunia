@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -48,6 +48,18 @@ pub struct State {
     /// to the switcher, but resolving a name was a linear scan of it -- once per
     /// message, per mention and per reaction, every frame.
     named: HashMap<Uuid, String>,
+    /// A nickname this account chose for someone, synced through Signal's
+    /// Storage Service -- it outranks their contact-record and profile names
+    /// the way a nickname on a real phone does. Keyed by uuid rather than
+    /// carried on `Contact`, since it can exist for someone with no contact
+    /// record at all.
+    nicknames: HashMap<Uuid, String>,
+    /// The note beside a nickname, shown but never used to resolve a name.
+    pub notes: HashMap<Uuid, String>,
+    /// Who this account has blocked. A set rather than a flag on `Contact` for
+    /// the same reason a nickname is: somebody can be blocked without ever
+    /// having been in the contact list.
+    blocked: HashSet<Uuid>,
     pub connection: Connection,
     /// Who is currently typing, per thread. Kept here rather than in `History`
     /// because it is not part of the message stream.
@@ -70,6 +82,9 @@ impl State {
             avatars: HashMap::new(),
             profiles: HashMap::new(),
             named: HashMap::new(),
+            nicknames: HashMap::new(),
+            notes: HashMap::new(),
+            blocked: HashSet::new(),
             connection: Connection::default(),
             typing: HashMap::new(),
             sticker_packs: Vec::new(),
@@ -181,14 +196,45 @@ impl State {
         self.name_of(sender)
     }
 
-    /// What to call someone: the name their contact record carries, else the one
-    /// from their profile, else the front of their uuid.
+    /// What to call someone: a nickname this account chose for them outranks
+    /// everything, same as on a phone; then the name their contact record
+    /// carries, then the one from their profile, then the front of their uuid.
     pub fn name_of(&self, uuid: Uuid) -> String {
-        self.named
+        self.nicknames
             .get(&uuid)
+            .or_else(|| self.named.get(&uuid))
             .or_else(|| self.profiles.get(&uuid))
             .cloned()
             .unwrap_or_else(|| uuid.to_string()[..8].to_string())
+    }
+
+    pub fn nickname_of(&self, uuid: Uuid) -> Option<&str> {
+        self.nicknames.get(&uuid).map(String::as_str)
+    }
+
+    pub fn is_blocked(&self, uuid: Uuid) -> bool {
+        self.blocked.contains(&uuid)
+    }
+
+    pub fn set_blocked(&mut self, uuid: Uuid, blocked: bool) {
+        match blocked {
+            true => self.blocked.insert(uuid),
+            false => self.blocked.remove(&uuid),
+        };
+    }
+
+    /// Sets or clears a nickname, straight from what Storage Service already
+    /// carried or from what this account just set on it.
+    pub fn set_nickname(&mut self, uuid: Uuid, name: Option<String>, note: Option<String>) {
+        match name {
+            Some(name) => self.nicknames.insert(uuid, name),
+            None => self.nicknames.remove(&uuid),
+        };
+        match note {
+            Some(note) => self.notes.insert(uuid, note),
+            None => self.notes.remove(&uuid),
+        };
+        self.rename(uuid);
     }
 
     /// Our own name, for the sidebar's own row. Not "You": that reads as a label
@@ -217,6 +263,26 @@ impl State {
         self.index.set_name(&thread, name);
     }
 
+    /// Records one person, without disturbing anybody else.
+    ///
+    /// Somebody found by username or phone number is somebody the contact sync
+    /// has never heard of, and there is no second sync coming to carry them:
+    /// `contacts_updated` rebuilds the whole list from what it is handed, so it
+    /// is the wrong door for one arrival.
+    pub fn record_contact(&mut self, contact: Contact) {
+        if !contact.name.is_empty() {
+            self.named.insert(contact.uuid, contact.name.clone());
+        }
+        match self
+            .contacts
+            .iter_mut()
+            .find(|known| known.uuid == contact.uuid)
+        {
+            Some(known) => *known = contact,
+            None => self.contacts.push(contact),
+        }
+    }
+
     pub fn contacts_updated(&mut self, contacts: Vec<Contact>, groups: Vec<Group>) {
         self.index.rebuild(&contacts, &groups, self.aci);
         self.named = contacts
@@ -234,16 +300,34 @@ impl State {
     }
 
     pub fn record(&mut self, thread: &Thread, message: &Message) {
+        self.record_preview(thread, crate::index::Preview::of(message));
+    }
+
+    /// The same, from a line read back off disk rather than from a message in
+    /// hand. Which is how the sidebar survives a launch: what a row shows is
+    /// written when the message arrives and read at startup, rather than being
+    /// rebuilt from a scan that can come back empty.
+    pub fn record_preview(&mut self, thread: &Thread, preview: crate::index::Preview) {
         // Resolved up front because `touch` borrows the index mutably.
-        let name = match thread {
+        let name = self.thread_name(thread);
+        self.index.touch(thread, preview, || name);
+    }
+
+    /// That a thread has something in it, with no line to show for it.
+    pub fn record_activity(&mut self, thread: &Thread, at: u64) {
+        let name = self.thread_name(thread);
+        self.index.touch_activity(thread, at, || name);
+    }
+
+    fn thread_name(&self, thread: &Thread) -> String {
+        match thread {
             Thread::Contact(contact) if contact.uuid() == self.aci => "Note to Self".to_string(),
             Thread::Contact(contact) => self.name_of(contact.uuid()),
             Thread::Group(_) => self
                 .group(thread)
                 .map(|group| group.title.clone())
                 .unwrap_or_else(|| "Group".into()),
-        };
-        self.index.touch(thread, message, || name);
+        }
     }
 }
 

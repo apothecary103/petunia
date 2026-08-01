@@ -45,6 +45,42 @@ impl Flags {
     }
 }
 
+/// What the sidebar draws for the last thing said in a thread: the line, not the
+/// message. The sidebar is the only reader and it wants one truncated line, so
+/// keeping the message meant summarising it -- a string built and a body copied
+/// -- once per row per frame, and keeping the whole of a long one in memory per
+/// thread to show forty characters of it.
+#[derive(Debug, Clone)]
+pub struct Preview {
+    pub line: String,
+    at: u64,
+}
+
+impl Preview {
+    pub fn of(message: &Message) -> Self {
+        let mut line = message.summary();
+        // Far more than a row can show, so nothing worth reading is lost, and
+        // short enough that a pasted file is not kept a second time.
+        if let Some((end, _)) = line.char_indices().nth(160) {
+            line.truncate(end);
+        }
+        Self {
+            line,
+            at: message.timestamp(),
+        }
+    }
+
+    /// One read back from disk, which is the only other way one is made. The
+    /// line was clipped when it was written, so it is taken as it stands.
+    pub fn new(line: String, at: u64) -> Self {
+        Self { line, at }
+    }
+
+    pub fn at(&self) -> u64 {
+        self.at
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Entry {
     pub thread: Thread,
@@ -53,7 +89,7 @@ pub struct Entry {
     /// comparator runs on every reorder and every reorder runs on every message
     /// that arrives -- and `to_lowercase` allocates.
     sorted: String,
-    pub preview: Option<Message>,
+    pub preview: Option<Preview>,
     pub unread: u32,
     pub mentions: u32,
     pub last_activity: u64,
@@ -90,9 +126,14 @@ impl Entry {
     /// fills the sidebar with uuid fragments. They stay reachable through the
     /// quick switcher, which is where starting a new conversation belongs.
     pub fn started(&self) -> bool {
-        // Unread as well as preview: a thread that is owed attention must be
-        // listed even if its preview never made it here.
-        self.preview.is_some() || self.unread > 0 || self.note_to_self
+        // Four conditions rather than one, because each is a way of knowing
+        // something happened here and any of them can be the only one left. A
+        // preview is a line somebody could read; `last_activity` is the bare
+        // fact that a message exists, which survives a line that could not be
+        // built -- a thread whose newest rows are all reactions and tombstones
+        // has activity and no preview, and used to vanish from the sidebar with
+        // its whole history still on disk.
+        self.preview.is_some() || self.last_activity > 0 || self.unread > 0 || self.note_to_self
     }
 }
 
@@ -290,17 +331,17 @@ impl Index {
 
     /// Records activity for a thread the contact sync has not produced yet, so
     /// a message from an unknown sender still appears in the sidebar.
-    pub fn touch(&mut self, thread: &Thread, message: &Message, name: impl FnOnce() -> String) {
+    pub fn touch(&mut self, thread: &Thread, preview: Preview, name: impl FnOnce() -> String) {
         let newer = self
             .get(thread)
             .and_then(|entry| entry.preview.as_ref())
-            .is_none_or(|current| current.timestamp() <= message.timestamp());
+            .is_none_or(|current| current.at <= preview.at);
 
         match self.entries.iter_mut().find(|e| e.thread == *thread) {
             Some(entry) => {
                 if newer {
-                    entry.last_activity = message.timestamp();
-                    entry.preview = Some(message.clone());
+                    entry.last_activity = preview.at;
+                    entry.preview = Some(preview);
                 }
             }
             None => {
@@ -309,8 +350,33 @@ impl Index {
                     thread: thread.clone(),
                     sorted: name.to_lowercase(),
                     name,
-                    last_activity: message.timestamp(),
-                    preview: Some(message.clone()),
+                    last_activity: preview.at,
+                    preview: Some(preview),
+                    unread: 0,
+                    mentions: 0,
+                    flags: Flags::default(),
+                    note_to_self: false,
+                });
+            }
+        }
+        self.reorder();
+    }
+
+    /// That a thread has something in it, without a line to show for it -- a
+    /// page whose newest rows all project to nothing renderable. Enough to keep
+    /// it listed, which is the whole difference between a quiet row and a person
+    /// who has disappeared.
+    pub fn touch_activity(&mut self, thread: &Thread, at: u64, name: impl FnOnce() -> String) {
+        match self.entries.iter_mut().find(|e| e.thread == *thread) {
+            Some(entry) => entry.last_activity = entry.last_activity.max(at),
+            None => {
+                let name = name();
+                self.entries.push(Entry {
+                    thread: thread.clone(),
+                    sorted: name.to_lowercase(),
+                    name,
+                    last_activity: at,
+                    preview: None,
                     unread: 0,
                     mentions: 0,
                     flags: Flags::default(),
@@ -461,7 +527,7 @@ mod tests {
 
         // Everyone but "Silent", who stays a contact with nothing in it.
         for (at, who) in people.iter().enumerate().take(5) {
-            index.touch(&thread(who), &message(100 + at as u64, who.uuid, "hi"), unknown);
+            index.touch(&thread(who), Preview::of(&message(100 + at as u64, who.uuid, "hi")), unknown);
         }
         for (who, flags) in [
             (&people[0], Flags { pinned: true, ..Flags::default() }),
@@ -504,13 +570,72 @@ mod tests {
         let alice = contact("Alice");
         let (mut index, aci) = index(std::slice::from_ref(&alice), &[]);
 
-        index.touch(&thread, &message(100, stranger, "hello?"), unknown);
+        index.touch(&thread, Preview::of(&message(100, stranger, "hello?")), unknown);
         index.mark_unread(&thread, false);
 
         index.rebuild(std::slice::from_ref(&alice), &[], aci);
 
         assert!(listed(&index).contains(&thread));
         assert_eq!(index.get(&thread).unwrap().unread, 1);
+    }
+
+    /// The one that used to lose people. A thread whose newest stored rows are
+    /// all reactions, edits and tombstones projects to no message at all, so
+    /// nothing could build a line for it -- and a conversation with no line was
+    /// not listed, with its whole history still on disk and no way back to it.
+    #[test]
+    fn a_thread_with_activity_and_no_line_is_still_listed() {
+        let alice = contact("Alice");
+        let thread = Thread::Contact(ContactId::Aci(alice.uuid));
+        let (mut index, _) = index(std::slice::from_ref(&alice), &[]);
+        assert!(!listed(&index).contains(&thread));
+
+        index.touch_activity(&thread, 100, unknown);
+
+        assert!(listed(&index).contains(&thread));
+        assert!(index.get(&thread).unwrap().preview.is_none());
+    }
+
+    /// Activity is the weaker source, so it must not push aside a line that is
+    /// already there -- the sidebar would go blank for that row.
+    #[test]
+    fn activity_does_not_take_away_a_line_already_drawn() {
+        let alice = contact("Alice");
+        let thread = Thread::Contact(ContactId::Aci(alice.uuid));
+        let (mut index, _) = index(std::slice::from_ref(&alice), &[]);
+        index.touch(&thread, Preview::of(&message(100, alice.uuid, "hi")), unknown);
+
+        index.touch_activity(&thread, 200, unknown);
+
+        assert_eq!(index.get(&thread).unwrap().preview.as_ref().unwrap().line, "hi");
+        assert_eq!(index.get(&thread).unwrap().last_activity, 200);
+    }
+
+    /// Somebody the contact sync has never mentioned, whose only trace is a row
+    /// that draws nothing. They still have to be reachable.
+    #[test]
+    fn a_stranger_known_only_by_activity_makes_an_entry() {
+        let stranger = Uuid::new_v4();
+        let thread = Thread::Contact(ContactId::Aci(stranger));
+        let (mut index, _) = index(&[], &[]);
+
+        index.touch_activity(&thread, 100, unknown);
+
+        assert!(listed(&index).contains(&thread));
+    }
+
+    /// Forgetting a conversation clears the activity along with the line, or it
+    /// would come straight back into the list with nothing in it.
+    #[test]
+    fn forgetting_a_conversation_clears_its_activity_too() {
+        let alice = contact("Alice");
+        let thread = Thread::Contact(ContactId::Aci(alice.uuid));
+        let (mut index, _) = index(std::slice::from_ref(&alice), &[]);
+        index.touch(&thread, Preview::of(&message(100, alice.uuid, "hi")), unknown);
+
+        index.forget(&thread);
+
+        assert!(!listed(&index).contains(&thread));
     }
 
     /// The contact list is the better source once it catches up, so a synced
@@ -521,7 +646,7 @@ mod tests {
         let thread = Thread::Contact(ContactId::Aci(late.uuid));
         let (mut index, aci) = index(&[], &[]);
 
-        index.touch(&thread, &message(100, late.uuid, "hello?"), unknown);
+        index.touch(&thread, Preview::of(&message(100, late.uuid, "hello?")), unknown);
         index.rebuild(std::slice::from_ref(&late), &[], aci);
 
         assert_eq!(index.entries().iter().filter(|e| e.thread == thread).count(), 1);
@@ -580,7 +705,7 @@ mod tests {
 
         assert_eq!(index.conversations().count(), 1, "note to self only");
 
-        index.touch(&thread, &message(100, alice.uuid, "hi"), unknown);
+        index.touch(&thread, Preview::of(&message(100, alice.uuid, "hi")), unknown);
 
         let listed: Vec<_> = index.conversations().map(|e| e.name.as_str()).collect();
         assert_eq!(listed, ["Alice", "Note to Self"]);
@@ -615,7 +740,7 @@ mod tests {
         let alice = contact("Alice");
         let thread = Thread::Contact(ContactId::Aci(alice.uuid));
         let (mut index, aci) = index(&[alice.clone(), contact("Bob")], &[]);
-        index.touch(&thread, &message(100, alice.uuid, "hi"), unknown);
+        index.touch(&thread, Preview::of(&message(100, alice.uuid, "hi")), unknown);
 
         let walked: Vec<_> = index.conversations().map(|e| e.thread.clone()).collect();
 
@@ -632,7 +757,7 @@ mod tests {
 
         index.touch(
             &Thread::Contact(ContactId::Aci(bob.uuid)),
-            &message(500, bob.uuid, "later"),
+            Preview::of(&message(500, bob.uuid, "later")),
             unknown,
         );
 
@@ -655,7 +780,7 @@ mod tests {
         let alice = contact("Alice");
         let thread = Thread::Contact(ContactId::Aci(alice.uuid));
         let (mut index, _) = index(std::slice::from_ref(&alice), &[]);
-        index.touch(&thread, &message(100, alice.uuid, "hi"), unknown);
+        index.touch(&thread, Preview::of(&message(100, alice.uuid, "hi")), unknown);
         index.set_flags(
             &thread,
             Flags {
@@ -687,7 +812,7 @@ mod tests {
         let alice = contact("Alice");
         let thread = Thread::Contact(ContactId::Aci(alice.uuid));
         let (mut index, _) = index(std::slice::from_ref(&alice), &[]);
-        index.touch(&thread, &message(100, alice.uuid, "hi"), unknown);
+        index.touch(&thread, Preview::of(&message(100, alice.uuid, "hi")), unknown);
         index.set_flags(
             &thread,
             Flags {
@@ -715,8 +840,8 @@ mod tests {
             Thread::Contact(ContactId::Aci(alice.uuid)),
             Thread::Contact(ContactId::Aci(bob.uuid)),
         );
-        index.touch(&a, &message(100, alice.uuid, "hi"), unknown);
-        index.touch(&b, &message(200, bob.uuid, "hello"), unknown);
+        index.touch(&a, Preview::of(&message(100, alice.uuid, "hi")), unknown);
+        index.touch(&b, Preview::of(&message(200, bob.uuid, "hello")), unknown);
 
         index.forget(&a);
 
@@ -731,7 +856,7 @@ mod tests {
     fn forgetting_note_to_self_leaves_it_listed() {
         let (mut index, aci) = index(&[], &[]);
         let own = Thread::Contact(ContactId::Aci(aci));
-        index.touch(&own, &message(100, aci, "a note"), unknown);
+        index.touch(&own, Preview::of(&message(100, aci, "a note")), unknown);
 
         index.forget(&own);
 
@@ -745,11 +870,11 @@ mod tests {
         let thread = Thread::Contact(ContactId::Aci(alice.uuid));
         let (mut index, _) = index(std::slice::from_ref(&alice), &[]);
 
-        index.touch(&thread, &message(200, alice.uuid, "newer"), unknown);
-        index.touch(&thread, &message(100, alice.uuid, "older"), unknown);
+        index.touch(&thread, Preview::of(&message(200, alice.uuid, "newer")), unknown);
+        index.touch(&thread, Preview::of(&message(100, alice.uuid, "older")), unknown);
 
         let entry = index.get(&thread).unwrap();
-        assert_eq!(entry.preview.as_ref().unwrap().text(), Some("newer"));
+        assert_eq!(entry.preview.as_ref().unwrap().line, "newer");
         assert_eq!(entry.last_activity, 200);
     }
 
@@ -759,7 +884,7 @@ mod tests {
         let stranger = Uuid::new_v4();
         let thread = Thread::Contact(ContactId::Aci(stranger));
 
-        index.touch(&thread, &message(100, stranger, "hello"), unknown);
+        index.touch(&thread, Preview::of(&message(100, stranger, "hello")), unknown);
 
         assert_eq!(index.get(&thread).unwrap().name, "Unknown");
     }
@@ -770,13 +895,13 @@ mod tests {
         let thread = Thread::Contact(ContactId::Aci(alice.uuid));
         let (mut index, aci) = index(std::slice::from_ref(&alice), &[]);
 
-        index.touch(&thread, &message(100, alice.uuid, "hi"), unknown);
+        index.touch(&thread, Preview::of(&message(100, alice.uuid, "hi")), unknown);
         index.mark_unread(&thread, false);
         index.rebuild(std::slice::from_ref(&alice), &[], aci);
 
         let entry = index.get(&thread).unwrap();
         assert_eq!(entry.unread, 1);
-        assert_eq!(entry.preview.as_ref().unwrap().text(), Some("hi"));
+        assert_eq!(entry.preview.as_ref().unwrap().line, "hi");
     }
 
     #[test]
@@ -862,7 +987,7 @@ mod tests {
         for who in [&alice, &bob] {
             index.touch(
                 &Thread::Contact(ContactId::Aci(who.uuid)),
-                &message(100, who.uuid, "hi"),
+                Preview::of(&message(100, who.uuid, "hi")),
                 unknown,
             );
         }

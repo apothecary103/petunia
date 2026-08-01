@@ -7,6 +7,7 @@ use tokio::io::AsyncReadExt;
 use super::Error;
 use petunia_data::Thread;
 use petunia_data::attachment::Id;
+use petunia_data::hex;
 
 /// Enough bytes for every image magic number `guess_format` recognises.
 const MAGIC: usize = 32;
@@ -280,13 +281,6 @@ fn avatar_key(thread: &Thread) -> String {
     }
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().fold(String::new(), |mut out, byte| {
-        use std::fmt::Write;
-        let _ = write!(out, "{byte:02x}");
-        out
-    })
-}
 
 /// What the bytes say they are, falling back to what the sender said. Signal
 /// declares sticker packs as `image/webp` whatever the individual stickers
