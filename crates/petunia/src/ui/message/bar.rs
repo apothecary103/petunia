@@ -45,8 +45,9 @@ pub fn with_actions(
         .child(body)
         .child(
             div()
+                .id(SharedString::from(format!("bar-{}", message.timestamp())))
                 .absolute()
-                .top(px(-14.0))
+                .top(px(-OVERHANG))
                 .right_0()
                 .invisible()
                 // Whatever else it is doing, the bar stays up while it is saying
@@ -54,9 +55,20 @@ pub fn with_actions(
                 // has already moved on is an answer to nobody.
                 .when(copied, |this| this.visible())
                 .group_hover(group, |this| this.visible())
+                // And the bar keeps itself up. A group's hover is its own
+                // rectangle's, and the bar hangs above the message by half its
+                // height -- so reaching for it took the pointer out of the
+                // message, which hid the thing being reached for. The top half
+                // of every control in it was unusable, and the bottom half was
+                // what "you have to be very precise" meant.
+                .hover(|this| this.visible())
                 .child(bar(message, own, copied, theme, act)),
         )
 }
+
+/// How far the bar hangs over the top of the message. Enough to clear the first
+/// line of text, not so much that it collides with the message above.
+const OVERHANG: f32 = 16.0;
 
 fn bar(message: &Message, own: bool, copied: bool, theme: &Theme, act: &Dispatch) -> Div {
     let id = message.id;
@@ -66,11 +78,15 @@ fn bar(message: &Message, own: bool, copied: bool, theme: &Theme, act: &Dispatch
         .flex()
         .items_center()
         .gap_0p5()
-        .p_0p5()
+        .p_1()
         .rounded(px(kit::RADIUS))
         .bg(theme.elevated)
         .border_1()
-        .border_color(theme.border);
+        .border_color(theme.border)
+        // It floats over the conversation, so it is lit like the other things
+        // that do. Without it the bar reads as a strip pasted into the message
+        // rather than as something in front of it.
+        .shadow_md();
 
     for emoji in QUICK {
         bar = bar.child(emoji_button(emoji, id, theme, act));
@@ -153,7 +169,7 @@ fn emoji_button(
     let act = act.clone();
 
     square(format!("react-{emoji}-{}", id.timestamp), theme)
-        .text_size(px(14.0))
+        .text_size(px(EMOJI))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             act(Act::React(id, emoji.to_string()), window, cx)
         })
@@ -190,15 +206,25 @@ fn marked(
         .child(kit::icon(icon, 14.0, tint))
 }
 
+/// How large one control in the bar is, and how large the emoji inside one is.
+///
+/// Twenty-four was the smallest square that fitted six reactions and five verbs
+/// over a message, and it is under the twenty-eight the Human Interface
+/// Guidelines give the smallest toolbar control -- so every one of them had to
+/// be aimed at. The bar is free to be wider than it was; a mark you have to
+/// aim at is a mark you press twice.
+const SQUARE: f32 = 28.0;
+const EMOJI: f32 = 17.0;
+
 fn square(id: impl Into<SharedString>, theme: &Theme) -> gpui::Stateful<Div> {
     div()
         .id(id.into())
-        .size(px(24.0))
+        .size(px(SQUARE))
         .flex()
         .flex_none()
         .items_center()
         .justify_center()
-        .rounded(px(5.0))
+        .rounded(px(6.0))
         .cursor_pointer()
         .hover(|this| this.bg(theme.hover))
 }
