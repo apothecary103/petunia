@@ -23,7 +23,7 @@ pub fn install(store: Entity<Store>, cx: &mut App) {
     let fern = uuid("22222222-2222-2222-2222-222222222222");
     let stark = uuid("33333333-3333-3333-3333-333333333333");
 
-    let avatars_dir = PathBuf::from("/tmp/frieren_pfps");
+    let avatars_dir = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/demo"));
 
     store.update(cx, |store, cx| {
         store.apply(
@@ -61,7 +61,7 @@ pub fn install(store: Entity<Store>, cx: &mut App) {
             store.apply(
                 Event::Avatar {
                     thread,
-                    path: avatars_dir.join(format!("{name}_face.png")),
+                    path: avatars_dir.join(format!("{name}.png")),
                 },
                 cx,
             );

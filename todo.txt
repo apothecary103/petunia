@@ -1,0 +1,13 @@
+  fix: seeking in audio files
+  feat: playback speed controls in audio files
+  fix: search bar resizing when typing
+  fix: message options toolbar with emojis should be more polished and you shouldn't need to be so precise to use it
+  feat: trackpad gesture support in image viewer
+  fix: window resizing when zooming in/out in the image viewer
+  fix: latex rendering being pretty bad and not even rendering fractions
+  feat: notifications support
+  feat: instead of just always showing the link under the username it should have an option near the username to copy the url or create qr code
+  feat: add the ability to see how many messages you have sent in a specific chat, throughout the app, and how many you have received as well per chat and globally in the details page if you enable the option in the settings
+  feat: add the ability to send high quality voice messages through the app
+  feat: add sound feedback for sent/received messages
+  feat: add the ability to enable disappearing messages through the app, and add and improve the general support for them
