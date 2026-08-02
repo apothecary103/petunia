@@ -652,9 +652,9 @@ impl Render for Composer {
             // and a permanent button for it sat beside the file picker as though
             // the two were equally often wanted; folded into a menu, the card
             // keeps a control per *kind* of thing instead of one per thing.
-            .child(kit::icon_button(
+            .child(kit::glyph_button(
                 "more",
-                IconName::Plus,
+                "icons/plus.svg",
                 &palette,
                 cx.listener(|_, event: &gpui::MouseDownEvent, _, cx| {
                     cx.emit(RequestMore(event.position))
@@ -1094,10 +1094,11 @@ fn send(
         .rounded_full()
         .cursor_pointer()
         .bg(palette.accent)
-        .text_size(px(13.0))
-        .text_color(palette.on_accent)
         .on_mouse_down(MouseButton::Left, on_click)
-        .child("↑")
+        // A glyph rather than the arrow character: an arrow typed as text is set
+        // in whatever the interface font makes of it, at whatever weight, and it
+        // was the one mark in the window not drawn like the others.
+        .child(kit::glyph("icons/send.svg", 16.0, palette.on_accent))
 }
 
 #[cfg(test)]
