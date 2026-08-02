@@ -55,6 +55,29 @@ pub struct Store {
     /// pickers it is: an account with no packs, or an account whose packs did
     /// not download.
     unreadable_packs: usize,
+    /// How much has been said, per conversation, once it has been counted.
+    /// Empty until something asks: it is a full pass over the store, and it is
+    /// behind a preference that is off by default.
+    pub counts: std::collections::HashMap<Thread, petunia_signal::db::messages::Tally>,
+    /// Whether the count is out for an answer. A panel rebuilt every frame asks
+    /// once rather than once a frame.
+    counting: bool,
+}
+
+/// Everything a message being sent carries. One value rather than five
+/// positional arguments, for the reason the worker's own `Composed` is one: a
+/// caller passing a body and a caption and two booleans by position is a caller
+/// who can swap two of them and be told nothing.
+pub struct Composing {
+    pub body: String,
+    /// Signal carries formatting as offsets over the body, not as markup.
+    pub ranges: Vec<Range>,
+    pub attachments: Vec<PathBuf>,
+    /// Whether this is answering a message or replacing one.
+    pub intent: Option<Intent>,
+    /// Whether the attachments are a recording rather than files somebody
+    /// picked. Only the composer knows, and only it can say.
+    pub voice: bool,
 }
 
 /// What is known about a pack that has been asked about but not installed.
@@ -114,6 +137,9 @@ pub enum StoreEvent {
         notice: crate::notify::Notice,
         on_screen: bool,
     },
+    /// A short tone. Raised rather than played, because the audio device
+    /// belongs to the window and the model has never heard of it.
+    Sound(petunia_media::audio::Chime),
 }
 
 impl EventEmitter<StoreEvent> for Store {}
@@ -138,6 +164,8 @@ impl Store {
             favourites: crate::favourites::Favourites::load(),
             previews: std::collections::HashMap::new(),
             unreadable_packs: 0,
+            counts: std::collections::HashMap::new(),
+            counting: false,
         }
     }
 
@@ -210,6 +238,10 @@ impl Store {
         // Looking at a conversation is what reading it means, so the receipts it
         // owes go out now rather than waiting to be asked for.
         self.mark_read(thread.clone());
+        // And a message that has been read is a message that has started
+        // disappearing, which is Signal's own rule and the reason nothing
+        // vanishes out of a conversation nobody has opened.
+        self.start_expiry(&thread);
 
         self.active = Some(thread);
         // Opening a conversation is not a claim about whose profile you wanted.
@@ -241,6 +273,54 @@ impl Store {
         }
         self.send(Command::SetFlags { thread, flags });
         cx.notify();
+    }
+
+    /// Turns disappearing messages on or off for a conversation. Everybody in
+    /// it is told, because the timer belongs to the conversation and not to
+    /// this device — which is also why there is no local echo here: the update
+    /// comes back as a line in the thread like any other message.
+    pub fn set_expire_timer(&mut self, thread: Thread, seconds: u32, cx: &mut Context<Self>) {
+        self.send(Command::SetExpireTimer {
+            thread,
+            seconds,
+            timestamp: now(),
+        });
+        cx.notify();
+    }
+
+    /// Starts the clock on everything in this conversation that carries one and
+    /// has not started already.
+    ///
+    /// Called when a conversation is read, which is Signal's own rule: a
+    /// message begins disappearing when somebody has seen it, not when it
+    /// lands. The worker ignores a message it has already started, so calling
+    /// this every time the thread is opened does not keep granting it another
+    /// hour.
+    fn start_expiry(&mut self, thread: &Thread) {
+        let Some(state) = self.state.as_ref() else {
+            return;
+        };
+        let Some(history) = state.history(thread) else {
+            return;
+        };
+
+        let messages: Vec<_> = history
+            .messages()
+            .iter()
+            .filter_map(|message| {
+                message
+                    .expires_in
+                    .filter(|seconds| *seconds > 0)
+                    .map(|seconds| (message.id, seconds))
+            })
+            .collect();
+
+        if !messages.is_empty() {
+            self.send(Command::StartExpiry {
+                thread: thread.clone(),
+                messages,
+            });
+        }
     }
 
     pub fn flags(&self, thread: &Thread) -> petunia_data::index::Flags {
@@ -332,15 +412,15 @@ impl Store {
     /// Sends what the composer built, and puts it on screen before the network
     /// has heard of it. The echo carries `Sending`, which the worker replaces
     /// with what actually happened.
-    pub fn compose(
-        &mut self,
-        thread: Thread,
-        body: String,
-        ranges: Vec<Range>,
-        attachments: Vec<PathBuf>,
-        intent: Option<Intent>,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn compose(&mut self, thread: Thread, composed: Composing, cx: &mut Context<Self>) {
+        let Composing {
+            body,
+            ranges,
+            attachments,
+            intent,
+            voice,
+        } = composed;
+
         let Some(aci) = self.state.as_ref().map(|state| state.aci) else {
             return;
         };
@@ -429,12 +509,19 @@ impl Store {
                 paths: attachments,
                 quote,
                 timestamp,
+                voice,
             }
         });
 
         if let Some(state) = self.state.as_mut() {
             state.record(&thread, &echo);
             state.history_mut(&thread).insert(echo);
+        }
+        // On the press rather than on the acknowledgement. What the sound
+        // answers is "did that go", and an answer that waits for the server is
+        // an answer that arrives after the next thing has been typed.
+        if self.config.notifications.sounds {
+            cx.emit(StoreEvent::Sound(petunia_media::audio::Chime::Sent));
         }
         cx.notify();
     }
@@ -472,7 +559,17 @@ impl Store {
             return;
         }
 
-        self.compose(thread, body, ranges, attachments, None, cx);
+        self.compose(
+            thread,
+            Composing {
+                body,
+                ranges,
+                attachments,
+                intent: None,
+                voice: false,
+            },
+            cx,
+        );
     }
 
     /// Sends a sticker. It goes on its own rather than alongside whatever is
@@ -866,9 +963,36 @@ impl Store {
             Event::StickerPackPreview { pack_id, pack } => {
                 self.previews.insert(pack_id, Some(pack));
             }
+            Event::Counts(counts) => {
+                self.counts = counts;
+                self.counting = false;
+            }
             event => self.apply_to_state(event, cx),
         }
         cx.notify();
+    }
+
+    /// Asks for the tally. One request at a time: a panel is rebuilt every
+    /// frame, and a full pass over the store per frame is a full pass over the
+    /// store per frame.
+    pub fn count_messages(&mut self) {
+        if self.counting {
+            return;
+        }
+        self.counting = true;
+        self.send(Command::CountMessages);
+    }
+
+    /// Everything said on this account, whichever conversation it was in.
+    pub fn total_count(&self) -> petunia_signal::db::messages::Tally {
+        self.counts
+            .values()
+            .fold(Default::default(), |total, tally| {
+                petunia_signal::db::messages::Tally {
+                    sent: total.sent + tally.sent,
+                    received: total.received + tally.received,
+                }
+            })
     }
 
     fn apply_to_state(&mut self, event: Event, cx: &mut Context<Self>) {
@@ -907,6 +1031,7 @@ impl Store {
             Event::Forgotten { thread, target } => {
                 state.history_mut(&thread).remove(&target);
             }
+            Event::ExpireTimers(timers) => state.set_expire_timers(timers),
             Event::Avatar { thread, path } => {
                 state.avatars.insert(thread, path);
             }
@@ -990,6 +1115,7 @@ impl Store {
             | Event::Linked { .. }
             | Event::LoggedOut
             | Event::StickerPackPreview { .. }
+            | Event::Counts(_)
             | Event::Username(_) => {}
         }
     }
@@ -1069,6 +1195,10 @@ impl Store {
             false,
             now(),
         );
+        // A sound whether or not the conversation is on screen: it is the
+        // answer to "did something come in", which is a question you have with
+        // the thread in front of you as much as without it.
+        let audible = crate::notify::audible(&settings, state, &thread, &message, now());
 
         let unread = message.sender() != state.aci && !on_screen;
         if unread {
@@ -1077,14 +1207,33 @@ impl Store {
         }
         let sender = message.sender();
         let timestamp = message.timestamp();
+        // Arriving in the conversation being read is arriving read, which for a
+        // message that carries a timer is when its clock starts. Without this
+        // one landing in the open thread would sit there until the reader left
+        // and came back, which is the one moment `activate` runs again.
+        let started = (!unread && sender != state.aci)
+            .then(|| message.expires_in.filter(|seconds| *seconds > 0))
+            .flatten()
+            .map(|seconds| (message.id, seconds));
+        let ours = sender == state.aci;
         state.history_mut(&thread).insert(message);
+
+        if let Some(started) = started {
+            self.send(Command::StartExpiry {
+                thread: thread.clone(),
+                messages: vec![started],
+            });
+        }
 
         if let Some(notice) = notice {
             cx.emit(StoreEvent::Notify { notice, on_screen });
         }
+        if audible {
+            cx.emit(StoreEvent::Sound(petunia_media::audio::Chime::Received));
+        }
 
         // Arriving in the conversation somebody is looking at is arriving read.
-        if !unread && sender != state.aci {
+        if !unread && !ours {
             self.send(Command::MarkRead {
                 thread,
                 messages: vec![(sender, timestamp)],
@@ -1106,6 +1255,6 @@ impl Store {
 
 /// Signal identifies a message by when it was sent, so this is an identity as
 /// much as a clock reading.
-fn now() -> u64 {
+pub fn now() -> u64 {
     chrono::Utc::now().timestamp_millis() as u64
 }

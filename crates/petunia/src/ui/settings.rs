@@ -7,7 +7,9 @@
 //! settings.
 
 use gpui::prelude::*;
-use gpui::{App, Context, Entity, MouseButton, MouseDownEvent, SharedString, Window, div, px};
+use gpui::{
+    AnyElement, App, Context, Entity, MouseButton, MouseDownEvent, SharedString, Window, div, px,
+};
 
 use super::kit;
 use petunia_config::messages::{Density, Layout, Reply, Timestamps};
@@ -106,6 +108,11 @@ pub struct Settings {
     /// Reported rather than swallowed: a settings window that silently fails to
     /// save is worse than one that will not open.
     failed: Option<String>,
+    /// Whether the username's QR code is unfolded, and whether the link was
+    /// just copied. Both are how the pane looks rather than what it holds, so
+    /// neither goes anywhere near the draft.
+    showing_code: bool,
+    copied: bool,
     focus: gpui::FocusHandle,
 }
 
@@ -131,6 +138,8 @@ impl Settings {
             draft,
             open: None,
             failed: None,
+            showing_code: false,
+            copied: false,
             focus: cx.focus_handle(),
         }
     }
@@ -416,6 +425,141 @@ impl Settings {
             ))
     }
 
+    /// The username, and the two things anybody ever does with the link beside
+    /// it.
+    ///
+    /// The link used to be printed under the name and nothing else: forty
+    /// characters of base64 in the middle of a settings pane, which is the one
+    /// string here nobody reads and the one string here everybody needs to
+    /// *send*. So it is a control rather than a line — copy it, or show the
+    /// code somebody else's phone can point a camera at, which is how Signal
+    /// itself hands a username over. The code is folded away until it is asked
+    /// for, because it is two hundred pixels tall and the account pane is not
+    /// mostly about being scanned.
+    fn username_row(
+        &self,
+        name: String,
+        link: String,
+        palette: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        // A username read out of Storage Service may have no link beside it:
+        // the record carries the two separately, and a control that copies an
+        // empty string is a control that lies.
+        let sharable = !link.is_empty();
+        let copied = self.copied;
+        let showing = self.showing_code;
+        let code = link.clone();
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_4()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(palette.typography.ui_size))
+                            .text_color(palette.text)
+                            .child(name),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_none()
+                            .gap_1p5()
+                            .when(sharable, |this| {
+                                this.child(kit::button(
+                                    "copy-username-link",
+                                    if copied { "Copied" } else { "Copy link" },
+                                    kit::Intent::Quiet,
+                                    palette,
+                                    cx.listener(move |this: &mut Self, _, _, cx| {
+                                        this.copy_link(cx)
+                                    }),
+                                ))
+                                .child(kit::button(
+                                    "show-username-code",
+                                    if showing { "Hide code" } else { "QR code" },
+                                    kit::Intent::Quiet,
+                                    palette,
+                                    cx.listener(|this: &mut Self, _, _, cx| {
+                                        this.showing_code = !this.showing_code;
+                                        cx.notify();
+                                    }),
+                                ))
+                            })
+                            .child(kit::button(
+                                "change-username",
+                                "Change",
+                                kit::Intent::Quiet,
+                                palette,
+                                cx.listener(|_, _, _, cx| cx.emit(RequestUsername)),
+                            ))
+                            .child(kit::button(
+                                "remove-username",
+                                "Remove",
+                                kit::Intent::Quiet,
+                                palette,
+                                cx.listener(|this: &mut Self, _, _, cx| {
+                                    this.store.update(cx, |store, _| store.delete_username());
+                                }),
+                            )),
+                    ),
+            )
+            .when(sharable && showing, |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap_2()
+                        .child(kit::qr(&code, 4.0))
+                        // The link under the code rather than instead of it:
+                        // what is being shared is a URL, and somebody reading
+                        // it aloud is somebody the camera has failed.
+                        .child(
+                            div()
+                                .max_w_full()
+                                .truncate()
+                                .text_size(px(palette.typography.ui_size - 2.0))
+                                .text_color(palette.text_muted)
+                                .child(code),
+                        ),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// Copies the link and says so for a moment. A clipboard write is
+    /// invisible, and a button that goes quiet is a button pressed twice.
+    fn copy_link(&mut self, cx: &mut Context<Self>) {
+        let Some((_, link)) = self.store.read(cx).username.clone() else {
+            return;
+        };
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(link));
+        self.copied = true;
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(1_400))
+                .await;
+            this.update(cx, |this, cx| {
+                this.copied = false;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn account(&self, palette: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let username = self.store.read(cx).username.clone();
         let phone_number = self.store.read(cx).phone_number.clone();
@@ -451,57 +595,7 @@ impl Settings {
                 "Username",
                 palette,
                 vec![match username {
-                    Some((name, link)) => div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap_4()
-                        .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .min_w_0()
-                            .gap_0p5()
-                            .child(
-                                div()
-                                    .text_size(px(palette.typography.ui_size))
-                                    .text_color(palette.text)
-                                    .child(name),
-                            )
-                            // A username read out of Storage Service may have no
-                            // link beside it: the record carries the two
-                            // separately, and a blank line is not a link.
-                            .children(Some(link).filter(|link| !link.is_empty()).map(|link| {
-                                div()
-                                    .text_size(px(palette.typography.ui_size - 2.0))
-                                    .text_color(palette.text_muted)
-                                    .child(link)
-                            })),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_none()
-                            .gap_1p5()
-                            .child(kit::button(
-                                "change-username",
-                                "Change",
-                                kit::Intent::Quiet,
-                                palette,
-                                cx.listener(|_, _, _, cx| cx.emit(RequestUsername)),
-                            ))
-                            .child(kit::button(
-                                "remove-username",
-                                "Remove",
-                                kit::Intent::Quiet,
-                                palette,
-                                cx.listener(|this: &mut Self, _, _, cx| {
-                                    this.store
-                                        .update(cx, |store, _| store.delete_username());
-                                }),
-                            )),
-                    )
-                    .into_any_element(),
+                    Some((name, link)) => self.username_row(name, link, palette, cx),
                     None => field("No username set", palette)
                         .child(kit::button(
                             "set-username",
@@ -702,6 +796,23 @@ impl Settings {
                         }),
                     ))
                     .into_any_element(),
+                described(
+                    "Count messages",
+                    "Shows how many messages have been sent and received in each \
+                     conversation, and across the account, in the details panel.",
+                    palette,
+                )
+                .child(toggle(
+                    draft.messages.show_counts,
+                    palette,
+                    cx.listener(|this: &mut Self, _, _, cx| {
+                        this.change(
+                            |config| config.messages.show_counts = !config.messages.show_counts,
+                            cx,
+                        )
+                    }),
+                ))
+                .into_any_element(),
             ],
             None,
         )
@@ -904,6 +1015,23 @@ impl Settings {
                         }),
                     ))
                     .into_any_element(),
+                described(
+                    "Sounds",
+                    "A short tone when a message is sent, and another when one \
+                     arrives. Muted conversations stay quiet.",
+                    palette,
+                )
+                .child(toggle(
+                    draft.notifications.sounds,
+                    palette,
+                    cx.listener(|this: &mut Self, _, _, cx| {
+                        this.change(
+                            |config| config.notifications.sounds = !config.notifications.sounds,
+                            cx,
+                        )
+                    }),
+                ))
+                .into_any_element(),
                 field("For groups", palette)
                     .child(choices(
                         [

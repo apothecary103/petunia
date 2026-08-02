@@ -89,7 +89,7 @@ impl Frame<'_> {
                 Some((language, head)) => self.text(attached, path, language, &head),
                 None => self.file(attached, path),
             },
-            (_, Blob::Downloading) => self.downloading(attached),
+            (_, Blob::Downloading(fraction)) => self.downloading(attached, *fraction),
             (_, Blob::Failed(error)) => self.failed(attached, error),
             (_, Blob::Missing) => self.missing(attached),
         }
@@ -380,7 +380,14 @@ impl Frame<'_> {
                                     .child(SharedString::from(audio::clock(position)))
                                     .children(left.map(SharedString::from)),
                             ),
-                    ),
+                    )
+                    .child(speed_pill(
+                        format!("speed-{}", attached.id.as_str()),
+                        self.playback.speed,
+                        self.spacing.small,
+                        theme,
+                        self.act.clone(),
+                    )),
             )
             .into_any_element()
     }
@@ -449,6 +456,13 @@ impl Frame<'_> {
                         .child(SharedString::from(audio::clock(elapsed))),
                 )
             })
+            .child(speed_pill(
+                format!("speed-{}", attached.id.as_str()),
+                self.playback.speed,
+                self.spacing.small,
+                theme,
+                self.act.clone(),
+            ))
             .into_any_element()
     }
 
@@ -566,10 +580,12 @@ impl Frame<'_> {
             .into_any_element()
     }
 
-    /// The bar slides rather than fills: presage hands back the whole file at
-    /// once, so the only honest thing to show is that something is happening.
-    fn downloading(&self, attached: &Attachment) -> AnyElement {
+    /// A real fraction where there is one, and a sliding bar for the moment
+    /// before the first bytes land — which is the only part of a download
+    /// nothing can be said about, and is over in a few hundred milliseconds.
+    fn downloading(&self, attached: &Attachment, fraction: Option<f32>) -> AnyElement {
         let theme = self.theme;
+        let percent = fraction.map(|fraction| (fraction * 100.0).clamp(0.0, 100.0));
 
         chip_shell(theme)
             .child(kit::icon(icon_for(&attached.kind), 16.0, theme.text_muted))
@@ -592,7 +608,8 @@ impl Frame<'_> {
                             "downloading-{}",
                             attached.id.as_str()
                         )))
-                        .loading(true)
+                        .loading(percent.is_none())
+                        .value(percent.unwrap_or(0.0))
                         .color(theme.accent)
                         .with_size(gpui_component::Size::XSmall),
                     )
@@ -600,10 +617,14 @@ impl Frame<'_> {
                         div()
                             .text_size(px(theme.typography.ui_size - 3.0))
                             .text_color(theme.text_muted)
-                            .child(SharedString::from(format!(
-                                "Downloading… {}",
-                                size(attached.size)
-                            ))),
+                            .child(SharedString::from(match percent {
+                                Some(percent) => format!(
+                                    "{} of {}",
+                                    size((attached.size as f32 * percent / 100.0) as u64),
+                                    size(attached.size)
+                                ),
+                                None => format!("Downloading… {}", size(attached.size)),
+                            })),
                     ),
             )
             .into_any_element()
@@ -768,6 +789,45 @@ fn rail(
             .corner_radii(px(KNOB / 2.0)),
         );
     })
+}
+
+/// The one control the speed gets: a pill saying what it is, which on a click
+/// becomes the next one up. A menu of three would be a menu for a choice with
+/// three values, and a row of three buttons would be three controls for one
+/// setting — Signal, Podcasts and every voice-note player cycle one label.
+///
+/// Always drawn rather than only while something is playing: a control that
+/// appears when you press play is one you find by accident, and the speed is
+/// the player's, so it is as true of a note not yet started as of one running.
+/// It is the speed *the player* is set to, which is why one note showing `1.5×`
+/// means they all do.
+fn speed_pill(id: String, speed: f32, size: f32, theme: &Theme, act: Dispatch) -> impl IntoElement {
+    let faster = act.clone();
+
+    div()
+        .id(SharedString::from(id))
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        // Fixed, so cycling `1×` to `1.5×` does not move the control out from
+        // under the pointer that is cycling it.
+        .w(px(34.0))
+        .py_0p5()
+        .rounded_full()
+        .cursor_pointer()
+        .bg(theme.sunken)
+        .text_size(px(size))
+        .text_color(if speed > 1.0 {
+            theme.accent
+        } else {
+            theme.text_muted
+        })
+        .hover(|this| this.bg(theme.hover))
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            faster(Act::Faster, window, cx)
+        })
+        .child(SharedString::from(audio::speed_label(speed)))
 }
 
 /// What the part that has not been played yet is drawn in.

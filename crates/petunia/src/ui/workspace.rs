@@ -1,5 +1,7 @@
 use gpui::prelude::*;
-use gpui::{App, Context, Entity, Focusable as _, SharedString, Subscription, Window, div, px};
+use gpui::{
+    App, Context, Entity, Focusable as _, MouseButton, SharedString, Subscription, Window, div, px,
+};
 use gpui_component::{ActiveTheme, IconName};
 
 use super::conversation::{
@@ -114,6 +116,9 @@ pub struct Workspace {
 struct Drag {
     grab: f32,
     asked: f32,
+    /// Whether the list is drawn as a rail right now, so the switch happens on
+    /// the frame it crosses the snap point rather than once a frame.
+    railed: bool,
 }
 
 /// Which side panels this frame draws. Not the same as what the session asks
@@ -191,12 +196,42 @@ impl Workspace {
             _subscriptions: subscriptions,
         };
 
+        workspace.answer_notifications(cx);
+
         // An already-linked store never emits `Linked` a second time, so the
         // shell has to come up if the account is there on the first read.
         if store.read(cx).state().is_some() {
             workspace.enter_main(window, cx);
         }
         workspace
+    }
+
+    /// A clicked banner opens what it was about.
+    ///
+    /// The notification centre answers on a thread of its own, minutes after
+    /// the banner went up and from nowhere near the window, so the answer
+    /// arrives down a channel and is drained here — which is the one place that
+    /// can both raise the application and open a conversation.
+    fn answer_notifications(&self, cx: &mut Context<Self>) {
+        use futures::StreamExt;
+
+        let (sender, mut clicked) = futures::channel::mpsc::unbounded();
+        crate::notify::opens_with(sender);
+
+        cx.spawn(async move |this, cx| {
+            while let Some(thread) = clicked.next().await {
+                let carried_on = this.update(cx, |this, cx| {
+                    // In front of whatever the person went off to do: they
+                    // pressed the banner, which is a request for the window.
+                    cx.activate(true);
+                    this.store.update(cx, |store, cx| store.activate(thread, cx));
+                });
+                if carried_on.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     fn enter_main(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -364,6 +399,7 @@ impl Workspace {
             StoreEvent::Notify { notice, on_screen } if !*on_screen => {
                 crate::notify::post(notice);
             }
+            StoreEvent::Sound(chime) => self.player.chime(*chime),
             _ => {}
         }
     }
@@ -599,14 +635,31 @@ impl Workspace {
             })
         };
 
+        let expire: menu::thread::Expire = {
+            let store = self.store.clone();
+            let thread = thread.clone();
+            std::rc::Rc::new(move |seconds, _, cx| {
+                let thread = thread.clone();
+                store.update(cx, |store, cx| {
+                    store.set_expire_timer(thread, seconds, cx)
+                });
+            })
+        };
+        let timer = self
+            .store
+            .read(cx)
+            .state()
+            .and_then(|state| state.expire_timer(&thread));
+
         let acts = menu::thread::Acts {
             apply,
             create,
             delete,
             name,
             block,
+            expire,
         };
-        let items = menu::thread::items(&flags, &folders, now, person, acts);
+        let items = menu::thread::items(&flags, &folders, now, person, timer, acts);
         self.raise_menu(items, at, window, cx);
     }
 
@@ -1359,17 +1412,30 @@ impl Workspace {
         self.dragging = Some(Drag {
             grab: width - at,
             asked: width,
+            railed: self.session.sidebar.rail,
         });
         cx.notify();
     }
 
     /// Follows the pointer. Nothing is written yet, so a drag abandoned by
     /// letting go outside the window leaves the preference alone.
+    ///
+    /// The *shape* changes as it goes, though, not only the width. Whether the
+    /// list is a rail was applied on release alone, so dragging past the snap
+    /// point narrowed the column to eighty pixels while the list inside it went
+    /// on drawing two-line rows with names and previews crushed into them —
+    /// and the collapse everybody was actually dragging towards only appeared
+    /// once they let go. A drag has to show what letting go will do.
     fn drag_sidebar(&mut self, at: f32, cx: &mut Context<Self>) {
         let Some(drag) = &mut self.dragging else {
             return;
         };
         drag.asked = at + drag.grab;
+        let (rail, _) = resolve(drag.asked);
+        if rail != drag.railed {
+            drag.railed = rail;
+            self.set_rail(rail, cx);
+        }
         cx.notify();
     }
 
@@ -1729,6 +1795,48 @@ impl Workspace {
 
     /// A thin strip carrying the conversation's name and the panel toggles, in
     /// place of the reference's tab bar.
+    /// The timer, where there is one. Clicking it raises the same menu the
+    /// conversation's own right-click does, so there is one place the setting
+    /// is changed and the chip is a way in rather than a second control.
+    fn expiry_chip(
+        &self,
+        palette: &petunia_config::Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
+        let store = self.store.read(cx);
+        let thread = store.active()?.clone();
+        let timer = store.state()?.expire_timer(&thread)?;
+
+        Some(
+            div()
+                .id("expiry")
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap_1()
+                .px_1p5()
+                .py_0p5()
+                .rounded_full()
+                .cursor_pointer()
+                .bg(palette.sunken)
+                .text_size(px(palette.typography.ui_size - 2.0))
+                .text_color(palette.text_muted)
+                .hover(|this| this.bg(palette.hover))
+                .tooltip(|window, cx| {
+                    gpui_component::tooltip::Tooltip::new("Disappearing messages")
+                        .build(window, cx)
+                })
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                        this.open_menu(thread.clone(), event.position, window, cx)
+                    }),
+                )
+                .child(kit::icon(IconName::CircleCheck, 12.0, palette.text_muted))
+                .child(SharedString::from(crate::ui::details::timer_label(timer))),
+        )
+    }
+
     fn header(
         &self,
         title: &str,
@@ -1772,6 +1880,11 @@ impl Workspace {
                     .text_color(palette.text)
                     .child(SharedString::from(title.to_owned())),
             )
+            // A conversation whose messages are going away has to say so where
+            // it is being read, not in a panel somebody would have to open to
+            // find out. A chip rather than a line, and only when the timer is
+            // on: "not disappearing" is what every other conversation is.
+            .children(self.expiry_chip(palette, cx))
             .child(kit::icon_button(
                 "toggle-details",
                 if panels.details {

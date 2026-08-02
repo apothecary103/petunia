@@ -54,7 +54,27 @@ pub struct Acts {
     pub delete: Delete,
     pub name: Name,
     pub block: Block,
+    pub expire: Expire,
 }
+
+/// Setting the disappearing-message timer, in seconds. Not a flag: it is not
+/// this device's opinion about the conversation but the conversation's own
+/// setting, and everybody in it is told.
+pub type Expire = Rc<dyn Fn(u32, &mut Window, &mut gpui::App)>;
+
+/// How long a message lives. Signal's own ladder, and the reason it is a ladder
+/// rather than a field: every one of these is a decision somebody can make in a
+/// second, and a box that takes a number of seconds is a box nobody fills in.
+pub const EXPIRIES: [(&str, u32); 8] = [
+    ("Off", 0),
+    ("30 seconds", 30),
+    ("5 minutes", 5 * 60),
+    ("1 hour", 3_600),
+    ("8 hours", 8 * 3_600),
+    ("1 day", 24 * 3_600),
+    ("1 week", 7 * 24 * 3_600),
+    ("4 weeks", 4 * 7 * 24 * 3_600),
+];
 
 /// The menu for a conversation in the list.
 pub fn items(
@@ -62,6 +82,7 @@ pub fn items(
     folders: &[String],
     now: u64,
     person: Option<Person>,
+    timer: Option<std::time::Duration>,
     acts: Acts,
 ) -> Vec<Item> {
     let Acts {
@@ -70,6 +91,7 @@ pub fn items(
         delete,
         name,
         block,
+        expire,
     } = acts;
     let mut items = vec![
         toggle(
@@ -147,6 +169,21 @@ pub fn items(
                 ..flags
             })
             .checked(chosen),
+        );
+    }
+
+    // Disappearing messages, as the ladder rather than as a switch: "on" is not
+    // a setting anybody can act on without also being asked how long.
+    items.push(Item::Separator);
+    items.push(Item::Label("Disappearing messages".into()));
+    let set_to = timer.map(|timer| timer.as_secs() as u32).unwrap_or(0);
+    for (label, seconds) in EXPIRIES {
+        let expire = expire.clone();
+        items.push(
+            Item::new(label, move |window: &mut Window, cx: &mut gpui::App| {
+                expire(seconds, window, cx)
+            })
+            .checked(set_to == seconds),
         );
     }
 
@@ -242,12 +279,14 @@ mod tests {
             folders,
             now,
             person,
+            None,
             Acts {
                 apply: Rc::new(|_, _, _| {}),
                 create: Rc::new(|_, _| {}),
                 delete: Rc::new(|_, _| {}),
                 name: Rc::new(|_, _, _| {}),
                 block: Rc::new(|_, _, _, _| {}),
+                expire: Rc::new(|_, _, _| {}),
             },
         )
     }

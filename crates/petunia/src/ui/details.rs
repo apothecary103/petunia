@@ -54,12 +54,18 @@ type Hook<T> = std::rc::Rc<dyn Fn(T, &mut Window, &mut gpui::App)>;
 /// Who or what the conversation is, and what has been shared in it.
 pub struct Details {
     store: Entity<Store>,
+    /// Which conversation the tally on screen was counted for, so it is asked
+    /// for again when the panel moves and not once a frame while it sits.
+    counted_for: Option<Thread>,
 }
 
 impl Details {
     pub fn new(store: Entity<Store>, cx: &mut Context<Self>) -> Self {
         cx.observe(&store, |_, _, cx| cx.notify()).detach();
-        Self { store }
+        Self {
+            store,
+            counted_for: None,
+        }
     }
 
     fn hooks(&self, cx: &mut Context<Self>) -> Hooks {
@@ -93,16 +99,34 @@ impl Render for Details {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = cx.palette().clone();
         let hooks = self.hooks(cx);
-        let store = self.store.read(cx);
 
+        // Counted only where somebody asked to see it, and asked for again when
+        // the panel moves to another conversation — which is when the numbers
+        // are being read, and the only moment a stale one would be noticed. A
+        // pass over every row in the store is not something to do per frame or
+        // per arriving message.
+        let wanted = self.store.read(cx).config.messages.show_counts;
+        let active = self.store.read(cx).active().cloned();
+        if wanted && self.counted_for != active {
+            self.counted_for = active.clone();
+            self.store.update(cx, |store, _| store.count_messages());
+        }
+
+        let store = self.store.read(cx);
         let Some(state) = store.state() else {
             return shell(&palette, div());
+        };
+        let tally = |thread: &Thread| {
+            wanted.then(|| (store.counts.get(thread).copied(), store.total_count()))
         };
 
         let body = match store.focus() {
             Some(Focus::Person(uuid)) => person(*uuid, store.active(), state, &palette, &hooks),
             None => match store.active() {
-                Some(thread) => conversation(thread, state, &palette, &hooks),
+                Some(thread) => conversation(thread, state, &palette, &hooks)
+                    .when_some(tally(thread), |this, (here, everywhere)| {
+                        this.child(counted(here, everywhere, &palette))
+                    }),
                 None => div()
                     .p_4()
                     .text_size(px(palette.typography.ui_size))
@@ -313,8 +337,11 @@ fn conversation(
                 group
                     .filter(|group| group.requesting > 0)
                     .map(|group| ("Requests", group.requesting.to_string())),
-                group
-                    .and_then(|group| group.expire_timer)
+                // The conversation's, not the group record's: a one-to-one has
+                // a timer too, and it is kept nowhere a group record could
+                // hold it.
+                state
+                    .expire_timer(thread)
                     .map(|timer| ("Disappearing", timer_label(timer))),
             ],
             palette,
@@ -370,6 +397,59 @@ fn conversation(
                     ),
             )
         })
+}
+
+/// How much has been said here, and how much has been said at all.
+///
+/// Both, because either alone is a number with nothing to compare it to: four
+/// hundred messages in a conversation means one thing against a thousand and
+/// another against a hundred thousand. Sent and received are kept apart for the
+/// same reason — a total says how busy a thread is and the split says who is
+/// doing the talking, which is the question anybody looking at this has.
+///
+/// Nothing is drawn while the count is out. A row of zeroes that turns into the
+/// real number a second later is a row that was wrong, and this is the one
+/// panel in the application whose entire content is numbers.
+fn counted(
+    here: Option<petunia_signal::db::messages::Tally>,
+    everywhere: petunia_signal::db::messages::Tally,
+    palette: &Theme,
+) -> gpui::Div {
+    let here = here.unwrap_or_default();
+    if everywhere.total() == 0 {
+        return div();
+    }
+
+    div()
+        .flex()
+        .flex_col()
+        .px_4()
+        .pb_4()
+        .child(kit::section("Messages", palette))
+        .child(fields(
+            [
+                Some(("Sent here", thousands(here.sent))),
+                Some(("Received here", thousands(here.received))),
+                Some(("Sent in all", thousands(everywhere.sent))),
+                Some(("Received in all", thousands(everywhere.received))),
+            ],
+            palette,
+        ))
+}
+
+/// A count with its thousands separated. Six digits in a row is a number
+/// nobody reads, and this panel is nothing but numbers.
+fn thousands(count: u64) -> String {
+    let digits = count.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+
+    for (at, digit) in digits.chars().enumerate() {
+        if at > 0 && (digits.len() - at).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
 }
 
 /// Everyone in the group, administrators first, each with whatever the group
@@ -541,7 +621,7 @@ fn fields<const N: usize>(
 
 /// A disappearing-message timer as the phone says it, not as a number of
 /// seconds.
-fn timer_label(timer: Duration) -> String {
+pub fn timer_label(timer: Duration) -> String {
     let seconds = timer.as_secs();
     const WEEK: u64 = 7 * 24 * 3600;
 

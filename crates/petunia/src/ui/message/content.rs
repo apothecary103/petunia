@@ -134,12 +134,24 @@ impl Body<'_> {
         let edited = self.message.edited.is_some();
         let mark = (status.is_some() || edited).then(|| receipt(status, edited, theme));
 
+        // A message that is going to disappear says so, beside the mark and in
+        // the same grey. Not a countdown: the clock started when it was read
+        // and a second-by-second number on every message in a thread is a
+        // thread that never stops repainting — what matters is *that* this one
+        // is temporary, and for how long it was given.
+        let expiring = self
+            .message
+            .expires_in
+            .filter(|seconds| *seconds > 0)
+            .map(|seconds| self.expiry(seconds, theme));
+
         let mut block = div().flex().flex_col().gap_1p5().child(
             div()
                 .flex()
                 .items_end()
                 .gap_2()
                 .child(said.min_w_0())
+                .children(expiring)
                 .children(mark),
         );
 
@@ -304,6 +316,36 @@ impl Body<'_> {
                 ))
                 .into_any_element(),
         }
+    }
+}
+
+impl Body<'_> {
+    /// The mark on a message that is going away: a small clock and how long it
+    /// was given. Beside the receipt rather than under the message, because it
+    /// is the same kind of annotation and belongs in the same corner.
+    fn expiry(&self, seconds: u32, theme: &Theme) -> gpui::Stateful<Div> {
+        let label = crate::ui::details::timer_label(std::time::Duration::from_secs(seconds.into()));
+
+        div()
+            .id(SharedString::from(format!(
+                "expiry-{}",
+                self.message.timestamp()
+            )))
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap_0p5()
+            .tooltip(move |window, cx| {
+                gpui_component::tooltip::Tooltip::new("Disappears after it has been read")
+                    .build(window, cx)
+            })
+            .child(kit::icon(IconName::CircleCheck, 10.0, theme.text_muted))
+            .child(
+                div()
+                    .text_size(px(self.spacing.small))
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(label)),
+            )
     }
 }
 
@@ -486,26 +528,23 @@ fn blocks(body: &str, ranges: &[Range]) -> Vec<(usize, usize, Block)> {
 /// an equation in one either does nothing or moves it away from the text it
 /// belongs to.
 fn maths_block(tex: &str, theme: &Theme, size: f32) -> AnyElement {
-    let read = latex::render(tex);
+    let read = latex::parse(tex);
     if read.is_empty() {
         return div().into_any_element();
     }
 
-    // Upright, with the variables in it italicised one run at a time -- the same
-    // distinction inline maths gets, and for the same reason: an italic ∑ is a
-    // symbol nobody sets that way.
-    let italics = latex::variables(&read)
-        .into_iter()
-        .map(|variable| (variable, italicised(HighlightStyle::default())))
-        .collect::<Vec<_>>();
-
+    // Elements rather than a text run, which is what a display equation is for:
+    // out of the paragraph, it can have a numerator over a denominator, a rule
+    // between them, and limits stacked on a ∑. Inline maths cannot -- a line
+    // that wraps has to be one text run -- and keeps the reading.
     div()
         .py_1()
         .font_family(theme.typography.serif.clone())
-        .text_size(px(size * DISPLAY_MATHS))
-        .line_height(px(size * DISPLAY_MATHS * theme.typography.line_height))
-        .text_color(theme.text)
-        .child(StyledText::new(read).with_highlights(italics))
+        .child(super::maths::typeset(
+            &read,
+            theme,
+            size * DISPLAY_MATHS,
+        ))
         .into_any_element()
 }
 
@@ -1339,10 +1378,17 @@ fn reactions(message: &Message, state: &State, theme: &Theme, act: &Dispatch) ->
         }))
 }
 
+/// What an update says, in words. The duration is the whole of what anybody
+/// wants from this line: "disappearing messages on" leaves the one question it
+/// raises unanswered, and the answer is four characters long.
 fn describe(update: &Update) -> String {
     match update {
         Update::ExpireTimer { seconds: 0 } => "Disappearing messages off".into(),
-        Update::ExpireTimer { .. } => "Disappearing messages on".into(),
+        Update::ExpireTimer { seconds } => format!(
+            "Disappearing messages set to {}",
+            crate::ui::details::timer_label(std::time::Duration::from_secs((*seconds).into()))
+                .to_lowercase()
+        ),
     }
 }
 

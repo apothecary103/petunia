@@ -121,7 +121,10 @@ fn fields(message: &Message, sender: &str) -> Vec<(String, String)> {
                 attached.size,
                 match &attached.blob {
                     Blob::Cached(path) => path.display().to_string(),
-                    Blob::Downloading => "downloading".to_owned(),
+                    Blob::Downloading(Some(fraction)) => {
+                        format!("downloading {:.0}%", fraction * 100.0)
+                    }
+                    Blob::Downloading(None) => "downloading".to_owned(),
                     Blob::Missing => "not downloaded".to_owned(),
                     Blob::Failed(error) => format!("failed: {error}"),
                 }

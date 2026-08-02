@@ -21,6 +21,7 @@ use petunia_config::Theme;
 use petunia_data::message::markup;
 use petunia_data::message::range::Style;
 use petunia_data::{MessageId, Thread};
+use petunia_media::recorder::Recorder;
 use petunia_signal::Command;
 use crate::store::Store;
 use crate::theme::ActivePalette;
@@ -38,6 +39,9 @@ const CARD_PADDING: f32 = 8.0;
 /// two of the four are icon buttons and a row of squares that are nearly the
 /// same size reads as a mistake rather than as a hierarchy.
 const CONTROL: f32 = 26.0;
+
+/// Shorter than this and a recording is a mis-click rather than a message.
+const MINIMUM_NOTE: Duration = Duration::from_millis(600);
 
 /// What this message is doing besides being sent: answering one, or replacing
 /// one. Both are cancelled by Escape.
@@ -116,6 +120,9 @@ pub struct Composer {
     emoji_query: Entity<InputState>,
     /// When the last typing indicator went out, so the re-send is throttled.
     announced: Option<Instant>,
+    /// The microphone, while it is running. Its presence is what the card is
+    /// drawn from: recording is a mode, not a control that is lit.
+    recording: Option<Recorder>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -183,6 +190,7 @@ impl Composer {
             emoji: emoji::Showing::default(),
             emoji_query,
             announced: None,
+            recording: None,
             _subscriptions: subscriptions,
         }
     }
@@ -422,9 +430,175 @@ impl Composer {
         self.stop_typing(&thread, cx);
 
         self.store.update(cx, |store, cx| {
-            store.compose(thread, body, ranges, attachments, intent, cx)
+            store.compose(
+                thread,
+                crate::store::Composing {
+                    body,
+                    ranges,
+                    attachments,
+                    intent,
+                    voice: false,
+                },
+                cx,
+            )
         });
         cx.notify();
+    }
+
+    /// Starts recording. The file is written into the system's temporary
+    /// directory rather than the media cache: it is only a file until it is
+    /// sent, and if it is sent the worker adopts a copy under the digest the
+    /// stored row carries anyway.
+    fn record(&mut self, cx: &mut Context<Self>) {
+        if self.recording.is_some() || self.store.read(cx).active().is_none() {
+            return;
+        }
+
+        let name = format!("petunia-voice-{}.wav", crate::store::now());
+        self.recording = Some(Recorder::start(std::env::temp_dir().join(name)));
+        self.follow_recording(cx);
+        cx.notify();
+    }
+
+    /// A meter has to move, so the card repaints while one is running and stops
+    /// the moment it is not — the same shape the playing track uses.
+    fn follow_recording(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(60))
+                    .await;
+                let carry_on = this.update(cx, |this: &mut Self, cx| {
+                    cx.notify();
+                    this.recording.is_some()
+                });
+                if !matches!(carry_on, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Stops and sends, as its own message. A voice note is the message rather
+    /// than an attachment to one: Signal draws it as a bubble of its own, and
+    /// whatever is half-typed in the field is a different message that has not
+    /// been sent yet.
+    fn send_recording(&mut self, cx: &mut Context<Self>) {
+        let Some(recorder) = self.recording.take() else {
+            return;
+        };
+        let Some(thread) = self.store.read(cx).active().cloned() else {
+            return;
+        };
+        let Some(recorded) = recorder.finish() else {
+            cx.notify();
+            return;
+        };
+        // Nothing worth sending. A tap on the microphone is a mis-click, not a
+        // message, and Signal's own recorder ignores one too.
+        if recorded.duration < MINIMUM_NOTE {
+            let _ = std::fs::remove_file(&recorded.path);
+            cx.notify();
+            return;
+        }
+
+        self.store.update(cx, |store, cx| {
+            store.compose(
+                thread,
+                crate::store::Composing {
+                    body: String::new(),
+                    ranges: Vec::new(),
+                    attachments: vec![recorded.path],
+                    intent: None,
+                    voice: true,
+                },
+                cx,
+            )
+        });
+        cx.notify();
+    }
+
+    fn discard_recording(&mut self, cx: &mut Context<Self>) {
+        if let Some(recorder) = self.recording.take() {
+            recorder.cancel();
+        }
+        cx.notify();
+    }
+
+    /// What the card becomes while the microphone is on: a light that says it is
+    /// listening, how long it has been, the shape of what has been said so far,
+    /// and the two things that can happen to it.
+    ///
+    /// The shape rather than a bare level meter, and the same shape the sent
+    /// note will carry — so what is on screen while recording is a preview of
+    /// what the other end will see, not a decoration that goes away.
+    fn recording_card(
+        &self,
+        state: &petunia_media::recorder::Recording,
+        palette: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let failed = state.failed;
+        let shape = state.shape.clone();
+        // The light breathes with the level, so a microphone that is running
+        // but hearing nothing looks different from one that is working.
+        let lit = gpui::Hsla {
+            a: 0.45 + state.level.clamp(0.0, 1.0) * 0.55,
+            ..palette.danger
+        };
+
+        div()
+            .flex()
+            .items_center()
+            .gap_2p5()
+            .p(px(CARD_PADDING))
+            .min_h(px(CONTROL + CARD_PADDING * 2.0))
+            .rounded(px(kit::RADIUS_LG))
+            .bg(palette.elevated)
+            .border_1()
+            .border_color(palette.border)
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(9.0))
+                    .rounded_full()
+                    .bg(if failed { palette.text_muted } else { lit }),
+            )
+            .when(failed, |this| {
+                this.child(
+                    div()
+                        .flex_1()
+                        .text_size(px(palette.typography.ui_size))
+                        .text_color(palette.text_muted)
+                        .child("No microphone to record with."),
+                )
+            })
+            .when(!failed, |this| {
+                this.child(
+                    div()
+                        .flex_none()
+                        .w(px(44.0))
+                        .text_size(px(palette.typography.ui_size))
+                        .text_color(palette.text)
+                        .child(SharedString::from(petunia_media::audio::clock(
+                            state.elapsed,
+                        ))),
+                )
+                .child(live(shape, palette))
+            })
+            .child(kit::glyph_button(
+                "discard-recording",
+                "icons/trash.svg",
+                palette,
+                cx.listener(|this, _, _, cx| this.discard_recording(cx)),
+            ))
+            .when(!failed, |this| {
+                this.child(send(
+                    palette,
+                    cx.listener(|this, _, _, cx| this.send_recording(cx)),
+                ))
+            })
     }
 
     /// A toolbar button wraps the selection in the marker it stands for, so what
@@ -660,10 +834,44 @@ impl Render for Composer {
                     cx.emit(RequestMore(event.position))
                 }),
             ))
+            // Beside the send rather than in place of it. Signal swaps the two
+            // depending on whether the field is empty, which means the control
+            // under the pointer changes what it does as you type — and pressing
+            // send on a message you have just finished writing is not a thing
+            // to be careful about.
+            .child(
+                div()
+                    .id("record")
+                    .flex_none()
+                    .size(px(CONTROL))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(7.0))
+                    .cursor_pointer()
+                    .hover(|this| this.bg(palette.hover))
+                    .tooltip(|window, cx| {
+                        gpui_component::tooltip::Tooltip::new("Record a voice message")
+                            .build(window, cx)
+                    })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| this.record(cx)),
+                    )
+                    .child(kit::glyph("icons/mic.svg", 15.0, palette.text_muted)),
+            )
             .child(send(
                 &palette,
                 cx.listener(|this, _, window, cx| this.submit(window, cx)),
             ));
+
+        // Recording replaces the whole card rather than adding to it. There is
+        // one thing happening, and a field you could still type into beside a
+        // running microphone is two messages being written at once.
+        let field = match self.recording.as_ref().map(Recorder::state) {
+            Some(state) => self.recording_card(&state, &palette, cx),
+            None => field,
+        };
 
 
         kit::column()
@@ -1080,6 +1288,62 @@ fn context(title: &str, palette: &Theme) -> Div {
 }
 
 /// The one bright thing on the screen, so the eye knows where the action is.
+/// The shape of what is being recorded, painted rather than built out of
+/// elements — the same reason the message's own waveform is: a strip of divs at
+/// a couple of pixels each is a strip in two widths with gaps that come and go,
+/// and this one is redrawn fifteen times a second.
+///
+/// Filled from the *right*, because the newest sound is the interesting end and
+/// a strip that fills left to right runs out of room the moment somebody talks
+/// for longer than the card is wide.
+fn live(shape: Vec<u8>, palette: &Theme) -> Div {
+    const BAR: f32 = 2.0;
+    const GAP: f32 = 2.0;
+    const HEIGHT: f32 = 22.0;
+
+    let tint = palette.accent;
+
+    div()
+        .flex()
+        .flex_1()
+        .min_w_0()
+        .h(px(HEIGHT))
+        .child(
+            gpui::canvas(
+                |_, _, _| {},
+                move |at, _: (), window, _| {
+                    let (width, height) = (f32::from(at.size.width), f32::from(at.size.height));
+                    let room = (((width + GAP) / (BAR + GAP)).floor() as usize).max(1);
+                    let step = (width + GAP) / room as f32;
+                    let from = shape.len().saturating_sub(room);
+                    let showing = &shape[from..];
+
+                    for (index, level) in showing.iter().enumerate() {
+                        let tall = (height * (*level as f32 / 255.0)).max(2.0);
+                        // Right-aligned: the last bar sits at the right edge
+                        // whether or not there are enough of them to fill it.
+                        let at_x = at.origin.x
+                            + px(width - (showing.len() - index) as f32 * step + GAP);
+                        window.paint_quad(
+                            gpui::fill(
+                                gpui::Bounds {
+                                    origin: gpui::point(
+                                        at_x,
+                                        at.origin.y + px((height - tall) / 2.0),
+                                    ),
+                                    size: gpui::size(px(BAR), px(tall)),
+                                },
+                                tint,
+                            )
+                            .corner_radii(px(BAR / 2.0)),
+                        );
+                    }
+                },
+            )
+            .size_full(),
+        )
+}
+
 fn send(
     palette: &Theme,
     on_click: impl Fn(&gpui::MouseDownEvent, &mut Window, &mut gpui::App) + 'static,
