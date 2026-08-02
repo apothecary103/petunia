@@ -7,15 +7,18 @@
 //! substitution for it, because the person on the other end is reading the
 //! source.
 //!
-//! So there is no typesetting engine here. A fraction does not get a rule and a
-//! numerator over a denominator, and an integral does not grow to fit its
-//! bounds — that wants a box model and a maths font with the glyph variants to
-//! fill it, which is a project rather than a module. What there is instead is
-//! the transliteration everybody who writes maths in a chat window already does
-//! by hand: `\alpha` is α, `x^2` is x², `H_2O` is H₂O, `\frac{a}{b}` is a⁄b. It
-//! is exact for symbols, honest for scripts, and a compromise for structure —
-//! and it beats both of the alternatives, which are the raw backslashes and a
-//! blank.
+//! What is here is a reading in two forms, from one grammar. `parse` gives the
+//! tree — a fraction is a numerator, a denominator and the fact that one goes
+//! over the other — and the view lays that out with real boxes: a rule between
+//! the two, limits above and below a ∑, a radical with a bar over what is under
+//! it, scripts set smaller and raised. `flatten` writes the same tree back out
+//! as one line, for the places that can only take one: a notification, a
+//! sidebar preview, a search index, and any equation set inside a sentence,
+//! where an element per span is an element per line break.
+//!
+//! There is still no maths font and no glyph variants, so a bracket does not
+//! grow to fit what it holds and an integral sign is the size it is. The
+//! structure is drawn; the glyphs are Unicode's.
 //!
 //! Anything it cannot read comes back as close to what was typed as it can
 //! manage rather than as an error: a message is not a document that failed to
@@ -127,138 +130,425 @@ fn usable(tex: &str, kind: Kind) -> bool {
     !tex.starts_with(char::is_whitespace) && !tex.ends_with(char::is_whitespace)
 }
 
-/// LaTeX as the nearest thing Unicode has to it.
-pub fn render(tex: &str) -> String {
-    let mut out = String::with_capacity(tex.len());
-    let mut rest = tex;
+/// One piece of an equation. What the view lays out, and what `flatten` writes
+/// back as a line.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Node {
+    /// Characters set as they are. `slanted` has the variable rule already
+    /// applied: a single letter is a quantity, a run of them is a word.
+    Run { text: String, slanted: bool },
+    /// Whatever was inside a pair of braces, which is one thing for the purpose
+    /// of anything that attaches to it.
+    Group(Vec<Node>),
+    /// A numerator over a denominator.
+    Frac(Vec<Node>, Vec<Node>),
+    Sqrt(Vec<Node>),
+    /// A base with whatever was raised or lowered against it.
+    Script {
+        base: Vec<Node>,
+        over: Option<Vec<Node>>,
+        under: Option<Vec<Node>>,
+    },
+    /// A ∑, a ∏ or a `lim`, whose limits go above and below it rather than
+    /// beside it. Which is the difference TeX itself draws between these and an
+    /// ordinary script, and the reason ∫ is not one of them.
+    Big {
+        glyph: String,
+        over: Option<Vec<Node>>,
+        under: Option<Vec<Node>>,
+    },
+    /// A `\left…\right` pair, which is the only bracket that knows what it is
+    /// holding and can therefore be drawn to the height of it.
+    Fenced {
+        open: String,
+        close: String,
+        inner: Vec<Node>,
+    },
+    /// A combining mark over what it marks.
+    Accent { mark: char, inner: Vec<Node> },
+    /// A gap, in ordinary spaces.
+    Space(usize),
+    Break,
+}
 
-    while !rest.is_empty() {
-        if let Some(after) = rest.strip_prefix('\\') {
-            rest = command(after, &mut out);
+/// LaTeX as a tree.
+pub fn parse(tex: &str) -> Vec<Node> {
+    let mut rest = tex;
+    sequence(&mut rest)
+}
+
+/// LaTeX as the nearest thing one line of Unicode has to it.
+pub fn render(tex: &str) -> String {
+    collapse(&flatten(&parse(tex)))
+}
+
+/// Everything up to the end, a closing brace, or the `\right` that ends a
+/// fenced group. Neither terminator is consumed: whoever asked for the
+/// sequence knows which one it was waiting for.
+fn sequence(rest: &mut &str) -> Vec<Node> {
+    let mut out: Vec<Node> = Vec::new();
+
+    while !rest.is_empty() && !rest.starts_with('}') && !rest.starts_with("\\right") {
+        if let Some(after) = rest.strip_prefix('^') {
+            *rest = after;
+            let body = argument(rest);
+            attach(&mut out, true, body);
             continue;
         }
-
-        let character = rest.chars().next().expect("rest is non-empty");
-        match character {
-            '^' | '_' => rest = script(&rest[1..], character == '^', &mut out),
-            // A group's braces are structure, and the structure is gone by the
-            // time this has been read: what is left is what was in them.
-            '{' | '}' => rest = &rest[1..],
-            // An alignment tab is a column break in a matrix nobody is drawing.
-            '&' => {
-                out.push(' ');
-                rest = &rest[1..];
-            }
-            _ => {
-                out.push(character);
-                rest = &rest[character.len_utf8()..];
-            }
+        if let Some(after) = rest.strip_prefix('_') {
+            *rest = after;
+            let body = argument(rest);
+            attach(&mut out, false, body);
+            continue;
+        }
+        // A spacing command and an environment are read and come to nothing,
+        // which is not the same as there being nothing left to read. Only an
+        // item that consumed no input ends the sequence, and that is the one
+        // thing that would otherwise spin.
+        let before = rest.len();
+        match atom(rest) {
+            Some(node) => out.push(node),
+            None if rest.len() == before => break,
+            None => {}
         }
     }
 
-    collapse(&out)
+    out
 }
 
-/// Reads one command and whatever it takes, writing what it comes to.
-fn command<'a>(after: &'a str, out: &mut String) -> &'a str {
-    let end = after
+/// Hangs a script off whatever came before it. A second script on the same base
+/// joins the first rather than replacing it, so `x^2_i` carries both.
+fn attach(out: &mut Vec<Node>, high: bool, body: Vec<Node>) {
+    let (over, under) = match high {
+        true => (Some(body), None),
+        false => (None, Some(body)),
+    };
+
+    match out.pop() {
+        // A big operator takes its limits rather than scripts, and takes the
+        // second one without losing the first.
+        Some(Node::Big {
+            glyph,
+            over: was_over,
+            under: was_under,
+        }) => out.push(Node::Big {
+            glyph,
+            over: over.or(was_over),
+            under: under.or(was_under),
+        }),
+        Some(Node::Script {
+            base,
+            over: was_over,
+            under: was_under,
+        }) => out.push(Node::Script {
+            base,
+            over: over.or(was_over),
+            under: under.or(was_under),
+        }),
+        base => out.push(Node::Script {
+            base: base.into_iter().collect(),
+            over,
+            under,
+        }),
+    }
+}
+
+/// One item, before anything is attached to it.
+fn atom(rest: &mut &str) -> Option<Node> {
+    let character = rest.chars().next()?;
+
+    if character == '\\' {
+        *rest = &rest[1..];
+        return command(rest);
+    }
+    if character == '{' {
+        *rest = &rest[1..];
+        let inner = sequence(rest);
+        *rest = rest.strip_prefix('}').unwrap_or(rest);
+        return Some(Node::Group(inner));
+    }
+    // A closer where an item was expected is an argument that is not there:
+    // `\frac{}{2}` has a numerator of nothing. Not consumed, because the
+    // sequence that opened the group is the one that closes it.
+    if character == '}' {
+        return None;
+    }
+    if character.is_whitespace() || character == '&' {
+        let width = rest
+            .find(|c: char| !c.is_whitespace() && c != '&')
+            .unwrap_or(rest.len());
+        *rest = &rest[width..];
+        return Some(Node::Space(1));
+    }
+    if character.is_ascii_alphabetic() {
+        let width = rest
+            .find(|c: char| !c.is_ascii_alphabetic())
+            .unwrap_or(rest.len());
+        let text = rest[..width].to_owned();
+        *rest = &rest[width..];
+        // One letter is a quantity and is slanted; several are a word --
+        // `sin`, `log`, whatever came out of `\text{…}` -- and TeX sets those
+        // upright for the same reason.
+        let slanted = text.chars().count() == 1;
+        return Some(Node::Run { text, slanted });
+    }
+    if character.is_ascii_digit() {
+        let width = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len());
+        let text = rest[..width].to_owned();
+        *rest = &rest[width..];
+        return Some(Node::Run {
+            text,
+            slanted: false,
+        });
+    }
+
+    *rest = &rest[character.len_utf8()..];
+    Some(Node::Run {
+        text: character.to_string(),
+        slanted: false,
+    })
+}
+
+/// Reads one command and whatever it takes. The backslash is already gone.
+fn command(rest: &mut &str) -> Option<Node> {
+    let end = rest
         .find(|c: char| !c.is_ascii_alphabetic())
-        .unwrap_or(after.len());
+        .unwrap_or(rest.len());
 
     // A backslash before anything that is not a word is punctuation for the
-    // compiler: `\\` breaks the line, the spacing commands are spacing, and a
+    // compiler: `\\` breaks the line, the spacing commands are spacing, and an
     // escaped delimiter is the delimiter.
     if end == 0 {
-        let Some(character) = after.chars().next() else {
-            return after;
+        let character = rest.chars().next()?;
+        *rest = &rest[character.len_utf8()..];
+        return match character {
+            '\\' => Some(Node::Break),
+            ',' | ';' | ':' | '!' => None,
+            other => Some(Node::Run {
+                text: other.to_string(),
+                slanted: false,
+            }),
         };
-        match character {
-            '\\' => out.push('\n'),
-            ',' | ';' | ':' | '!' => {}
-            other => out.push(other),
-        }
-        return &after[character.len_utf8()..];
     }
 
-    let name = &after[..end];
-    let rest = &after[end..];
-    match name {
+    let name = rest[..end].to_owned();
+    *rest = &rest[end..];
+
+    match name.as_str() {
         "frac" | "tfrac" | "dfrac" => {
-            let (numerator, rest) = argument(rest);
-            let (denominator, rest) = argument(rest);
-            out.push_str(&parenthesised(&numerator));
-            // The fraction slash, not the solidus: it is the one Unicode has for
-            // exactly this and it kerns as a fraction rather than as a divide.
-            out.push('\u{2044}');
-            out.push_str(&parenthesised(&denominator));
-            rest
+            let numerator = argument(rest);
+            let denominator = argument(rest);
+            Some(Node::Frac(numerator, denominator))
         }
-        "sqrt" => {
-            let (radicand, rest) = argument(rest);
-            out.push('√');
-            out.push_str(&parenthesised(&radicand));
-            rest
+        "sqrt" => Some(Node::Sqrt(argument(rest))),
+        // Words set upright, bold, blackboard or otherwise are just their
+        // words: a message has one face for everything that is not code. Taken
+        // raw, because what is in them is prose and reading it as maths would
+        // slant the odd letter in the middle of a sentence.
+        "text" | "mathrm" | "mathbf" | "mathit" | "mathbb" | "mathcal" | "operatorname" => {
+            Some(Node::Run {
+                text: raw(rest),
+                slanted: false,
+            })
         }
-        // Words set upright, bold, blackboard or otherwise are just their words:
-        // a message has one face for everything that is not code.
-        "text" | "mathrm" | "mathbf" | "mathit" | "mathbb" | "mathcal"
-        | "operatorname" => {
-            let (words, rest) = argument(rest);
-            out.push_str(&words);
-            rest
+        "left" => {
+            let open = fence(rest);
+            let inner = sequence(rest);
+            let close = match rest.strip_prefix("\\right") {
+                Some(after) => {
+                    *rest = after;
+                    fence(rest)
+                }
+                None => String::new(),
+            };
+            Some(Node::Fenced { open, close, inner })
         }
-        // Sizing hints around a delimiter that is already in the source.
-        "left" | "right" | "big" | "Big" | "bigg" | "Bigg" => rest,
+        // A sizing hint in front of a delimiter that is already in the source.
+        "big" | "Big" | "bigg" | "Bigg" => None,
         // An accent is a combining mark, which is the one piece of structure
-        // Unicode can actually draw: it goes *after* the character it sits on.
-        // Only over a single character, because a combining mark over a
-        // parenthesised group lands on the bracket.
-        "vec" | "hat" | "bar" | "dot" | "ddot" | "tilde" | "overline" => {
-            let (under, rest) = argument(rest);
-            out.push_str(&under);
-            if under.chars().count() == 1 {
-                out.push(match name {
-                    "vec" => '\u{20d7}',
-                    "hat" => '\u{0302}',
-                    "tilde" => '\u{0303}',
-                    "dot" => '\u{0307}',
-                    "ddot" => '\u{0308}',
-                    _ => '\u{0304}',
-                });
-            }
-            rest
-        }
-        // An environment is a layout instruction, and there is no layout. The
-        // name is consumed with it so `\begin{matrix}` does not leave the word
+        // Unicode can draw without a box: it goes *after* the character it sits
+        // on, and only over one, because over a group it lands on the bracket.
+        "vec" | "hat" | "bar" | "dot" | "ddot" | "tilde" | "overline" => Some(Node::Accent {
+            mark: match name.as_str() {
+                "vec" => '\u{20d7}',
+                "hat" => '\u{0302}',
+                "tilde" => '\u{0303}',
+                "dot" => '\u{0307}',
+                "ddot" => '\u{0308}',
+                _ => '\u{0304}',
+            },
+            inner: argument(rest),
+        }),
+        // An environment is a layout instruction and there is no layout. The
+        // name goes with it, so `\begin{matrix}` does not leave the word
         // "matrix" in the middle of the maths.
-        "begin" | "end" => argument(rest).1,
-        "quad" | "qquad" => {
-            out.push_str("  ");
-            rest
+        "begin" | "end" => {
+            let _ = argument(rest);
+            None
         }
-        _ => {
-            match SYMBOLS.iter().find(|(command, _)| *command == name) {
-                Some((_, glyph)) => out.push_str(glyph),
-                // A command nothing here knows is written as its own name. The
-                // backslash is dropped because it is punctuation for a compiler,
-                // and there is no compiler.
-                None => out.push_str(name),
-            }
-            rest
-        }
+        "quad" | "qquad" => Some(Node::Space(2)),
+        _ => match BIG.iter().find(|glyph| **glyph == name) {
+            Some(_) => Some(Node::Big {
+                glyph: symbol(&name),
+                over: None,
+                under: None,
+            }),
+            None => Some(Node::Run {
+                text: symbol(&name),
+                slanted: false,
+            }),
+        },
     }
 }
 
-/// A superscript or subscript, in Unicode where every character of it has one.
+/// What a command comes to, or its own name where nothing here knows it — the
+/// backslash dropped, because it is punctuation for a compiler and there is no
+/// compiler.
+fn symbol(name: &str) -> String {
+    SYMBOLS
+        .iter()
+        .find(|(command, _)| *command == name)
+        .map(|(_, glyph)| (*glyph).to_owned())
+        .unwrap_or_else(|| name.to_owned())
+}
+
+/// One argument: a braced group, a command, or the single character that
+/// follows.
+fn argument(rest: &mut &str) -> Vec<Node> {
+    *rest = rest.trim_start_matches(' ');
+
+    if rest.starts_with('{') {
+        *rest = &rest[1..];
+        let inner = sequence(rest);
+        *rest = rest.strip_prefix('}').unwrap_or(rest);
+        return inner;
+    }
+
+    atom(rest).into_iter().collect()
+}
+
+/// The text of a braced group, unread. What `\text{…}` holds is prose.
+fn raw(rest: &mut &str) -> String {
+    if !rest.starts_with('{') {
+        return match atom(rest) {
+            Some(node) => flatten(&[node]),
+            None => String::new(),
+        };
+    }
+
+    let inner = &rest[1..];
+    let mut depth = 1;
+    for (at, character) in inner.char_indices() {
+        match character {
+            '{' => depth += 1,
+            '}' => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 {
+            *rest = &inner[at + 1..];
+            return inner[..at].to_owned();
+        }
+    }
+    // An unclosed group takes the rest, which is what a reader does too.
+    *rest = "";
+    inner.to_owned()
+}
+
+/// The bracket a `\left` or a `\right` names. A full stop is TeX's way of
+/// saying "no bracket at all", and it draws nothing here either.
+fn fence(rest: &mut &str) -> String {
+    *rest = rest.trim_start_matches(' ');
+    let Some(character) = rest.chars().next() else {
+        return String::new();
+    };
+
+    if character == '\\' {
+        *rest = &rest[1..];
+        return match command(rest) {
+            Some(node) => flatten(&[node]),
+            None => String::new(),
+        };
+    }
+
+    *rest = &rest[character.len_utf8()..];
+    match character {
+        '.' => String::new(),
+        other => other.to_string(),
+    }
+}
+
+/// The tree as one line, which is what everything that is not the conversation
+/// can take.
+pub fn flatten(nodes: &[Node]) -> String {
+    let mut out = String::new();
+
+    for node in nodes {
+        match node {
+            Node::Run { text, .. } => out.push_str(text),
+            Node::Group(inner) => out.push_str(&flatten(inner)),
+            Node::Frac(numerator, denominator) => {
+                out.push_str(&parenthesised(&flatten(numerator)));
+                // The fraction slash, not the solidus: it is the one Unicode
+                // has for exactly this and it kerns as a fraction rather than
+                // as a divide.
+                out.push('\u{2044}');
+                out.push_str(&parenthesised(&flatten(denominator)));
+            }
+            Node::Sqrt(radicand) => {
+                out.push('√');
+                out.push_str(&parenthesised(&flatten(radicand)));
+            }
+            Node::Script { base, over, under } => {
+                out.push_str(&flatten(base));
+                if let Some(over) = over {
+                    out.push_str(&raised(over, true));
+                }
+                if let Some(under) = under {
+                    out.push_str(&raised(under, false));
+                }
+            }
+            Node::Big { glyph, over, under } => {
+                out.push_str(glyph);
+                if let Some(under) = under {
+                    out.push_str(&raised(under, false));
+                }
+                if let Some(over) = over {
+                    out.push_str(&raised(over, true));
+                }
+            }
+            Node::Fenced { open, close, inner } => {
+                out.push_str(open);
+                out.push_str(&flatten(inner));
+                out.push_str(close);
+            }
+            Node::Accent { mark, inner } => {
+                let inner = flatten(inner);
+                out.push_str(&inner);
+                if inner.chars().count() == 1 {
+                    out.push(*mark);
+                }
+            }
+            Node::Space(width) => out.push_str(&" ".repeat(*width)),
+            Node::Break => out.push('\n'),
+        }
+    }
+
+    out
+}
+
+/// A superscript or subscript in one line, in Unicode where every character of
+/// it has a raised form.
 ///
 /// `x^2` is x²; `x^{n+1}` has no `+` in the superscript block, so it stays
 /// `x^(n+1)` — which is what somebody would have typed had they not been
 /// writing LaTeX, and is unambiguous, where a half-raised `n` would not be.
-fn script<'a>(rest: &'a str, high: bool, out: &mut String) -> &'a str {
-    let (body, rest) = argument(rest);
+fn raised(nodes: &[Node], high: bool) -> String {
+    let body = flatten(nodes);
     let table = if high { SUPERSCRIPT } else { SUBSCRIPT };
 
-    let raised: Option<String> = body
+    let shifted: Option<String> = body
         .chars()
         .map(|character| {
             table
@@ -268,61 +558,23 @@ fn script<'a>(rest: &'a str, high: bool, out: &mut String) -> &'a str {
         })
         .collect();
 
-    match raised {
-        Some(raised) => out.push_str(&raised),
-        None => {
-            out.push(if high { '^' } else { '_' });
-            out.push_str(&parenthesised(&body));
-        }
-    }
-    rest
-}
-
-/// One argument: a braced group, a command, or the single character that
-/// follows. Returned rendered, so `\frac{\alpha}{2}` reads α⁄2.
-fn argument(rest: &str) -> (String, &str) {
-    let rest = rest.trim_start_matches(' ');
-
-    if let Some(inner) = rest.strip_prefix('{') {
-        let mut depth = 1;
-        let mut at = 0;
-        for (offset, character) in inner.char_indices() {
-            match character {
-                '{' => depth += 1,
-                '}' => depth -= 1,
-                _ => {}
-            }
-            if depth == 0 {
-                at = offset;
-                break;
-            }
-        }
-        // An unclosed group takes the rest, which is what a reader does too.
-        if depth != 0 {
-            return (render(inner), "");
-        }
-        return (render(&inner[..at]), &inner[at + 1..]);
-    }
-
-    // A command as an argument is the command and its name, and at the very
-    // least the backslash: `\sqrt\` is nothing anybody meant, and slicing two
-    // bytes out of one would take the process with it.
-    if let Some(name) = rest.strip_prefix('\\') {
-        let end = name
-            .find(|c: char| !c.is_ascii_alphabetic())
-            .map_or(rest.len(), |at| at + 1)
-            .clamp(1, rest.len());
-        return (render(&rest[..end]), &rest[end..]);
-    }
-
-    match rest.chars().next() {
-        Some(character) => (
-            render(&rest[..character.len_utf8()]),
-            &rest[character.len_utf8()..],
+    match shifted {
+        Some(shifted) => shifted,
+        None => format!(
+            "{}{}",
+            if high { '^' } else { '_' },
+            parenthesised(&body)
         ),
-        None => (String::new(), rest),
     }
 }
+
+/// The operators whose limits belong above and below them rather than beside.
+/// An integral is deliberately not one: TeX sets its limits at the side, and so
+/// does every book.
+const BIG: &[&str] = &[
+    "sum", "prod", "coprod", "bigcup", "bigcap", "bigoplus", "bigotimes", "lim", "limsup",
+    "liminf", "max", "min", "sup", "inf",
+];
 
 /// Brackets around anything that is not already one thing, so `a⁄b+c` cannot be
 /// read as the fraction it is not.
@@ -450,7 +702,9 @@ const SYMBOLS: &[(&str, &str)] = &[
     ("iint", "∬"), ("iiint", "∭"), ("oint", "∮"), ("partial", "∂"),
     ("nabla", "∇"), ("infty", "∞"), ("surd", "√"), ("wedge", "∧"),
     ("vee", "∨"), ("cap", "∩"), ("cup", "∪"), ("oplus", "⊕"),
-    ("otimes", "⊗"), ("setminus", "∖"),
+    ("otimes", "⊗"), ("setminus", "∖"), ("bigcup", "⋃"), ("bigcap", "⋂"),
+    ("bigoplus", "⨁"), ("bigotimes", "⨂"), ("limsup", "lim sup"),
+    ("liminf", "lim inf"),
     // Relations.
     ("leq", "≤"), ("le", "≤"), ("geq", "≥"), ("ge", "≥"), ("neq", "≠"),
     ("ne", "≠"), ("equiv", "≡"), ("approx", "≈"), ("sim", "∼"),
@@ -598,6 +852,87 @@ mod tests {
 
         assert_eq!(found.len(), 2);
         assert!(found[0].end <= found[1].start);
+    }
+
+    /// The tree is the point: a fraction that stays a numerator and a
+    /// denominator is a fraction something can draw a rule between.
+    #[test]
+    fn a_fraction_survives_as_two_halves() {
+        assert_eq!(
+            parse("\\frac{a}{b+1}"),
+            vec![Node::Frac(
+                vec![Node::Run {
+                    text: "a".into(),
+                    slanted: true
+                }],
+                vec![
+                    Node::Run {
+                        text: "b".into(),
+                        slanted: true
+                    },
+                    Node::Run {
+                        text: "+".into(),
+                        slanted: false
+                    },
+                    Node::Run {
+                        text: "1".into(),
+                        slanted: false
+                    },
+                ],
+            )]
+        );
+    }
+
+    /// A ∑ takes its limits above and below; an ∫ takes them beside, which is
+    /// what TeX does and what every book does.
+    #[test]
+    fn only_the_operators_that_take_limits_take_limits() {
+        assert!(matches!(
+            parse("\\sum_{i=1}^{n}").as_slice(),
+            [Node::Big {
+                over: Some(_),
+                under: Some(_),
+                ..
+            }]
+        ));
+        assert!(matches!(
+            parse("\\int_0^1").as_slice(),
+            [Node::Script { .. }]
+        ));
+    }
+
+    /// A `\left…\right` pair knows what it is holding, which is what lets it be
+    /// drawn to the height of it.
+    #[test]
+    fn a_left_right_pair_keeps_what_it_holds() {
+        let Some(Node::Fenced { open, close, inner }) =
+            parse("\\left(\\frac{1}{2}\\right)").into_iter().next()
+        else {
+            panic!("not a fenced group");
+        };
+
+        assert_eq!((open.as_str(), close.as_str()), ("(", ")"));
+        assert!(matches!(inner.as_slice(), [Node::Frac(_, _)]));
+    }
+
+    /// A single letter is a quantity and slants; a run of them is a word and
+    /// does not. The same rule `variables` applies to a rendered line.
+    #[test]
+    fn the_tree_carries_the_italics() {
+        assert_eq!(
+            parse("x"),
+            vec![Node::Run {
+                text: "x".into(),
+                slanted: true
+            }]
+        );
+        assert_eq!(
+            parse("sin"),
+            vec![Node::Run {
+                text: "sin".into(),
+                slanted: false
+            }]
+        );
     }
 
     /// An unknown command is a word, not a backslash and a word.
