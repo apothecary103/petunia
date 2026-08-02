@@ -255,6 +255,40 @@ impl<S: Store> Manager<S, Registered> {
         }
     }
 
+    /// Opens a *new* identified websocket for the message stream, replacing
+    /// whatever was cached.
+    ///
+    /// `identified_websocket(true)` hands back the cached socket whenever it is
+    /// not already carrying a stream, and on a reconnect that socket is routinely
+    /// a zombie: a websocket whose peer stopped listening without sending a close
+    /// frame — the machine slept, the network changed — stays open on this side
+    /// until a keep-alive goes unanswered, which is a minute or two away. Handed
+    /// that socket, the new stream ends the moment it is read, so the caller
+    /// reconnects, is handed the same dead socket again, and reports itself as
+    /// reconnecting every few seconds while delivering nothing.
+    ///
+    /// Dropping the cached handle is what closes the old socket: the process
+    /// behind it ends when the last sender for its request channel goes.
+    async fn fresh_identified_websocket(
+        &self,
+    ) -> Result<SignalWebSocket<websocket::Identified>, Error<S::Error>> {
+        let mut identified_ws = self.state.identified_websocket.lock().await;
+        let headers = &[("X-Signal-Receive-Stories", "false")];
+        let ws = self
+            .identified_push_service()
+            .ws(
+                "/v1/websocket/",
+                "/v1/keepalive",
+                headers,
+                Some(self.credentials()),
+            )
+            .await?;
+        identified_ws.replace(ws.clone());
+        debug!("opened a fresh identified websocket");
+
+        Ok(ws)
+    }
+
     /// Returns the current unidentified websocket, or creates a new one
     ///
     /// A new one is created if the current websocket is closed, or if there is none yet.
@@ -629,7 +663,7 @@ impl<S: Store> Manager<S, Registered> {
 
         let identified_push_service = self.identified_push_service();
         // NB: here, we initialise a *fresh* Signal websocket, which means any other use of the previous one will go into nirvana
-        let identified_websocket = self.identified_websocket(true).await?;
+        let identified_websocket = self.fresh_identified_websocket().await?;
 
         let mut account_manager = AccountManager::new(
             identified_push_service.clone(),
