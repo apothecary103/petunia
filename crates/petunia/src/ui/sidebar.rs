@@ -441,6 +441,15 @@ impl Render for Sidebar {
     }
 }
 
+/// How tall the box is. Fixed rather than arrived at from what is inside it:
+/// the clear button is a twenty-eight pixel hit target and the search glyph is
+/// fourteen, so a field sized to its contents grew by half its own height the
+/// moment the first character was typed and shrank again on the last backspace
+/// — the whole list under it stepping down and back with every empty query.
+/// Tall enough for the button, so nothing about it depends on whether the
+/// button is drawn.
+const FIELD: f32 = 32.0;
+
 /// The box that narrows the list. `kit::field` is the box, so the one control in
 /// the column that is typed into looks like every other one in the application,
 /// and the input inside it brings none of its own padding — a field with two
@@ -457,7 +466,8 @@ fn field(
         .pb_2()
         .child(
             kit::field(palette)
-                .py_1p5()
+                .h(px(FIELD))
+                .py_0()
                 .gap_2()
                 .child(kit::glyph("icons/search.svg", 14.0, palette.text_muted))
                 .child(
