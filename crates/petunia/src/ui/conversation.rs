@@ -167,6 +167,9 @@ pub struct Conversation {
     /// The message whose text was just copied, and the task that stops saying so.
     copied: Option<u64>,
     confirming: Option<gpui::Task<()>>,
+    /// The newest thing *we* said that the list has already been carried down
+    /// to. See `follow_own`.
+    own_tail: Option<u64>,
     /// Where to put the list once it has been told how many rows there are.
     /// Applied after `reconcile` rather than when the row is worked out, because
     /// scrolling to a row the list has not heard of yet clamps to the end.
@@ -277,6 +280,7 @@ impl Conversation {
             revealed: None,
             copied: None,
             confirming: None,
+            own_tail: None,
             pending_scroll: None,
             fading: None,
         }
@@ -617,6 +621,7 @@ impl Conversation {
             self.shown = rows.to_vec();
             self.messages = messages;
             self.prepending = false;
+            self.own_tail = None;
             self.list.reset(rows.len() + 1);
             // A voice note belongs to the conversation it was sent in, so it
             // does not follow you into the next one.
@@ -657,6 +662,27 @@ impl Conversation {
                 item_ix: rewritten.start + count + 1,
                 offset_in_item: px(0.0),
             });
+        }
+    }
+
+    /// Carries the reader down to something they have just said.
+    ///
+    /// The one exception to the list leaving people where they are. A message
+    /// arriving at the back of a thread somebody has scrolled up in must not
+    /// move them; one they wrote themselves is the thing they are looking for
+    /// on screen, and Signal, iMessage and every other client puts them at the
+    /// bottom for it.
+    ///
+    /// Keyed on which message rather than on whether the last one is ours,
+    /// because that stays true for every frame after a send -- and a rule that
+    /// scrolls to the end on all of them is a thread that cannot be scrolled
+    /// back through at all.
+    fn follow_own(&mut self, newest: Option<&Message>, us: uuid::Uuid) {
+        let ours = newest
+            .filter(|message| message.sender() == us)
+            .map(Message::timestamp);
+        if ours.is_some() && std::mem::replace(&mut self.own_tail, ours) != ours {
+            self.list.scroll_to_end();
         }
     }
 
@@ -847,6 +873,7 @@ impl Render for Conversation {
         let loading = history.is_loading();
 
         self.reconcile(&thread, &rows, history.messages().len());
+        self.follow_own(history.messages().last(), state.aci);
         // After reconcile, so the list has heard of the row being asked for.
         if let Some(row) = self.pending_scroll.take() {
             self.list.scroll_to(gpui::ListOffset {

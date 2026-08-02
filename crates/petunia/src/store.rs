@@ -1030,6 +1030,12 @@ impl Store {
             // told us. Both mean the same thing here.
             Event::Forgotten { thread, target } => {
                 state.history_mut(&thread).remove(&target);
+                // Off the sidebar's line too, when that is where it was. A
+                // message that has gone from the conversation and is still
+                // readable in the column beside it has not gone anywhere; the
+                // replacement comes from the store, which is the only thing
+                // that knows what the newest surviving message is.
+                state.index.forget_preview(&thread, target.timestamp);
             }
             Event::ExpireTimers(timers) => state.set_expire_timers(timers),
             Event::Avatar { thread, path } => {
@@ -1076,7 +1082,13 @@ impl Store {
                 // Opening a thread marks it read, but on the first open there is
                 // nothing loaded yet to owe a receipt for, so the page arriving
                 // is when the debt becomes knowable.
+                // Which is also the moment a first open can start any clocks.
+                // `activate` asks before the page it just requested has come
+                // back, so on a thread nothing had read there was nothing in
+                // memory to start -- and a conversation full of disappearing
+                // messages sat there with none of them counting down.
                 if !older && self.frontmost && self.active.as_ref() == Some(&thread) {
+                    self.start_expiry(&thread);
                     self.mark_read(thread);
                 }
             }

@@ -361,6 +361,22 @@ impl Index {
 
     /// Records activity for a thread the contact sync has not produced yet, so
     /// a message from an unknown sender still appears in the sidebar.
+    /// Takes a message off a row when the row was showing it.
+    ///
+    /// A line that outlives the message it was taken from is a disappearing
+    /// message still legible in the sidebar. Cleared rather than replaced,
+    /// because `touch` refuses to go backwards and what comes next is older by
+    /// definition: the store works out the replacement and sends it, and this
+    /// is what leaves room for it. `last_activity` stays, so the conversation
+    /// keeps its place in the list and does not vanish along with the message.
+    pub fn forget_preview(&mut self, thread: &Thread, at: u64) {
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.thread == *thread)
+            && entry.preview.as_ref().is_some_and(|preview| preview.at() == at)
+        {
+            entry.preview = None;
+        }
+    }
+
     pub fn touch(&mut self, thread: &Thread, preview: Preview, name: impl FnOnce() -> String) {
         let newer = self
             .get(thread)
@@ -543,6 +559,38 @@ mod tests {
     /// The threads the sidebar would actually draw.
     fn listed(index: &Index) -> Vec<Thread> {
         index.conversations().map(|e| e.thread.clone()).collect()
+    }
+
+    /// A disappearing message that has gone from the conversation and is still
+    /// legible in the column beside it has not disappeared.
+    #[test]
+    fn forgetting_a_message_takes_it_off_the_line_it_was_on() {
+        let who = contact("Vanishing");
+        let (mut index, _) = index(std::slice::from_ref(&who), &[]);
+        let thread = Thread::Contact(ContactId::Aci(who.uuid));
+        index.touch(&thread, Preview::of(&message(100, who.uuid, "secret")), unknown);
+
+        index.forget_preview(&thread, 100);
+
+        assert!(index.get(&thread).unwrap().preview.is_none());
+        // Still a conversation, though: it is the message that went, not the
+        // person.
+        assert!(listed(&index).contains(&thread));
+    }
+
+    /// The row shows one message, and the ones behind it are not on it. Taking
+    /// an older one out must leave the line where it is.
+    #[test]
+    fn forgetting_something_further_back_leaves_the_line_alone() {
+        let who = contact("Talkative");
+        let (mut index, _) = index(std::slice::from_ref(&who), &[]);
+        let thread = Thread::Contact(ContactId::Aci(who.uuid));
+        index.touch(&thread, Preview::of(&message(200, who.uuid, "newest")), unknown);
+
+        index.forget_preview(&thread, 100);
+
+        let line = &index.get(&thread).unwrap().preview.as_ref().unwrap().line;
+        assert_eq!(line, "newest");
     }
 
     /// The order the sidebar draws, and nothing in it that has no conversation
