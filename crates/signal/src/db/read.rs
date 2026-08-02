@@ -72,6 +72,16 @@ impl Db {
 }
 
 /// The same key the receipt tables use, so a thread means one thing everywhere.
+/// A thread back out of the two columns that were written for it.
+pub fn thread(key: Vec<u8>, is_group: bool) -> Option<Thread> {
+    match is_group {
+        true => Some(Thread::Group(key.try_into().ok()?)),
+        false => Some(Thread::Contact(petunia_data::ContactId::Aci(
+            uuid::Uuid::from_slice(&key).ok()?,
+        ))),
+    }
+}
+
 pub fn key(thread: &Thread) -> Vec<u8> {
     match thread {
         Thread::Contact(contact) => contact.uuid().as_bytes().to_vec(),

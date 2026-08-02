@@ -1407,6 +1407,23 @@ impl<S: Store> Manager<S, Registered> {
         &self,
         attachment_pointer: &AttachmentPointer,
     ) -> Result<Vec<u8>, Error<S::Error>> {
+        self.get_attachment_reporting(attachment_pointer, |_| {})
+            .await
+    }
+
+    /// The same, reporting how many bytes have arrived as they arrive.
+    ///
+    /// Upstream reads the whole stream in one `read_to_end`, so there is
+    /// nothing to report until there is nothing left to report — which is why a
+    /// client can only draw an indeterminate bar for a download. The bytes are
+    /// there; only the counting was missing. `progress` is called with the
+    /// running total as each chunk lands, and is a plain closure rather than a
+    /// channel so a caller that does not care pays nothing.
+    pub async fn get_attachment_reporting(
+        &self,
+        attachment_pointer: &AttachmentPointer,
+        mut progress: impl FnMut(u64),
+    ) -> Result<Vec<u8>, Error<S::Error>> {
         let expected_digest = attachment_pointer
             .digest
             .as_ref()
@@ -1419,7 +1436,17 @@ impl<S: Store> Manager<S, Registered> {
 
         // We need the whole file for the crypto to check out
         let mut ciphertext = Vec::with_capacity(plaintext_len.unwrap_or(0));
-        let size_bytes = attachment_stream.read_to_end(&mut ciphertext).await?;
+        let mut chunk = [0u8; 64 * 1024];
+        let mut size_bytes = 0usize;
+        loop {
+            let read = attachment_stream.read(&mut chunk).await?;
+            if read == 0 {
+                break;
+            }
+            ciphertext.extend_from_slice(&chunk[..read]);
+            size_bytes += read;
+            progress(size_bytes as u64);
+        }
         trace!(size_bytes, "downloaded encrypted attachment");
 
         let digest = sha2::Sha256::digest(&ciphertext);

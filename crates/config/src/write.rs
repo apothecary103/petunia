@@ -33,6 +33,7 @@ pub fn to_toml(config: &Config) -> String {
     let _ = writeln!(out, "group_within = {}", config.messages.group_within);
     let _ = writeln!(out, "date_separators = {}", config.messages.date_separators);
     let _ = writeln!(out, "show_own_name = {}", config.messages.show_own_name);
+    let _ = writeln!(out, "show_counts = {}", config.messages.show_counts);
 
     let _ = writeln!(out, "\n[sidebar]");
     let _ = writeln!(out, "width = {:?}", config.sidebar.width);
@@ -56,6 +57,7 @@ pub fn to_toml(config: &Config) -> String {
     let _ = writeln!(out, "show_content = {}", notifications.show_content);
     let _ = writeln!(out, "show_sender = {}", notifications.show_sender);
     let _ = writeln!(out, "groups = {:?}", groups(notifications.groups));
+    let _ = writeln!(out, "sounds = {}", notifications.sounds);
 
     let _ = writeln!(out, "\n[keys]");
     for (action, chords) in config.keys.written() {
@@ -156,6 +158,7 @@ mod tests {
                 timestamps: Timestamps::Hover,
                 group_within: 120,
                 show_own_name: true,
+                show_counts: true,
                 ..Default::default()
             },
             sidebar: crate::Sidebar {
@@ -186,6 +189,7 @@ mod tests {
         assert_eq!(read.messages.timestamps, config.messages.timestamps);
         assert_eq!(read.messages.group_within, config.messages.group_within);
         assert_eq!(read.messages.show_own_name, config.messages.show_own_name);
+        assert_eq!(read.messages.show_counts, config.messages.show_counts);
         assert_eq!(read.sidebar.width, config.sidebar.width);
         assert_eq!(read.sidebar.sort, config.sidebar.sort);
         assert_eq!(read.sidebar.show_preview, config.sidebar.show_preview);

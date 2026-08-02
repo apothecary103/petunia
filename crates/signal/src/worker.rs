@@ -7,7 +7,7 @@ use futures::channel::{mpsc, oneshot};
 use futures::{SinkExt, StreamExt, future, pin_mut};
 use presage::Manager;
 use presage::libsignal_service::configuration::SignalServers;
-use presage::libsignal_service::content::{ContentBody, GroupContextV2};
+use presage::libsignal_service::content::{ContentBody, DataMessage, GroupContextV2};
 use presage::libsignal_service::proto::{AttachmentPointer, receipt_message};
 use presage::libsignal_service::protocol::{Aci, ServiceId};
 use presage::libsignal_service::sender::AttachmentSpec;
@@ -192,8 +192,16 @@ async fn session(
 
     let mut queue_drained = false;
     let mut pending = Vec::new();
+    // What has already been read is already counting down, so the first sweep
+    // happens before the loop does: a conversation left open overnight should
+    // not still be holding yesterday's messages when the window comes back.
+    report_expire_timers(db, events).await;
+    sweep_expired(db, events).await;
+    let mut sweeping = tokio::time::interval(SWEEP);
+
     loop {
         tokio::select! {
+            _ = sweeping.tick() => sweep_expired(db, events).await,
             _ = &mut queue_rx, if !queue_drained => {
                 queue_drained = true;
                 info!(pending = pending.len(), "message queue drained");
@@ -213,6 +221,7 @@ async fn session(
                             outgoing::quote(&quoted.id, &quoted.body, &quoted.ranges),
                         );
                     }
+                    let message = expiring(db, &thread, message).await;
                     save_outgoing(&manager, &thread, message.clone(), timestamp).await;
                     let outgoing = Prepared::tracked(thread, message, timestamp);
                     queue(&mut manager, db, events, &mut pending, queue_drained, outgoing).await;
@@ -257,11 +266,19 @@ async fn session(
                         .reporting(target);
                     queue(&mut manager, db, events, &mut pending, queue_drained, outgoing).await;
                 }
-                Some(Command::SendAttachments { thread, body, ranges, paths, quote, timestamp }) => {
+                Some(Command::SendAttachments {
+                    thread,
+                    body,
+                    ranges,
+                    paths,
+                    quote,
+                    timestamp,
+                    voice,
+                }) => {
                     tokio::task::spawn_local(upload(
                         media.clone(),
                         thread,
-                        Composed { body, ranges, quote },
+                        Composed { body, ranges, quote, voice },
                         paths,
                         timestamp,
                     ));
@@ -314,6 +331,20 @@ async fn session(
                         }
                     }
                 }
+                // Spawned rather than awaited here: it reads every row in the
+                // store, and the command loop is what sends, receipts and
+                // reconnects run through.
+                Some(Command::CountMessages) => {
+                    let aci = manager.registration_data().service_ids.aci;
+                    let db = db.clone();
+                    let mut events = events.clone();
+                    tokio::spawn(async move {
+                        match db.tallies(aci).await {
+                            Ok(tallies) => emit(&mut events, Event::Counts(tallies)).await,
+                            Err(error) => warn!(%error, "could not count the messages"),
+                        }
+                    });
+                }
                 Some(Command::Search { query, within }) => {
                     match db.search(&query, within.as_ref()).await {
                         Ok(hits) => emit(events, Event::Found { query, hits }).await,
@@ -322,6 +353,36 @@ async fn session(
                 }
                 Some(Command::MarkRead { thread, messages }) => {
                     mark_read(&mut manager, db, events, &thread, &messages).await;
+                }
+                Some(Command::SetExpireTimer {
+                    thread,
+                    seconds,
+                    timestamp,
+                }) => {
+                    let update = outgoing::expire_timer(&thread, seconds, timestamp);
+                    // Recorded before it is sent, and whatever the network
+                    // says: this device has been told what the timer is, and a
+                    // setting that only takes effect once the server agrees is
+                    // a setting that quietly does not.
+                    if let Err(error) = db.set_expire_timer(&thread, seconds).await {
+                        warn!(%error, "failed to record a disappearing-message timer");
+                    }
+                    save_outgoing(&manager, &thread, update.clone(), timestamp).await;
+                    if let Err(error) =
+                        send_message(&mut manager, &thread, update.into(), timestamp).await
+                    {
+                        warn!(%error, "failed to tell the conversation about the timer");
+                    }
+                    report_expire_timers(db, events).await;
+                }
+                Some(Command::StartExpiry { thread, messages }) => {
+                    let at = now();
+                    for (target, seconds) in messages {
+                        let due = at + u64::from(seconds) * 1_000;
+                        if let Err(error) = db.start_expiry(&thread, target, due).await {
+                            warn!(%error, "failed to start a message's clock");
+                        }
+                    }
                 }
                 Some(Command::Typing { thread, started }) => {
                     let timestamp = now();
@@ -693,6 +754,11 @@ async fn watch_for_sleep(wake: Arc<Notify>) {
 
 /// How long to wait before reconnecting, and how far that grows while the stream
 /// keeps failing.
+/// How often expired messages are looked for. Half a minute is well inside the
+/// shortest timer Signal offers, and a query against an index costs nothing
+/// when there is nothing to find.
+const SWEEP: Duration = Duration::from_secs(30);
+
 const RECONNECT_MIN: Duration = Duration::from_secs(5);
 const RECONNECT_MAX: Duration = Duration::from_secs(120);
 
@@ -829,6 +895,20 @@ async fn receive_once(
                         // else that ever needed it had to work it out again.
                         let aci = manager.registration_data().service_ids.aci;
                         remember_preview(db, &thread, message, aci).await;
+
+                        // A one-to-one timer is kept nowhere a client can read
+                        // it back: the update *is* the setting, so an arriving
+                        // one has to be written down or the conversation forgets
+                        // what it was told the moment the window closes.
+                        if let data::message::Content::Update(
+                            data::message::Update::ExpireTimer { seconds },
+                        ) = message.content
+                        {
+                            if let Err(error) = db.set_expire_timer(&thread, seconds).await {
+                                warn!(%error, "failed to record an arriving timer");
+                            }
+                            report_expire_timers(db, events).await;
+                        }
                     }
                     let pointers = data::pointers(&content);
                     if !pointers.is_empty() {
@@ -1293,6 +1373,7 @@ struct Composed {
     body: String,
     ranges: Vec<data::message::Range>,
     quote: Option<super::command::Quoted>,
+    voice: bool,
 }
 
 async fn upload(
@@ -1302,7 +1383,12 @@ async fn upload(
     paths: Vec<PathBuf>,
     timestamp: u64,
 ) {
-    let Composed { body, ranges, quote } = composed;
+    let Composed {
+        body,
+        ranges,
+        quote,
+        voice,
+    } = composed;
     let Media {
         manager,
         cache,
@@ -1315,7 +1401,7 @@ async fn upload(
     let mut specs = Vec::new();
     for path in &paths {
         match tokio::fs::read(path).await {
-            Ok(bytes) => specs.push((spec(path, bytes.len()), bytes)),
+            Ok(bytes) => specs.push((spec(path, bytes.len(), voice), bytes)),
             Err(error) => {
                 error!(%error, path = %path.display(), "failed to read an attachment");
                 fail_send(&mut events, timestamp).await;
@@ -1356,6 +1442,7 @@ async fn upload(
             outgoing::quote(&quoted.id, &quoted.body, &quoted.ranges),
         );
     }
+    let message = expiring(&db, &thread, message).await;
     save_outgoing(&manager, &thread, message.clone(), timestamp).await;
     let _ = prepared.send(Prepared::tracked(thread, message, timestamp));
 }
@@ -1420,13 +1507,18 @@ async fn upload_sticker(context: Media, thread: Thread, chosen: Chosen, timestam
     let _ = prepared.send(Prepared::tracked(thread, message, timestamp));
 }
 
-fn spec(path: &Path, length: usize) -> AttachmentSpec {
+/// A voice note says so on the wire. It is a flag rather than a content type --
+/// Signal sends AAC and petunia sends PCM, and neither of those is what makes a
+/// recording a voice note -- and it is the flag every other client reads to draw
+/// a waveform and a play button instead of a paperclip.
+fn spec(path: &Path, length: usize, voice_note: bool) -> AttachmentSpec {
     AttachmentSpec {
         content_type: attachment::content_type(path),
         length,
         file_name: path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned()),
+        voice_note: voice_note.then_some(true),
         ..Default::default()
     }
 }
@@ -1508,20 +1600,46 @@ async fn download_all(
         let Ok(_permit) = limiter.acquire().await else {
             return;
         };
-        // presage reads the whole attachment before it verifies the digest, so
-        // there is no byte count to report along the way; what the UI gets is
-        // "this one is in flight", which is what its bar shows.
         emit(
             &mut events,
             Event::Attachment {
                 thread: thread.clone(),
                 id: id.clone(),
-                blob: attachment::Blob::Downloading,
+                blob: attachment::Blob::Downloading(None),
                 measured: None,
             },
         )
         .await;
-        match manager.get_attachment(&pointer).await {
+
+        // The declared size is the *plaintext* length and what arrives is the
+        // ciphertext, which carries an IV and a MAC on top of it — so the
+        // fraction is clamped rather than allowed to read 100.2%. Reported
+        // every `STEP` bytes rather than every chunk: a bar is a few hundred
+        // pixels wide and one event per sixty-four kilobytes of a large video
+        // is a thousand repaints saying nothing new.
+        let declared = pointer.size().max(1) as f64;
+        let reporter = events.clone();
+        let (reporting, thread_for) = (id.clone(), thread.clone());
+        let mut reported = 0u64;
+        let progress = move |bytes: u64| {
+            const STEP: u64 = 256 * 1024;
+            if bytes < reported + STEP {
+                return;
+            }
+            reported = bytes;
+            let fraction = (bytes as f64 / declared).clamp(0.0, 1.0) as f32;
+            // `try_send` on an unbounded channel only fails once the receiver is
+            // gone, and this is inside a synchronous closure the reader cannot
+            // be awaited from.
+            let _ = reporter.clone().try_send(Event::Attachment {
+                thread: thread_for.clone(),
+                id: reporting.clone(),
+                blob: attachment::Blob::Downloading(Some(fraction)),
+                measured: None,
+            });
+        };
+
+        match manager.get_attachment_reporting(&pointer, progress).await {
             Ok(bytes) => match cache.put_attachment(&id, &content_type, &bytes).await {
                 Ok(path) => {
                     if let Err(error) = db.record_blob(&id, &content_type, bytes.len() as u64).await
@@ -1579,6 +1697,60 @@ async fn fail(events: &mut Events, thread: &Thread, id: attachment::Id, error: S
         },
     )
     .await;
+}
+
+/// Marks a message with the conversation's disappearing timer, if it has one.
+///
+/// On the way out rather than at the composer: the timer is a property of the
+/// conversation and the worker is what remembers it, and a message sent without
+/// the field set is a message that never disappears for anybody — including for
+/// the person who turned the timer on.
+async fn expiring(db: &Db, thread: &Thread, mut message: DataMessage) -> DataMessage {
+    match db.expire_timers().await {
+        Ok(timers) => {
+            message.expire_timer = timers
+                .iter()
+                .find(|(of, _)| of == thread)
+                .map(|(_, seconds)| *seconds);
+        }
+        Err(error) => warn!(%error, "could not read the timer for an outgoing message"),
+    }
+    message
+}
+
+/// Tells the window what every conversation's disappearing timer is.
+async fn report_expire_timers(db: &Db, events: &mut Events) {
+    match db.expire_timers().await {
+        Ok(timers) => emit(events, Event::ExpireTimers(timers)).await,
+        Err(error) => warn!(%error, "failed to read the disappearing-message timers"),
+    }
+}
+
+/// Deletes whatever is due, and tells the window so the rows go from the
+/// conversation on screen rather than only from the file under it.
+///
+/// Locally and only locally: an expiry is not a remote delete. Everybody else
+/// has the same timer and is running the same clock, and asking them to delete
+/// something they are already deleting is a message per message per recipient.
+async fn sweep_expired(db: &Db, events: &mut Events) {
+    let due = match db.due(now()).await {
+        Ok(due) => due,
+        Err(error) => {
+            warn!(%error, "failed to look for expired messages");
+            return;
+        }
+    };
+
+    for (thread, target) in due {
+        if let Err(error) = db.delete_message(&thread, target.timestamp).await {
+            warn!(%error, "failed to delete an expired message");
+            continue;
+        }
+        if let Err(error) = db.forget_expiry(&thread, target.timestamp).await {
+            warn!(%error, "failed to forget an expiry");
+        }
+        emit(events, Event::Forgotten { thread, target }).await;
+    }
 }
 
 /// Sends READ receipts to each sender and tells our own other devices, which

@@ -174,6 +174,76 @@ impl Db {
     }
 }
 
+/// How much has been said, and by whom.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Tally {
+    pub sent: u64,
+    pub received: u64,
+}
+
+impl Tally {
+    pub fn total(&self) -> u64 {
+        self.sent + self.received
+    }
+}
+
+impl Db {
+    /// How many messages each conversation holds, split by who sent them.
+    ///
+    /// Counted rather than kept: nothing writes a running total, and a total
+    /// that was written would be a second copy of the truth going stale the
+    /// first time a row was deleted from under it. So this is a full pass over
+    /// the store, which is why it is asked for rather than maintained — the
+    /// details panel asks when the preference is on and the panel is open, and
+    /// the worker answers off its command loop.
+    ///
+    /// A message is a message: a receipt, a reaction, an edit and a tombstone
+    /// are rows and are not counted, because "you have sent 4,000 messages"
+    /// with the thumbs-up in it is not the number anybody meant. `classify` is
+    /// the same reader the conversation is built from, so the two cannot come
+    /// to different answers about what a message is.
+    pub async fn tallies(
+        &self,
+        us: Uuid,
+    ) -> Result<std::collections::HashMap<Thread, Tally>, Error> {
+        let sql = format!(
+            "SELECT t.group_master_key, t.recipient_id, {COLUMNS}
+            FROM thread_messages m JOIN threads t ON t.id = m.thread_id"
+        );
+
+        let rows = sqlx::query(AssertSqlSafe(sql)).fetch_all(&self.pool).await?;
+        let mut tallies: std::collections::HashMap<Thread, Tally> = std::collections::HashMap::new();
+
+        for row in &rows {
+            let Some(thread) = row_thread(row) else {
+                continue;
+            };
+            let Some(envelope) = decode(row) else {
+                continue;
+            };
+            // The thread the row is *filed* under is not always the thread the
+            // message is in -- a sync of something we sent from the phone names
+            // its own destination -- so the classification's answer wins where
+            // it has one.
+            let (of, fragment) = match petunia_data::message::project::classify(&envelope) {
+                Some(classified) => classified,
+                None => continue,
+            };
+            let petunia_data::message::project::Fragment::Message(message) = fragment else {
+                continue;
+            };
+
+            let tally = tallies.entry(if of == thread { thread } else { of }).or_default();
+            match message.sender() == us {
+                true => tally.sent += 1,
+                false => tally.received += 1,
+            }
+        }
+
+        Ok(tallies)
+    }
+}
+
 /// A thread that has rows, and what could be read of its newest ones.
 pub struct Recent {
     pub thread: Thread,

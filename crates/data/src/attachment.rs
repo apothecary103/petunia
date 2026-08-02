@@ -77,10 +77,15 @@ pub enum Kind {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Blob {
     Missing,
-    /// In flight. Carries no fraction: presage reads an attachment whole before
-    /// it can verify the digest, so there is no byte count to report and a
-    /// percentage here would be invented.
-    Downloading,
+    /// In flight, and how far in — a fraction of the declared size, or `None`
+    /// for the first moment before anything has arrived and for a pointer that
+    /// declares no size at all.
+    ///
+    /// The bytes were always there; the counting was not. presage read the
+    /// whole stream in one call and reported when it was finished, which is a
+    /// bar that can only slide, so `get_attachment_reporting`
+    /// (`vendor/presage`) reads it in chunks and says how far it has got.
+    Downloading(Option<f32>),
     Cached(PathBuf),
     Failed(String),
 }

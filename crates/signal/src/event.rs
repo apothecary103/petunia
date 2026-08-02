@@ -175,5 +175,11 @@ pub enum Event {
     /// under -- the same shape `Event::Avatar` already uses for everyone
     /// else's.
     AvatarUpdated(std::path::PathBuf),
+    /// How many messages every conversation holds, split by who sent them.
+    /// Answers `Command::CountMessages` and nothing else.
+    Counts(std::collections::HashMap<Thread, crate::db::messages::Tally>),
+    /// What each conversation's disappearing-message timer is set to, in
+    /// seconds. Read back at startup and again whenever either end changes one.
+    ExpireTimers(Vec<(Thread, u32)>),
 }
 

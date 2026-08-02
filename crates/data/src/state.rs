@@ -64,6 +64,12 @@ pub struct State {
     /// Who is currently typing, per thread. Kept here rather than in `History`
     /// because it is not part of the message stream.
     typing: HashMap<Thread, Vec<(Uuid, Instant)>>,
+    /// How long a message lives in each conversation, in seconds, where
+    /// somebody has set that. Signal keeps a one-to-one timer nowhere a client
+    /// can read it back -- the update message *is* the setting -- so this is
+    /// what the worker read out of its own cache of them, seeded from the group
+    /// records where there are any.
+    expire_timers: HashMap<Thread, u32>,
     pub sticker_packs: Vec<super::stickers::Pack>,
     /// Whether our own messages are attributed by name rather than as "You". A
     /// preference, pushed in from the config so that what to call someone stays
@@ -87,9 +93,32 @@ impl State {
             blocked: HashSet::new(),
             connection: Connection::default(),
             typing: HashMap::new(),
+            expire_timers: HashMap::new(),
             sticker_packs: Vec::new(),
             show_own_name: false,
         }
+    }
+
+    /// How long a message lives in this conversation, or `None` where nothing
+    /// disappears. Zero seconds is off and is reported as `None`, so no caller
+    /// has to know that the protocol says off twice.
+    ///
+    /// What was last *told* to this device outranks the group's own record: a
+    /// record is refreshed when the group is, and an update arrives the moment
+    /// somebody changes the timer.
+    pub fn expire_timer(&self, thread: &Thread) -> Option<Duration> {
+        self.expire_timers
+            .get(thread)
+            .copied()
+            .map(u64::from)
+            .map(Duration::from_secs)
+            .or_else(|| self.group(thread).and_then(|group| group.expire_timer))
+            .filter(|timer| !timer.is_zero())
+    }
+
+    /// What every conversation is set to, replacing whatever was known.
+    pub fn set_expire_timers(&mut self, timers: Vec<(Thread, u32)>) {
+        self.expire_timers = timers.into_iter().collect();
     }
 
     /// The group behind a thread, for the details panel's member list.

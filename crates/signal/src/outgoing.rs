@@ -36,6 +36,24 @@ pub fn message(
     }
 }
 
+/// Turns disappearing messages on or off, for everybody in the conversation.
+///
+/// A message with no body, marked with a flag. Which is the whole protocol for
+/// it in a one-to-one: there is nowhere on the server a timer is kept, so the
+/// setting *is* the message, and every client that receives one both applies it
+/// and draws a line in the thread saying it changed. `expire_timer_version`
+/// goes with it — Signal counts changes so two devices setting it at once
+/// resolve to the later of the two rather than to whichever arrived last.
+pub fn expire_timer(thread: &Thread, seconds: u32, timestamp: u64) -> DataMessage {
+    DataMessage {
+        flags: Some(data_message::Flags::ExpirationTimerUpdate as u32),
+        expire_timer: Some(seconds),
+        timestamp: Some(timestamp),
+        group_v2: group_context(thread),
+        ..Default::default()
+    }
+}
+
 /// A sticker, sent as its own kind of message rather than as a picture.
 ///
 /// The pointer is a *fresh upload* of the sticker's bytes. presage's stored pack

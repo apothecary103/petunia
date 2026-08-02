@@ -72,6 +72,10 @@ pub enum Command {
         paths: Vec<PathBuf>,
         quote: Option<Quoted>,
         timestamp: u64,
+        /// Whether these are voice notes rather than files. Signal marks one on
+        /// the wire, and the mark is what every other client draws a waveform
+        /// and a play button off rather than a paperclip.
+        voice: bool,
     },
     LoadThread {
         thread: Thread,
@@ -113,6 +117,25 @@ pub enum Command {
     /// not expose.
     DeleteThread {
         thread: Thread,
+    },
+    /// Counts what has been said, everywhere, split by who said it. A full pass
+    /// over the store, so it is asked for rather than kept up to date.
+    CountMessages,
+    /// Turns disappearing messages on or off for a conversation, and tells
+    /// everybody in it. Zero is off.
+    SetExpireTimer {
+        thread: Thread,
+        seconds: u32,
+        timestamp: u64,
+    },
+    /// Starts the clock on messages that carry a timer: each one's timestamp
+    /// and how long it has. Signal's rule is that a message begins
+    /// disappearing when it is *read*, not when it arrives, so nothing vanishes
+    /// out of a conversation nobody has opened — and which messages those are
+    /// is a thing only the window knows, since it is the window that read them.
+    StartExpiry {
+        thread: Thread,
+        messages: Vec<(MessageId, u32)>,
     },
     /// Looks for a phrase, in one conversation or in all of them.
     Search {

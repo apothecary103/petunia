@@ -10,7 +10,7 @@ use sqlx::Row;
 
 use super::Db;
 use petunia_data::index::Flags;
-use petunia_data::{ContactId, Thread};
+use petunia_data::Thread;
 use crate::Error;
 
 impl Db {
@@ -60,11 +60,7 @@ impl Db {
 }
 
 fn read(row: &sqlx::sqlite::SqliteRow) -> Option<(Thread, Flags)> {
-    let key: Vec<u8> = row.get(0);
-    let thread = match row.get::<bool, _>(1) {
-        true => Thread::Group(key.try_into().ok()?),
-        false => Thread::Contact(ContactId::Aci(uuid::Uuid::from_slice(&key).ok()?)),
-    };
+    let thread = super::read::thread(row.get(0), row.get(1))?;
 
     Some((
         thread,
@@ -84,6 +80,7 @@ fn read(row: &sqlx::sqlite::SqliteRow) -> Option<(Thread, Flags)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use petunia_data::ContactId;
     use uuid::Uuid;
 
     fn thread() -> Thread {

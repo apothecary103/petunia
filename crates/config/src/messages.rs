@@ -20,6 +20,11 @@ pub struct Messages {
     pub date_separators: bool,
     /// Attribute our own messages by name rather than as "You".
     pub show_own_name: bool,
+    /// Count what has been said, and report it in the details panel: per
+    /// conversation and across the account. Off by default and not because it
+    /// is expensive -- a tally of how much somebody has talked to you is a
+    /// number nobody asked to be shown, and the ones who want it want it badly.
+    pub show_counts: bool,
 }
 
 /// The three shapes a conversation can take. Not a spectrum: each one is a
@@ -131,6 +136,7 @@ impl Default for Messages {
             group_within: 300,
             date_separators: true,
             show_own_name: false,
+            show_counts: false,
         }
     }
 }
