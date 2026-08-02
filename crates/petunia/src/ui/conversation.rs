@@ -9,7 +9,7 @@ use super::kit;
 use super::message::act::{Act, Dispatch};
 use super::message::group;
 use super::message::run::Run;
-use petunia_media::audio::{Playback, Player};
+use petunia_media::audio::{self, Playback, Player};
 use petunia_config::Theme;
 use petunia_config::messages::{Layout, Reply, Spacing, Timestamps};
 use petunia_data::{Message, MessageId, State, Thread};
@@ -430,15 +430,18 @@ impl Conversation {
                 self.player.toggle(path);
                 self.follow_playback(cx);
             }
-            // Clicking into the waveform of something that is not playing means
-            // "play this, from here" -- without the first half it would silently
-            // scrub whatever else happened to be running.
+            // Which file is being scrubbed travels with the request: the
+            // player's thread holds the only state that is never a tick out of
+            // date, so it is the one that decides whether this is a scrub or a
+            // "play this, from here".
             Act::Seek(path, fraction) => {
-                if !self.player.playback().is(&path) {
-                    self.player.toggle(path);
-                    self.follow_playback(cx);
-                }
-                self.player.seek(fraction);
+                self.player.seek(path, fraction);
+                self.follow_playback(cx);
+            }
+            Act::Faster => {
+                let speed = audio::next_speed(self.player.playback().speed);
+                self.player.set_speed(speed);
+                self.follow_playback(cx);
             }
             Act::ShowSticker(sticker) => cx.emit(Stickering(sticker)),
             Act::Inspect(who) => self.inspect(who, cx),

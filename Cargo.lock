@@ -3582,6 +3582,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "hound"
+version = "3.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62adaabb884c94955b19907d60019f4e145d091c75345379e70d1ee696f7854f"
+
+[[package]]
 name = "hpke-rs"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6256,6 +6262,7 @@ version = "0.1.0"
 dependencies = [
  "core-foundation 0.10.1",
  "core-video",
+ "hound",
  "lofty",
  "objc2 0.6.4",
  "objc2-av-foundation",
@@ -7442,6 +7449,7 @@ dependencies = [
  "cpal",
  "dasp_sample",
  "num-rational",
+ "rtrb",
  "symphonia",
  "thiserror 2.0.18",
 ]
@@ -7469,6 +7477,12 @@ checksum = "f1964b10c76125c36f8afe190065a4bf9a87bf324842c05701330bba9f1cacbb"
 dependencies = [
  "memchr",
 ]
+
+[[package]]
+name = "rtrb"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ade083ccbb4bf536df69d1f6432cc23deb7acccff86b183f3923a6fd56a1153"
 
 [[package]]
 name = "rust-embed"

@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 petunia-data.workspace = true
 
+hound.workspace = true
 lofty.workspace = true
 rodio.workspace = true
 thiserror.workspace = true

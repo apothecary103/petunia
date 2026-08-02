@@ -47,8 +47,12 @@ pub enum Act {
     /// Plays a voice note or an audio file, or pauses it if it is already
     /// playing.
     Play(PathBuf),
-    /// Jumps to a fraction of the way through what is playing.
+    /// Jumps to a fraction of the way through this file, starting it if it is
+    /// not the one playing.
     Seek(PathBuf, f32),
+    /// Cycles the playback speed. The player's, not the file's, so it holds
+    /// from one voice note to the next.
+    Faster,
     /// Opens the sticker, and the pack it came from. Boxed because a sticker
     /// carries an attachment and every other variant here is a word wide.
     ShowSticker(Box<petunia_data::message::Sticker>),

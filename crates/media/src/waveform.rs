@@ -84,7 +84,7 @@ fn energies(samples: impl Iterator<Item = f32>) -> Vec<f32> {
 /// everything that was actually said is drawn at a tenth of the height. So the
 /// scale is set by `LOUD` of the way up the sorted bars and anything above it is
 /// simply full — which is what a limiter does, and for the same reason.
-fn shape(energies: Vec<f32>) -> Vec<u8> {
+pub fn shape(energies: Vec<f32>) -> Vec<u8> {
     /// Where the top of the strip is pinned in the sorted bars.
     const LOUD: f32 = 0.95;
 

@@ -12,7 +12,7 @@ use gpui::{AssetSource, SharedString};
 /// picker's categories, which are drawn as icons rather than as one emoji each:
 /// a rail of nine emoji is a rail of nine things the grid below it is also full
 /// of, and the eye cannot tell the label from the contents.
-const OWN: [(&str, &str); 20] = [
+const OWN: [(&str, &str); 22] = [
     // The chrome's own. The library's set is drawn at a hairline weight with
     // square ends, which beside a column of rounded cards and pill-shaped chips
     // reads as a toolbar from another application: these are the same Lucide
@@ -45,6 +45,8 @@ const OWN: [(&str, &str); 20] = [
     ("icons/send.svg", include_str!("../assets/icons/send.svg")),
     ("icons/close.svg", include_str!("../assets/icons/close.svg")),
     ("icons/music.svg", include_str!("../assets/icons/music.svg")),
+    ("icons/mic.svg", include_str!("../assets/icons/mic.svg")),
+    ("icons/trash.svg", include_str!("../assets/icons/trash.svg")),
     (
         "icons/sticker.svg",
         include_str!("../assets/icons/sticker.svg"),
