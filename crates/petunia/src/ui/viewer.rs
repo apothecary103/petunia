@@ -3,7 +3,10 @@
 use std::path::PathBuf;
 
 use gpui::prelude::*;
-use gpui::{Context, MouseButton, ScrollWheelEvent, SharedString, Window, div, px};
+use gpui::{
+    Context, MouseButton, PinchEvent, ScrollDelta, ScrollWheelEvent, SharedString, TouchPhase,
+    Window, div, px,
+};
 use gpui_component::IconName;
 
 use super::{image, kit};
@@ -51,6 +54,10 @@ const INSET: f32 = 12.0;
 /// The edge of one tile on the rail.
 const THUMBNAIL: f32 = 44.0;
 
+/// How far a flat two-finger swipe has to travel before it counts as "next
+/// picture". Far enough that a diagonal pan does not step the reel by accident.
+const SWIPE: f32 = 90.0;
+
 pub struct Viewer {
     /// Everything of this kind in the thread, so left and right walk it.
     reel: Vec<PathBuf>,
@@ -59,6 +66,15 @@ pub struct Viewer {
     /// Where the picture has been dragged to, in logical pixels from centred.
     pan: gpui::Point<f32>,
     dragging: Option<gpui::Point<gpui::Pixels>>,
+    /// How far the current two-finger swipe has travelled sideways. Only used
+    /// while the picture fits, where sideways means "the next one" rather than
+    /// "further left", and reset when the fingers land.
+    swipe: f32,
+    /// The largest the picture may be panned in each direction, which is half
+    /// of however much of it is off the stage. Recorded by the render that
+    /// knows how large it drew the picture, because the pan is applied before
+    /// anything has been laid out.
+    reach: gpui::Point<f32>,
     /// Present only while the picture on screen is a video, so nothing decodes
     /// in the background.
     playing: Option<video::Player>,
@@ -85,6 +101,8 @@ impl Viewer {
             zoom: 1.0,
             pan: gpui::point(0.0, 0.0),
             dragging: None,
+            swipe: 0.0,
+            reach: gpui::point(0.0, 0.0),
             playing: None,
             stage: std::rc::Rc::new(std::cell::Cell::new(gpui::Bounds::default())),
             focus: cx.focus_handle(),
@@ -124,16 +142,96 @@ impl Viewer {
     fn reset(&mut self, cx: &mut Context<Self>) {
         self.zoom = 1.0;
         self.pan = gpui::point(0.0, 0.0);
+        self.swipe = 0.0;
         self.open_video();
         cx.notify();
     }
 
+    /// Scales about the middle of the stage, which is what a keystroke and a
+    /// menu item mean: neither of them is aimed at anything.
     fn scale_by(&mut self, factor: f32, cx: &mut Context<Self>) {
+        let middle = self.stage.get().center();
+        self.scale_about(factor, middle, cx);
+    }
+
+    /// Scales about a point on screen, holding whatever is under it still.
+    ///
+    /// Which is the whole difference between a zoom that can be aimed and one
+    /// that cannot: scaled about the centre, the detail somebody is leaning in
+    /// to look at slides off the stage on the way in, and the gesture becomes
+    /// zoom, hunt, pan, zoom again.
+    fn scale_about(
+        &mut self,
+        factor: f32,
+        at: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let before = self.zoom;
         self.zoom = (self.zoom * factor).clamp(*ZOOM.start(), *ZOOM.end());
+        let applied = self.zoom / before;
+
         if self.zoom <= 1.0 {
             self.pan = gpui::point(0.0, 0.0);
+        } else {
+            let middle = self.stage.get().center();
+            let from = gpui::point(f32::from(at.x - middle.x), f32::from(at.y - middle.y));
+            self.pan = gpui::point(
+                (1.0 - applied) * from.x + applied * self.pan.x,
+                (1.0 - applied) * from.y + applied * self.pan.y,
+            );
         }
         cx.notify();
+    }
+
+    /// Moves the picture under the fingers, within whatever the last frame
+    /// worked out there was room to move it by.
+    fn pan_by(&mut self, by: gpui::Point<f32>, cx: &mut Context<Self>) {
+        self.pan = gpui::point(
+            (self.pan.x + by.x).clamp(-self.reach.x, self.reach.x),
+            (self.pan.y + by.y).clamp(-self.reach.y, self.reach.y),
+        );
+        cx.notify();
+    }
+
+    /// A trackpad and a mouse wheel arrive as the same event and mean opposite
+    /// things. A wheel has one axis and a viewer is the one place it means
+    /// "closer"; a trackpad has two and every application on the platform pans
+    /// with them, so a two-finger scroll that zoomed was the gesture nobody
+    /// asked for — and with the picture sized off the zoom, a flick of it
+    /// resized the picture a dozen times in a dozen frames. Holding command is
+    /// the wheel's meaning on either.
+    fn scrolled(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
+        let zooming = event.modifiers.secondary() || matches!(event.delta, ScrollDelta::Lines(_));
+        let delta = event.delta.pixel_delta(px(20.0));
+
+        if zooming {
+            self.scale_about(1.0 + f32::from(delta.y) / 400.0, event.position, cx);
+            return;
+        }
+
+        if event.touch_phase == TouchPhase::Started {
+            self.swipe = 0.0;
+        }
+
+        // Zoomed in there is somewhere to go, so the fingers move the picture.
+        // Fitted there is nowhere, and a flat sideways swipe is what every
+        // viewer on the platform reads as "the next one".
+        if self.zoom > 1.0 {
+            self.pan_by(gpui::point(f32::from(delta.x), f32::from(delta.y)), cx);
+            return;
+        }
+
+        self.swipe += f32::from(delta.x);
+        if self.swipe.abs() >= SWIPE {
+            let by = if self.swipe > 0.0 { -1 } else { 1 };
+            self.swipe = 0.0;
+            self.step(by, cx);
+        }
+    }
+
+    /// A pinch is a zoom and nothing else, about the point between the fingers.
+    fn pinched(&mut self, event: &PinchEvent, cx: &mut Context<Self>) {
+        self.scale_about(1.0 + event.delta, event.position, cx);
     }
 
     /// Plays or pauses whatever is on the stage. Nothing at all when the picture
@@ -290,6 +388,53 @@ impl Render for Viewer {
         let stage = self.box_for_the_picture(window, railed);
         let measured = self.stage.clone();
 
+        // Built before the panel it goes in, because `face` reads the player and
+        // records how far the picture may be dragged — a nested closure in the
+        // middle of the tree cannot hold the whole of `self` while the tree
+        // around it is being built.
+        let picture = div()
+            .id("picture")
+            .relative()
+            .left(px(pan.x))
+            .top(px(pan.y))
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
+                    // Swallowed, so a click on the picture does not reach the
+                    // backdrop and close it.
+                    this.dragging = Some(event.position);
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_move(
+                cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
+                    let Some(from) = this.dragging else {
+                        return;
+                    };
+                    if !event.dragging() {
+                        this.dragging = None;
+                        return;
+                    }
+                    this.pan_by(
+                        gpui::point(
+                            f32::from(event.position.x - from.x),
+                            f32::from(event.position.y - from.y),
+                        ),
+                        cx,
+                    );
+                    this.dragging = Some(event.position);
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| this.dragging = None),
+            )
+            // The viewer is the one place a picture is meant to be as large as
+            // it can be, so the resample target is the whole stage rather than
+            // a message's box.
+            .child(self.face(&path, stage, zoom, window));
+
         // The whole window, the way Signal's own viewer takes it. A sheet inset
         // from every edge keeps the conversation visible behind it, which sounds
         // like context and reads as a picture in a smaller window: the thing
@@ -312,9 +457,9 @@ impl Render for Viewer {
                 }),
             )
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
-                let delta = f32::from(event.delta.pixel_delta(px(20.0)).y);
-                this.scale_by(1.0 + delta / 400.0, cx);
+                this.scrolled(event, cx)
             }))
+            .on_pinch(cx.listener(|this, event: &PinchEvent, _, cx| this.pinched(event, cx)))
             .child(self.chrome(&position, &palette, window, cx))
             .child(
                 div()
@@ -322,10 +467,6 @@ impl Render for Viewer {
                     .relative()
                     .flex_1()
                     .min_h_0()
-                    .p(px(INSET))
-                    .flex()
-                    .items_center()
-                    .justify_center()
                     .overflow_hidden()
                     // Clicking the empty space around a picture closes it, which
                     // is what every viewer trains you to expect.
@@ -338,45 +479,22 @@ impl Render for Viewer {
                             .absolute()
                             .size_full(),
                     )
+                    // Out of the flow entirely, and this is the whole point of
+                    // it: a zoomed picture is drawn larger than the stage, and
+                    // in the flow that is a flex item asking its parent for
+                    // room -- while the parent's size is what the zoom is
+                    // measured against. One frame's growth became the next
+                    // frame's box, and the picture walked outwards for as long
+                    // as it was allowed to. Absolute, its size is nothing's
+                    // business but its own.
                     .child(
                         div()
-                            .id("picture")
-                            .relative()
-                            .left(px(pan.x))
-                            .top(px(pan.y))
-                            .cursor_pointer()
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
-                                    // Swallowed, so a click on the picture does
-                                    // not reach the backdrop and close it.
-                                    this.dragging = Some(event.position);
-                                    cx.stop_propagation();
-                                }),
-                            )
-                            .on_mouse_move(cx.listener(
-                                |this, event: &gpui::MouseMoveEvent, _, cx| {
-                                    let Some(from) = this.dragging else {
-                                        return;
-                                    };
-                                    if !event.dragging() {
-                                        this.dragging = None;
-                                        return;
-                                    }
-                                    this.pan.x += f32::from(event.position.x - from.x);
-                                    this.pan.y += f32::from(event.position.y - from.y);
-                                    this.dragging = Some(event.position);
-                                    cx.notify();
-                                },
-                            ))
-                            .on_mouse_up(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _, _| this.dragging = None),
-                            )
-                            // The viewer is the one place a picture is meant to
-                            // be as large as it can be, so the resample target
-                            // is the whole stage rather than a message's box.
-                            .child(self.face(&path, stage, zoom, window)),
+                            .absolute()
+                            .inset(px(INSET))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(picture),
                     ),
             )
             .when(self.playing.is_some(), |this| {
@@ -477,13 +595,15 @@ impl Viewer {
                 None => (stage.0 * zoom, stage.1 * zoom),
             };
 
-            return match player.frame() {
+            let face = match player.frame() {
                 Some(frame) => gpui::surface(frame)
                     .w(px(width))
                     .h(px(height))
                     .into_any_element(),
                 None => div().w(px(width)).h(px(height)).into_any_element(),
             };
+            self.record_reach((width, height), stage);
+            return face;
         }
 
         let _ = window;
@@ -525,8 +645,24 @@ impl Viewer {
         // black panel, because nothing on screen says where the box ends.
         // Sized to the picture, the picture *is* the box.
         let (width, height) = filling(image::shape(path), (stage.0 * zoom, stage.1 * zoom));
+        self.record_reach((width, height), stage);
 
         image::animated("stage-frames", path, width, height).into_any_element()
+    }
+
+    /// How far the picture can be dragged: half of whatever hangs over each
+    /// edge, and nothing at all where it fits. Without it a picture could be
+    /// flicked off the stage entirely, leaving a black screen and no clue that
+    /// the way back is a keystroke.
+    fn record_reach(&mut self, picture: (f32, f32), stage: (f32, f32)) {
+        self.reach = gpui::point(
+            ((picture.0 - stage.0) / 2.0).max(0.0),
+            ((picture.1 - stage.1) / 2.0).max(0.0),
+        );
+        self.pan = gpui::point(
+            self.pan.x.clamp(-self.reach.x, self.reach.x),
+            self.pan.y.clamp(-self.reach.y, self.reach.y),
+        );
     }
 
     /// Play, a bar that scrubs, and the clock. Only drawn when there is a video
