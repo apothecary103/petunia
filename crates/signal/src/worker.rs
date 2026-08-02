@@ -196,12 +196,12 @@ async fn session(
     // happens before the loop does: a conversation left open overnight should
     // not still be holding yesterday's messages when the window comes back.
     report_expire_timers(db, events).await;
-    sweep_expired(db, events).await;
+    sweep_expired(db, events, aci).await;
     let mut sweeping = tokio::time::interval(SWEEP);
 
     loop {
         tokio::select! {
-            _ = sweeping.tick() => sweep_expired(db, events).await,
+            _ = sweeping.tick() => sweep_expired(db, events, aci).await,
             _ = &mut queue_rx, if !queue_drained => {
                 queue_drained = true;
                 info!(pending = pending.len(), "message queue drained");
@@ -221,7 +221,7 @@ async fn session(
                             outgoing::quote(&quoted.id, &quoted.body, &quoted.ranges),
                         );
                     }
-                    let message = expiring(db, &thread, message).await;
+                    let message = expiring(db, aci, &thread, message).await;
                     save_outgoing(&manager, &thread, message.clone(), timestamp).await;
                     let outgoing = Prepared::tracked(thread, message, timestamp);
                     queue(&mut manager, db, events, &mut pending, queue_drained, outgoing).await;
@@ -258,7 +258,13 @@ async fn session(
                     }
                 }
                 Some(Command::EditMessage { thread, target, body, ranges, timestamp }) => {
-                    let message = outgoing::edit(&thread, target, body, &ranges, timestamp);
+                    let mut message = outgoing::edit(&thread, target, body, &ranges, timestamp);
+                    // The original's clock is already running; what the edit
+                    // needs is the field, or the recipient replaces a message
+                    // that disappears with one that does not.
+                    if let Some(revision) = message.data_message.as_mut() {
+                        revision.expire_timer = timer(db, &thread).await;
+                    }
                     save_outgoing(&manager, &thread, message.clone(), timestamp).await;
                     // Reports against the original: the edit replaces that
                     // bubble, so its status is what the UI shows.
@@ -537,6 +543,7 @@ async fn session(
                 }
                 Some(Command::SendPoll { thread, question, options, allow_multiple, timestamp }) => {
                     let message = outgoing::poll(&thread, question, options, allow_multiple, timestamp);
+                    let message = expiring(db, aci, &thread, message).await;
                     save_outgoing(&manager, &thread, message.clone(), timestamp).await;
                     let outgoing = Prepared::tracked(thread, message, timestamp);
                     queue(&mut manager, db, events, &mut pending, queue_drained, outgoing).await;
@@ -850,16 +857,32 @@ async fn receive_once(
                                 .iter()
                                 .map(|viewed| (viewed.sender_aci.as_ref(), viewed.timestamp())),
                         );
+                    let aci = manager.registration_data().service_ids.aci;
                     for (sender_aci, upto) in marks {
                         let Some(sender) = sender_aci.and_then(|aci| aci.parse::<Uuid>().ok())
                         else {
                             continue;
                         };
-                        let thread = Thread::Contact(ContactId::Aci(sender));
+                        let thread = read_thread(manager, sender, upto).await;
                         if let Err(error) = db.mark_read(&thread, upto).await {
                             warn!(%error, "failed to record a synced read mark");
                         }
-                        emit(events, Event::Read { thread, upto }).await;
+                        emit(events, Event::Read {
+                            thread: thread.clone(),
+                            upto,
+                        })
+                        .await;
+                        // What was read on the phone is a watermark and not the
+                        // whole thread: reading something from this morning
+                        // there does not mean everything since has been seen,
+                        // and clearing the badge outright loses the rest.
+                        match db.unread(&thread, aci, upto).await {
+                            Ok(count) if count > 0 => {
+                                emit(events, Event::Unread { thread, count }).await;
+                            }
+                            Ok(_) => {}
+                            Err(error) => warn!(%error, "failed to recount after a read sync"),
+                        }
                     }
                     continue;
                 }
@@ -1196,7 +1219,12 @@ async fn advance_preview(db: &Db, timestamps: &[u64], status: data::Status) {
     }
 }
 
-async fn remember_preview(db: &Db, thread: &Thread, message: &data::Message, aci: Uuid) {
+async fn remember_preview(
+    db: &Db,
+    thread: &Thread,
+    message: &data::Message,
+    aci: Uuid,
+) -> data::index::Preview {
     let mut preview = data::index::Preview::of(message);
     // A message of ours arriving here came from another of this account's
     // devices, so nothing local sent it and there is no send state to read. It
@@ -1208,6 +1236,7 @@ async fn remember_preview(db: &Db, thread: &Thread, message: &data::Message, aci
     if let Err(error) = db.set_preview(thread, &preview).await {
         warn!(%error, "failed to store a thread preview");
     }
+    preview
 }
 
 /// Marks anything already on disk as cached, so media that has been fetched
@@ -1442,7 +1471,8 @@ async fn upload(
             outgoing::quote(&quoted.id, &quoted.body, &quoted.ranges),
         );
     }
-    let message = expiring(&db, &thread, message).await;
+    let aci = manager.registration_data().service_ids.aci;
+    let message = expiring(&db, aci, &thread, message).await;
     save_outgoing(&manager, &thread, message.clone(), timestamp).await;
     let _ = prepared.send(Prepared::tracked(thread, message, timestamp));
 }
@@ -1459,6 +1489,7 @@ struct Chosen {
 async fn upload_sticker(context: Media, thread: Thread, chosen: Chosen, timestamp: u64) {
     let Media {
         manager,
+        db,
         mut events,
         prepared,
         ..
@@ -1503,6 +1534,8 @@ async fn upload_sticker(context: Media, thread: Thread, chosen: Chosen, timestam
         pointer,
         timestamp,
     );
+    let aci = manager.registration_data().service_ids.aci;
+    let message = expiring(&db, aci, &thread, message).await;
     save_outgoing(&manager, &thread, message.clone(), timestamp).await;
     let _ = prepared.send(Prepared::tracked(thread, message, timestamp));
 }
@@ -1699,21 +1732,72 @@ async fn fail(events: &mut Events, thread: &Thread, id: attachment::Id, error: S
     .await;
 }
 
-/// Marks a message with the conversation's disappearing timer, if it has one.
+/// Which conversation a read sync is about.
+///
+/// A `SyncMessage.Read` names a message by who wrote it and when, and says
+/// nothing at all about where it was said — so taking the author's own
+/// one-to-one thread for the answer is right for exactly half of them. Every
+/// group message read on the phone cleared nothing here and moved the watermark
+/// on an unrelated conversation with that person instead, which being a
+/// watermark then hid real unread messages behind it. The store knows where the
+/// row is filed; the author's thread is the fallback for a message this device
+/// never received.
+async fn read_thread(manager: &RegisteredManager, sender: Uuid, timestamp: u64) -> Thread {
+    let filed = manager
+        .store()
+        .thread_for_sender_and_timestamp(&ServiceId::Aci(sender.into()), timestamp)
+        .await;
+
+    match filed {
+        Ok(Some(thread)) => Thread::from(&thread),
+        Ok(None) => Thread::Contact(ContactId::Aci(sender)),
+        Err(error) => {
+            warn!(%error, "could not place a read sync; assuming a one-to-one");
+            Thread::Contact(ContactId::Aci(sender))
+        }
+    }
+}
+
+/// What a conversation is set to disappear after, if anything.
+async fn timer(db: &Db, thread: &Thread) -> Option<u32> {
+    match db.expire_timers().await {
+        Ok(timers) => timers
+            .into_iter()
+            .find(|(of, _)| of == thread)
+            .map(|(_, seconds)| seconds),
+        Err(error) => {
+            warn!(%error, "could not read the timer for an outgoing message");
+            None
+        }
+    }
+}
+
+/// Marks a message with the conversation's disappearing timer and starts its
+/// clock.
 ///
 /// On the way out rather than at the composer: the timer is a property of the
 /// conversation and the worker is what remembers it, and a message sent without
 /// the field set is a message that never disappears for anybody — including for
 /// the person who turned the timer on.
-async fn expiring(db: &Db, thread: &Thread, mut message: DataMessage) -> DataMessage {
-    match db.expire_timers().await {
-        Ok(timers) => {
-            message.expire_timer = timers
-                .iter()
-                .find(|(of, _)| of == thread)
-                .map(|(_, seconds)| *seconds);
-        }
-        Err(error) => warn!(%error, "could not read the timer for an outgoing message"),
+///
+/// Both things, because Signal's rule is two rules. The field is what makes it
+/// go from everybody else; our own copy counts from the moment it is *sent*,
+/// since a message you wrote is not one you are waiting to read. Without the
+/// second half everything this account said stayed in the conversation forever
+/// while disappearing out of every other one.
+async fn expiring(db: &Db, aci: Uuid, thread: &Thread, mut message: DataMessage) -> DataMessage {
+    let Some(seconds) = timer(db, thread).await else {
+        return message;
+    };
+    message.expire_timer = Some(seconds);
+
+    let target = data::MessageId {
+        timestamp: message.timestamp(),
+        sender: aci,
+    };
+    let due = now() + u64::from(seconds) * 1_000;
+    if let Err(error) = db.start_expiry(thread, target, due).await {
+        warn!(%error, "failed to start the clock on a message we sent");
     }
     message
 }
@@ -1732,7 +1816,7 @@ async fn report_expire_timers(db: &Db, events: &mut Events) {
 /// Locally and only locally: an expiry is not a remote delete. Everybody else
 /// has the same timer and is running the same clock, and asking them to delete
 /// something they are already deleting is a message per message per recipient.
-async fn sweep_expired(db: &Db, events: &mut Events) {
+async fn sweep_expired(db: &Db, events: &mut Events, aci: Uuid) {
     let due = match db.due(now()).await {
         Ok(due) => due,
         Err(error) => {
@@ -1749,8 +1833,57 @@ async fn sweep_expired(db: &Db, events: &mut Events) {
         if let Err(error) = db.forget_expiry(&thread, target.timestamp).await {
             warn!(%error, "failed to forget an expiry");
         }
-        emit(events, Event::Forgotten { thread, target }).await;
+        emit(events, Event::Forgotten {
+            thread: thread.clone(),
+            target,
+        })
+        .await;
+        reline(db, events, aci, &thread, target.timestamp).await;
     }
+}
+
+/// How far back to look for whatever a conversation's line should say now. The
+/// answer is in the last handful of rows or nowhere anybody would notice.
+const RELINE: u32 = 20;
+
+/// Rebuilds a conversation's line after something has been taken out of it.
+///
+/// Gone from the thread and still being read in the sidebar is not gone, and
+/// the line is written when a message arrives rather than derived per frame, so
+/// nothing else would ever revisit it. Only when the departed message *was* the
+/// line: `forget_preview_of` is what asks that question, and does nothing when
+/// the answer is no.
+async fn reline(db: &Db, events: &mut Events, aci: Uuid, thread: &Thread, gone: u64) {
+    if let Err(error) = db.forget_preview_of(thread, gone).await {
+        warn!(%error, "failed to take an expired message off the list");
+        return;
+    }
+
+    let rows = match db.page(thread, None, RELINE).await {
+        Ok(page) => page.rows,
+        Err(error) => {
+            warn!(%error, "failed to look for a replacement line");
+            return;
+        }
+    };
+    let Some(message) = data::project(rows).pop() else {
+        // Nothing readable left. The row stays in the list on its activity
+        // alone — a conversation whose every message has disappeared is still a
+        // conversation, and dropping it would take the history with it.
+        emit(events, Event::Activity {
+            thread: thread.clone(),
+            at: gone,
+        })
+        .await;
+        return;
+    };
+
+    let preview = remember_preview(db, thread, &message, aci).await;
+    emit(events, Event::Preview {
+        thread: thread.clone(),
+        preview,
+    })
+    .await;
 }
 
 /// Sends READ receipts to each sender and tells our own other devices, which

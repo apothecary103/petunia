@@ -83,6 +83,22 @@ impl Db {
     /// forgotten. Its own statement rather than another entry in
     /// `delete_thread`'s list, because that list is written out for a reader
     /// asking what petunia keeps -- and this is the answer for the sidebar.
+    /// Drops the line, but only when it is of this message.
+    ///
+    /// A line that outlives the message it was taken from is a disappearing
+    /// message still legible in the sidebar, which is not one that disappeared.
+    /// Anything else is a message further back and the list was never drawing
+    /// it. Cleared rather than rewritten here: what replaces it is whatever the
+    /// store now says is newest, which is the caller's to look up.
+    pub async fn forget_preview_of(&self, thread: &Thread, at: u64) -> Result<(), Error> {
+        sqlx::query("DELETE FROM petunia_preview WHERE thread = ? AND at = ?")
+            .bind(super::read::key(thread))
+            .bind(at as i64)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn forget_preview(&self, thread: &Thread) -> Result<(), Error> {
         sqlx::query("DELETE FROM petunia_preview WHERE thread = ?")
             .bind(super::read::key(thread))
