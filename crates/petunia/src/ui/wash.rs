@@ -18,9 +18,12 @@
 use std::ops::Range;
 
 use gpui::{
-    App, Bounds, GlobalElementId, Hsla, InspectorElementId, LayoutId, Pixels, Point, StyledText,
-    Window, px, quad, size,
+    App, Bounds, CursorStyle, DispatchPhase, GlobalElementId, Hitbox, HitboxBehavior, Hsla,
+    InspectorElementId, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Pixels, Point, SharedString, StyledText, Window, px, quad, size,
 };
+
+use super::selection;
 
 /// How much of the line's height the box leaves clear, top and bottom.
 ///
@@ -42,6 +45,21 @@ pub struct Wash {
     radius: Pixels,
     /// How far the box reaches past the glyphs, left and right.
     pad: Pixels,
+    /// `None` for the runs that are not text you can take -- a quote, which is a
+    /// picture of something said elsewhere.
+    selectable: Option<Selectable>,
+}
+
+/// What it takes to select a run: what it is called while it is selected, the
+/// text of it, and what a selection in it is painted in.
+///
+/// The text is handed in rather than read back off the layout, which would be a
+/// copy of every message on screen every frame.
+#[derive(Clone)]
+struct Selectable {
+    id: SharedString,
+    text: SharedString,
+    tint: Hsla,
 }
 
 /// Text with a box behind each of `spans`. With no spans it is the text and
@@ -61,6 +79,18 @@ pub fn wash(
         border,
         radius: px(radius),
         pad: px(pad),
+        selectable: None,
+    }
+}
+
+impl Wash {
+    /// Makes the run text you can take: a drag lights what it crosses, a double
+    /// click a word, a third click the paragraph. The id has to be the run's own
+    /// and stable across frames, since it is how the one selection there is says
+    /// which run it belongs to.
+    pub fn selectable(mut self, id: SharedString, text: SharedString, tint: Hsla) -> Self {
+        self.selectable = Some(Selectable { id, text, tint });
+        self
     }
 }
 
@@ -74,7 +104,8 @@ impl gpui::IntoElement for Wash {
 
 impl gpui::Element for Wash {
     type RequestLayoutState = ();
-    type PrepaintState = ();
+    /// The box the pointer is tested against, for a run that can be selected.
+    type PrepaintState = Option<Hitbox>;
 
     fn id(&self) -> Option<gpui::ElementId> {
         None
@@ -102,8 +133,11 @@ impl gpui::Element for Wash {
         state: &mut Self::RequestLayoutState,
         window: &mut Window,
         cx: &mut App,
-    ) {
-        self.text.prepaint(id, inspector, bounds, state, window, cx)
+    ) -> Option<Hitbox> {
+        self.text.prepaint(id, inspector, bounds, state, window, cx);
+        self.selectable
+            .is_some()
+            .then(|| window.insert_hitbox(bounds, HitboxBehavior::Normal))
     }
 
     fn paint(
@@ -112,10 +146,14 @@ impl gpui::Element for Wash {
         inspector: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         request_layout: &mut Self::RequestLayoutState,
-        prepaint: &mut Self::PrepaintState,
+        hitbox: &mut Self::PrepaintState,
         window: &mut Window,
         cx: &mut App,
     ) {
+        if let Some((of, hitbox)) = self.selectable.clone().zip(hitbox.clone()) {
+            self.select(&of, bounds, &hitbox, window, cx);
+        }
+
         for box_ in self.boxes(bounds) {
             window.paint_quad(quad(
                 box_,
@@ -128,44 +166,140 @@ impl gpui::Element for Wash {
         }
 
         self.text
-            .paint(id, inspector, bounds, request_layout, prepaint, window, cx)
+            .paint(id, inspector, bounds, request_layout, &mut (), window, cx)
     }
 }
 
 impl Wash {
+    /// Paints whatever is lit in this run, and listens for what would change it.
+    ///
+    /// The listeners are the window's rather than the element's, because a drag
+    /// leaves the words it started in almost immediately: a `div` only hears a
+    /// mouse move while the pointer is over it, and a selection that stopped
+    /// growing at the edge of the paragraph would be a selection you cannot make
+    /// backwards.
+    fn select(
+        &self,
+        of: &Selectable,
+        bounds: Bounds<Pixels>,
+        hitbox: &Hitbox,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let Selectable { id, text, tint } = of;
+        let layout = self.text.layout().clone();
+
+        if let Some(range) = selection::within(id, cx) {
+            // Full line boxes and no padding: this is a selection, not a chip,
+            // and every selection anywhere is the height of the line it is in.
+            for box_ in self.spanning(bounds, &range, px(0.0), px(0.0)) {
+                window.paint_quad(gpui::fill(box_, *tint));
+            }
+        }
+
+        // The one affordance text you can take has: the pointer says so.
+        window.set_cursor_style(CursorStyle::IBeam, hitbox);
+
+        window.on_mouse_event({
+            let (id, text, layout, hitbox) =
+                (id.clone(), text.clone(), layout.clone(), hitbox.clone());
+            move |event: &MouseDownEvent, phase, window: &mut Window, cx: &mut App| {
+                if phase != DispatchPhase::Bubble
+                    || event.button != MouseButton::Left
+                    || !hitbox.is_hovered(window)
+                {
+                    return;
+                }
+                let at = layout.index_for_position(event.position).unwrap_or_else(|at| at);
+                match event.click_count {
+                    0 | 1 => selection::begin(id.clone(), text.clone(), at, cx),
+                    2 => selection::lit(
+                        id.clone(),
+                        text.clone(),
+                        selection::word(&text, at),
+                        cx,
+                    ),
+                    // A third click is the paragraph, as it is in every browser
+                    // and every editor.
+                    _ => selection::lit(id.clone(), text.clone(), 0..text.len(), cx),
+                }
+                window.refresh();
+            }
+        });
+
+        window.on_mouse_event({
+            let (id, layout) = (id.clone(), layout.clone());
+            move |event: &MouseMoveEvent, phase, window: &mut Window, cx: &mut App| {
+                if phase != DispatchPhase::Bubble || !selection::dragging(&id, cx) {
+                    return;
+                }
+                // A mouse released outside the window is a release there is no
+                // event for, and a drag that never ended would go on growing
+                // under a pointer with nothing held down. A move with the button
+                // up is that release, late.
+                if !event.dragging() {
+                    selection::release(cx);
+                    return;
+                }
+                selection::extend(
+                    layout.index_for_position(event.position).unwrap_or_else(|at| at),
+                    cx,
+                );
+                window.refresh();
+            }
+        });
+
+        window.on_mouse_event({
+            let id = id.clone();
+            move |_: &MouseUpEvent, phase, window: &mut Window, cx: &mut App| {
+                if phase == DispatchPhase::Bubble && selection::dragging(&id, cx) {
+                    selection::release(cx);
+                    window.refresh();
+                }
+            }
+        });
+    }
+
     /// One box per span, or several when a span was wrapped across lines.
     fn boxes(&self, bounds: Bounds<Pixels>) -> Vec<Bounds<Pixels>> {
+        let breathe = self.text.layout().line_height() * BREATHE;
+
+        self.spans
+            .iter()
+            .flat_map(|span| self.spanning(bounds, span, self.pad, breathe))
+            .collect()
+    }
+
+    /// The rectangles a range of the laid-out text covers: one, or one per row it
+    /// wrapped onto.
+    fn spanning(
+        &self,
+        bounds: Bounds<Pixels>,
+        span: &Range<usize>,
+        pad: Pixels,
+        breathe: Pixels,
+    ) -> Vec<Bounds<Pixels>> {
         let layout = self.text.layout();
         let line = layout.line_height();
-        let breathe = line * BREATHE;
+        let (Some(from), Some(to)) = (
+            layout.position_for_index(span.start),
+            layout.position_for_index(span.end),
+        ) else {
+            return Vec::new();
+        };
+
+        // A wrapped span is one box per row it lands on. Where the box ends on a
+        // row that carries on is the element's own right edge rather than the
+        // text's: a wrapped row's width is not something the layout reports.
         let mut boxes = Vec::new();
-
-        for span in &self.spans {
-            let (Some(from), Some(to)) = (
-                layout.position_for_index(span.start),
-                layout.position_for_index(span.end),
-            ) else {
-                continue;
-            };
-
-            // A wrapped span is one box per row it lands on. Where the box ends on
-            // a row that carries on is the element's own right edge rather than
-            // the text's: a wrapped row's width is not something the layout
-            // reports, and a span that wraps at all is the rare case.
-            let mut top = from.y;
-            let mut left = from.x - self.pad;
-            while top < to.y {
-                boxes.push(rect(left, top + breathe, bounds.right(), line - breathe * 2.0));
-                top += line;
-                left = bounds.left();
-            }
-            boxes.push(rect(
-                left,
-                top + breathe,
-                to.x + self.pad,
-                line - breathe * 2.0,
-            ));
+        let mut top = from.y;
+        let mut left = from.x - pad;
+        while top < to.y {
+            boxes.push(rect(left, top + breathe, bounds.right(), line - breathe * 2.0));
+            top += line;
+            left = bounds.left();
         }
+        boxes.push(rect(left, top + breathe, to.x + pad, line - breathe * 2.0));
 
         boxes
     }

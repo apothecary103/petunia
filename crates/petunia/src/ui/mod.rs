@@ -20,6 +20,7 @@ pub mod prompt;
 pub mod raw;
 pub mod relative;
 pub mod search;
+pub mod selection;
 pub mod settings;
 pub mod sidebar;
 pub mod sticker;

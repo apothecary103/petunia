@@ -24,6 +24,7 @@ actions!(
         EditLast,
         AttachFile,
         Cancel,
+        CopySelection,
         Help,
         Settings,
         ThemePicker,
@@ -80,6 +81,12 @@ fn viewer_bindings() -> Vec<KeyBinding> {
 /// after the configured ones so they are the last word.
 fn platform_bindings() -> Vec<KeyBinding> {
     vec![
+        // Copying what is selected is the platform's chord too, and not a
+        // preference: a file that could rebind it could take away the one way to
+        // get a message's words out of the window. It is bound before the widget
+        // library installs its own bindings, so the input's copy still wins while
+        // the focus is in a field -- see `main::install`.
+        KeyBinding::new("cmd-c", CopySelection, None),
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("cmd-h", Hide, None),
         KeyBinding::new("cmd-alt-h", HideOthers, None),
