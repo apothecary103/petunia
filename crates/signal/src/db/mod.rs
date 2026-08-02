@@ -9,8 +9,8 @@ pub mod receipts;
 pub mod search;
 pub mod threads;
 
-use sqlx::sqlite::SqlitePool;
 use sqlx::Row;
+use sqlx::sqlite::SqlitePool;
 
 use super::Error;
 use petunia_config as config;
@@ -45,6 +45,7 @@ impl Db {
     /// forgot the key would find nothing there but a corrupt file.
     pub async fn open() -> Result<Self, Error> {
         let passphrase = super::store::ready().await?;
+        super::store::open().await?;
         Self::open_with(config::store_path(), Some(&passphrase)).await
     }
 
