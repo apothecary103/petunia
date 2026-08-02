@@ -159,7 +159,7 @@ impl Render for StickerSheet {
             )
             .child(
                 kit::dialog(360.0, &palette)
-                    .child(self.face(&palette))
+                    .child(self.face())
                     .child(
                         div()
                             .flex()
@@ -246,18 +246,17 @@ fn count(stickers: usize) -> String {
 }
 
 impl StickerSheet {
-    /// The sticker itself, on the sunken fill rather than the card's: a sticker
-    /// is a cut-out with transparency around it, and on a surface the same
-    /// colour as the card it floats with no edge at all.
-    fn face(&self, palette: &Theme) -> gpui::Div {
+    /// The sticker itself, on nothing. A sticker is a cut-out and it is meant to
+    /// read as one: the sunken square behind it was a frame nobody asked for,
+    /// and a grid of them is a grid of boxes rather than of pictures.
+    fn face(&self) -> gpui::Div {
         let square = div()
             .size(px(FACE))
             .flex()
             .flex_none()
             .items_center()
             .justify_center()
-            .rounded(px(kit::RADIUS))
-            .bg(palette.sunken);
+            .rounded(px(kit::RADIUS));
 
         let square = match self.sticker.image.as_ref().map(|image| &image.blob) {
             Some(Blob::Cached(path)) => {
@@ -300,7 +299,6 @@ fn rest_of(pack: &Pack, showing: u32, palette: &Theme) -> gpui::Stateful<gpui::D
                         .items_center()
                         .justify_center()
                         .rounded(px(kit::RADIUS))
-                        .bg(palette.sunken)
                         .when(sticker.id == showing, |this| {
                             this.border_1().border_color(palette.accent)
                         })
