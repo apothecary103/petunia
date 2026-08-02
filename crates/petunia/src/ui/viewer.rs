@@ -440,6 +440,25 @@ impl Render for Viewer {
     }
 }
 
+/// The largest a picture of this shape can be drawn inside the stage.
+///
+/// `media::fit` is the same arithmetic and will not enlarge, which is right in a
+/// message — a thumbnail blown up to fill a box is a worse thumbnail — and wrong
+/// here, where the whole reason to open a picture is to see it as large as the
+/// window allows. The resample still refuses to invent detail (`image::resample`
+/// caps its own scale at one), so a small picture is enlarged rather than
+/// resharpened.
+fn filling(shape: Option<petunia_data::attachment::Size>, stage: (f32, f32)) -> (f32, f32) {
+    let Some(size) = shape.filter(|size| size.width > 0 && size.height > 0) else {
+        return stage;
+    };
+
+    let (width, height) = (size.width as f32, size.height as f32);
+    let scale = (stage.0 / width).min(stage.1 / height);
+
+    (width * scale, height * scale)
+}
+
 impl Viewer {
     /// A video draws its current frame into a platform surface; anything else is
     /// an ordinary picture. A frame that is not there yet leaves the stage dark
@@ -464,7 +483,7 @@ impl Viewer {
             // Its own shape, not a guess. `presentationSize` is zero until the
             // item has loaded, which is what the fallback box is holding.
             let (width, height) = match player.size() {
-                Some(size) => super::message::media::fit(
+                Some(size) => filling(
                     Some(petunia_data::attachment::Size {
                         width: size.0 as u32,
                         height: size.1 as u32,
@@ -514,7 +533,16 @@ impl Viewer {
                 .into_any_element();
         }
 
-        image::animated("stage-frames", path, stage.0 * zoom, stage.1 * zoom).into_any_element()
+        // Its own shape, at the size the stage has room for. Handed the whole
+        // stage as its box the picture was drawn into a *landscape* rectangle
+        // whatever it was: a portrait photograph then sat in the middle of it at
+        // the height of the stage with the width of the stage on either side —
+        // correct to the pixel, and it reads as a small picture adrift in a large
+        // black panel, because nothing on screen says where the box ends.
+        // Sized to the picture, the picture *is* the box.
+        let (width, height) = filling(image::shape(path), (stage.0 * zoom, stage.1 * zoom));
+
+        image::animated("stage-frames", path, width, height).into_any_element()
     }
 
     /// Play, a bar that scrubs, and the clock. Only drawn when there is a video
