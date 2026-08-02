@@ -20,6 +20,12 @@ use petunia_data::{Message, State, Thread};
 pub struct Notice {
     pub title: String,
     pub body: String,
+    /// Where it came from, so clicking the banner can open it. A banner about a
+    /// message that leaves you to find the message is half a notification.
+    pub thread: Thread,
+    /// The face beside it, which is the sender's in a one-to-one and the
+    /// group's in a group — the same picture the sidebar row carries.
+    pub picture: Option<std::path::PathBuf>,
 }
 
 /// Whether this message earns a notification, and what it would say.
@@ -34,29 +40,8 @@ pub fn wanted(
     attending: bool,
     now: u64,
 ) -> Option<Notice> {
-    if !settings.enabled || attending {
+    if !settings.enabled || attending || !worth_telling(settings, state, thread, message, now) {
         return None;
-    }
-    // Our own message, arriving as the echo of a send or as a sync from another
-    // device. Notifying somebody about what they just typed is absurd.
-    if message.sender() == state.aci {
-        return None;
-    }
-    // A tombstone, a reaction's own row, or anything else with nothing to say.
-    if !message.is_addressable() {
-        return None;
-    }
-    if state.index.flags(thread).muted(now) {
-        return None;
-    }
-
-    if thread.is_group() {
-        let mentioned = message.mentions(state.aci);
-        match settings.groups {
-            GroupNotifications::None => return None,
-            GroupNotifications::Mentions if !mentioned => return None,
-            _ => {}
-        }
     }
 
     let who = state.name_of(message.sender());
@@ -76,7 +61,78 @@ pub fn wanted(
         false => "New message".to_owned(),
     };
 
-    Some(Notice { title, body })
+    let picture = match thread.is_group() {
+        true => state.avatar(thread),
+        false => state.avatar_for(message.sender()),
+    };
+
+    Some(Notice {
+        title,
+        body,
+        thread: thread.clone(),
+        picture: picture.map(std::path::Path::to_path_buf),
+    })
+}
+
+/// Whether this message is anybody's business but the store's — mine, a
+/// tombstone, a muted conversation, a group this account has told to be quiet.
+/// Shared by the banner and the sound, because a sound *is* a notification with
+/// no words in it, and two policies that can disagree is a conversation that is
+/// muted for one of them.
+fn worth_telling(
+    settings: &Notifications,
+    state: &State,
+    thread: &Thread,
+    message: &Message,
+    now: u64,
+) -> bool {
+    // Our own message, arriving as the echo of a send or as a sync from another
+    // device. Notifying somebody about what they just typed is absurd.
+    if message.sender() == state.aci {
+        return false;
+    }
+    // A tombstone, a reaction's own row, or anything else with nothing to say.
+    if !message.is_addressable() {
+        return false;
+    }
+    if state.index.flags(thread).muted(now) {
+        return false;
+    }
+    if thread.is_group() {
+        let mentioned = message.mentions(state.aci);
+        return match settings.groups {
+            GroupNotifications::None => false,
+            GroupNotifications::Mentions => mentioned,
+            GroupNotifications::All => true,
+        };
+    }
+    true
+}
+
+/// Whether a message arriving is worth a sound.
+///
+/// Unlike a banner this does not care whether the conversation is on screen: a
+/// tone is the answer to "did that send" and "did something come in" while you
+/// are looking straight at the thread, which is exactly when a banner would be
+/// wrong and a sound is right.
+pub fn audible(
+    settings: &Notifications,
+    state: &State,
+    thread: &Thread,
+    message: &Message,
+    now: u64,
+) -> bool {
+    settings.sounds && worth_telling(settings, state, thread, message, now)
+}
+
+/// Where a clicked banner goes. Set once by the workspace, which is the only
+/// thing that can open a conversation, and read from the thread the banners are
+/// posted on — the notification centre answers on its own schedule and the
+/// answer has to cross back.
+static OPENING: OnceLock<futures::channel::mpsc::UnboundedSender<Thread>> = OnceLock::new();
+
+pub fn opens_with(sender: futures::channel::mpsc::UnboundedSender<Thread>) {
+    let _ = OPENING.set(sender);
 }
 
 /// Hands the notice to the desktop.
@@ -90,8 +146,13 @@ pub fn wanted(
 /// two seconds, which is the window frozen for two seconds per message with
 /// gpui's `App` still borrowed underneath it, so every AppKit callback that
 /// arrives in the meantime logs `RefCell already borrowed` and is dropped. Off
-/// the main thread the same wait is a condvar, which blocks nobody. One thread
-/// rather than one per notice: banners appear one after another anyway.
+/// the main thread the same wait is a condvar, which blocks nobody.
+///
+/// A thread *each*, though, which the single queue this used to be could not
+/// be: waiting to be told the banner was clicked is waiting for as long as the
+/// banner is up, and one queue would then post the second message's banner
+/// after the first had timed out. The dispatcher is what keeps the ordering the
+/// notification centre sees; the waits happen beside each other.
 pub fn post(notice: &Notice) {
     static POSTING: OnceLock<Sender<Notice>> = OnceLock::new();
 
@@ -99,7 +160,10 @@ pub fn post(notice: &Notice) {
         let (sender, receiver) = mpsc::channel::<Notice>();
         std::thread::spawn(move || {
             for notice in receiver {
-                show(&notice);
+                std::thread::Builder::new()
+                    .name("petunia-notification".into())
+                    .spawn(move || show(notice))
+                    .ok();
             }
         });
         sender
@@ -110,16 +174,40 @@ pub fn post(notice: &Notice) {
     }
 }
 
-fn show(notice: &Notice) {
-    let shown = notify_rust::Notification::new()
+fn show(notice: Notice) {
+    let mut notification = notify_rust::Notification::new();
+    notification
         .summary(&notice.title)
         .body(&notice.body)
-        .appname("Petunia")
-        .show();
+        .appname("Petunia");
 
-    if let Err(error) = shown {
-        tracing::debug!(%error, "could not post a notification");
+    if let Some(picture) = notice.picture.as_ref() {
+        notification.image_path(&picture.to_string_lossy());
     }
+
+    let shown = notification.show();
+    let handle = match shown {
+        Ok(handle) => handle,
+        Err(error) => {
+            tracing::debug!(%error, "could not post a notification");
+            return;
+        }
+    };
+
+    // Blocks until the banner is answered or gives up. "__closed" is the
+    // dismissal and every other identifier is somebody having pressed it, so
+    // only the click opens anything.
+    handle.wait_for_action(|action| {
+        if action != "default" {
+            return;
+        }
+        let Some(opening) = OPENING.get() else {
+            return;
+        };
+        if opening.unbounded_send(notice.thread).is_err() {
+            tracing::debug!("nothing is listening for a clicked notification");
+        }
+    });
 }
 
 /// Names the application the notifications come from, once, before any of them

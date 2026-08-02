@@ -73,6 +73,10 @@ pub struct Notifications {
     pub show_content: bool,
     pub show_sender: bool,
     pub groups: GroupNotifications,
+    /// A short tone when a message is sent, and another when one arrives. The
+    /// same mute and group rules a banner obeys, since a sound is a
+    /// notification that happens to have no words in it.
+    pub sounds: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -166,6 +170,7 @@ impl Default for Notifications {
             show_content: true,
             show_sender: true,
             groups: GroupNotifications::All,
+            sounds: true,
         }
     }
 }
