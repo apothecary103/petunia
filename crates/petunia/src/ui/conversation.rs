@@ -11,7 +11,7 @@ use super::message::group;
 use super::message::run::Run;
 use petunia_media::audio::{Playback, Player};
 use petunia_config::Theme;
-use petunia_config::messages::{Layout, Spacing, Timestamps};
+use petunia_config::messages::{Layout, Reply, Spacing, Timestamps};
 use petunia_data::{Message, MessageId, State, Thread};
 use petunia_signal::Command;
 use crate::store::{Focus, Store};
@@ -791,6 +791,7 @@ impl Render for Conversation {
         };
 
         let layout = store.config.messages.layout;
+        let replies = store.config.messages.replies;
         let spacing = store.config.messages.spacing();
         let timestamps = store.config.messages.timestamps;
         // The config counts seconds; message timestamps are milliseconds.
@@ -834,6 +835,7 @@ impl Render for Conversation {
             palette: palette.clone(),
             highlights: cx.highlights().clone(),
             layout,
+            replies,
             spacing,
             timestamps,
             max_image,
@@ -899,6 +901,12 @@ impl Render for Conversation {
             .flex()
             .flex_col()
             .bg(palette.background)
+            // Captured, so it runs before the words themselves hear the click:
+            // pressing the mouse anywhere in the column puts out whatever was
+            // lit, and a press that landed on some text then lights its own.
+            // Ordering the two as bubble handlers would leave which of them won
+            // to the order they happened to be painted in.
+            .capture_any_mouse_down(|_, _, cx| super::selection::clear(cx))
             .on_drop(cx.listener(
                 |this: &mut Self, paths: &gpui::ExternalPaths, _, cx| {
                     // One message carrying everything, rather than one message
@@ -944,6 +952,7 @@ struct Frame {
     palette: Theme,
     highlights: std::sync::Arc<gpui_component::highlighter::HighlightTheme>,
     layout: Layout,
+    replies: Reply,
     spacing: Spacing,
     timestamps: Timestamps,
     max_image: (f32, f32),
@@ -982,6 +991,7 @@ impl Frame {
                     theme: &self.palette,
                     highlights: &self.highlights,
                     layout: self.layout,
+                    replies: self.replies,
                     spacing: self.spacing,
                     timestamps: self.timestamps,
                     max_image: self.max_image,
