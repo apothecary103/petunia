@@ -133,10 +133,11 @@ impl Cache {
             Some(entry.decoding.clone())
         });
 
-        // A task that has not finished yet reports nothing rather than blocking
-        // the frame on it.
+        // A task that has not finished yet reports nothing of its own rather than
+        // blocking the frame on it -- but another size of the same picture is
+        // already decoded and is a better answer than a hole. See `nearest`.
         if let Some(decoding) = known {
-            return decoding.now_or_never();
+            return decoding.now_or_never().or_else(|| Self::nearest(request, cx));
         }
 
         let decoding = {
@@ -169,7 +170,40 @@ impl Cache {
             })
             .detach();
 
-        decoding.now_or_never()
+        decoding.now_or_never().or_else(|| Self::nearest(request, cx))
+    }
+
+    /// The same picture at whatever size is already decoded, for the frames a new
+    /// size is still being made in.
+    ///
+    /// Resizing the window changes how many device pixels an element occupies, so
+    /// every step of a drag asks for a picture that has never been decoded — and
+    /// an element handed `None` draws nothing at all. That is the flicker: every
+    /// image in the window blinking out and back for as long as the drag lasts.
+    /// A resample at another size is the same picture, scaled by the GPU for a
+    /// frame or two rather than absent, and the element's own `ObjectFit` puts it
+    /// in the same box either way.
+    ///
+    /// The closest one, so what is shown while the right size is being made is the
+    /// nearest thing to it.
+    fn nearest(request: &Request, cx: &mut App) -> Option<Decoded> {
+        cx.update_global(|cache: &mut Cache, _| {
+            let drawn = cache.drawn;
+            let (_, entry) = cache
+                .entries
+                .iter_mut()
+                .filter(|(other, _)| {
+                    other.path == request.path
+                        && other.kind == request.kind
+                        && other.fit == request.fit
+                })
+                .filter(|(_, entry)| entry.decoding.peek().is_some())
+                .min_by_key(|(other, _)| other.width.abs_diff(request.width))?;
+            // Marked as drawn, or the stand-in is evicted for being old while it
+            // is the only thing on screen.
+            entry.drawn = drawn;
+            entry.decoding.clone().now_or_never()
+        })
     }
 
     /// Gives back the least recently drawn resamples until the rest fit in
@@ -409,7 +443,7 @@ pub fn cropped(path: impl AsRef<Path>, edge: f32) -> Img {
 fn sized(path: PathBuf, width: f32, height: f32, fit: Fit, kind: Kind) -> Img {
     img(move |window: &mut Window, cx: &mut App| {
         let scale = window.scale_factor().max(1.0);
-        let device = |value: f32| ((value * scale).ceil() as u32).max(1);
+        let device = |value: f32| step(((value * scale).ceil() as u32).max(1));
 
         let request = Request {
             path: path.clone(),
@@ -420,6 +454,21 @@ fn sized(path: PathBuf, width: f32, height: f32, fit: Fit, kind: Kind) -> Img {
         };
         Cache::load(&request, window, cx)
     })
+}
+
+/// The next size worth decoding at or above this one.
+///
+/// A request is keyed by its size in device pixels, so a window being dragged
+/// wider asks for a size that has never been decoded on every frame of the drag:
+/// a resample of a photograph each time, none of them finished before the next
+/// one is asked for, and each one a megabyte the cache then has to give back.
+/// Rounded up a sixteenth at a time, a drag across the screen asks for a dozen
+/// sizes rather than a thousand, and the picture is at most six per cent larger
+/// than the box it is drawn in -- which the GPU takes out again in the one
+/// bilinear tap it was always going to make.
+fn step(pixels: u32) -> u32 {
+    let step = (pixels / 16).max(8);
+    pixels.next_multiple_of(step)
 }
 
 #[cfg(test)]
@@ -551,6 +600,19 @@ mod tests {
             }
         }
         bytes
+    }
+
+    /// A drag across the screen must ask for a handful of sizes rather than one
+    /// per pixel, and none of them may be smaller than the box it is drawn in.
+    #[test]
+    fn a_size_is_rounded_up_to_a_step_of_its_own() {
+        assert_eq!(step(68), 72);
+        assert_eq!(step(1200), 1200);
+
+        for pixels in [1u32, 9, 100, 641, 1201, 4000] {
+            assert!(step(pixels) >= pixels);
+            assert!(step(pixels) <= pixels + 8.max(pixels / 16));
+        }
     }
 
     #[test]

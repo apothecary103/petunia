@@ -23,7 +23,7 @@ use gpui::{
     Pixels, Point, SharedString, StyledText, Window, px, quad, size,
 };
 
-use super::selection;
+use super::{selection, spoiler};
 
 /// How much of the line's height the box leaves clear, top and bottom.
 ///
@@ -48,6 +48,19 @@ pub struct Wash {
     /// `None` for the runs that are not text you can take -- a quote, which is a
     /// picture of something said elsewhere.
     selectable: Option<Selectable>,
+    /// The spoilers in this run, and what the run is called so a click on one can
+    /// be remembered. Painted over the text rather than behind it, and only for
+    /// as long as nobody has asked to see them.
+    covers: Option<Covers>,
+}
+
+/// What it takes to hide a stretch of words: which run they are in, which
+/// stretches, and what the block over them is painted in.
+#[derive(Clone)]
+struct Covers {
+    id: SharedString,
+    spans: Vec<Range<usize>>,
+    fill: Hsla,
 }
 
 /// What it takes to select a run: what it is called while it is selected, the
@@ -80,6 +93,7 @@ pub fn wash(
         radius: px(radius),
         pad: px(pad),
         selectable: None,
+        covers: None,
     }
 }
 
@@ -90,6 +104,16 @@ impl Wash {
     /// which run it belongs to.
     pub fn selectable(mut self, id: SharedString, text: SharedString, tint: Hsla) -> Self {
         self.selectable = Some(Selectable { id, text, tint });
+        self
+    }
+
+    /// Hides these stretches under a rounded block until they are clicked. The id
+    /// is the run's own, and has to be the same one frame to frame: it is half of
+    /// what says which spoiler was uncovered.
+    pub fn covering(mut self, id: SharedString, spans: Vec<Range<usize>>, fill: Hsla) -> Self {
+        if !spans.is_empty() {
+            self.covers = Some(Covers { id, spans, fill });
+        }
         self
     }
 }
@@ -104,7 +128,8 @@ impl gpui::IntoElement for Wash {
 
 impl gpui::Element for Wash {
     type RequestLayoutState = ();
-    /// The box the pointer is tested against, for a run that can be selected.
+    /// The box the pointer is tested against, for a run that can be selected or
+    /// has something hidden in it.
     type PrepaintState = Option<Hitbox>;
 
     fn id(&self) -> Option<gpui::ElementId> {
@@ -135,8 +160,7 @@ impl gpui::Element for Wash {
         cx: &mut App,
     ) -> Option<Hitbox> {
         self.text.prepaint(id, inspector, bounds, state, window, cx);
-        self.selectable
-            .is_some()
+        (self.selectable.is_some() || self.covers.is_some())
             .then(|| window.insert_hitbox(bounds, HitboxBehavior::Normal))
     }
 
@@ -166,11 +190,77 @@ impl gpui::Element for Wash {
         }
 
         self.text
-            .paint(id, inspector, bounds, request_layout, &mut (), window, cx)
+            .paint(id, inspector, bounds, request_layout, &mut (), window, cx);
+
+        if let Some((covers, hitbox)) = self.covers.clone().zip(hitbox.clone()) {
+            self.hide(&covers, bounds, &hitbox, window, cx);
+        }
     }
 }
 
 impl Wash {
+    /// Paints a rounded block over every spoiler still covered, and takes a click
+    /// on one as the request to see it.
+    ///
+    /// Over the words rather than instead of them: the run is laid out as it was
+    /// written, so uncovering one moves nothing and the click that does it lands
+    /// on the same place the block was.
+    fn hide(
+        &self,
+        covers: &Covers,
+        bounds: Bounds<Pixels>,
+        hitbox: &Hitbox,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let breathe = self.text.layout().line_height() * BREATHE;
+        let hidden: Vec<(usize, Vec<Bounds<Pixels>>)> = covers
+            .spans
+            .iter()
+            .filter(|span| spoiler::covered(&covers.id, span.start, cx))
+            .map(|span| {
+                (
+                    span.start,
+                    self.spanning(bounds, span, self.pad, breathe),
+                )
+            })
+            .collect();
+        if hidden.is_empty() {
+            return;
+        }
+
+        for box_ in hidden.iter().flat_map(|(_, boxes)| boxes) {
+            window.paint_quad(quad(
+                *box_,
+                self.radius,
+                covers.fill,
+                px(0.0),
+                gpui::transparent_black(),
+                gpui::BorderStyle::Solid,
+            ));
+        }
+
+        window.on_mouse_event({
+            let (id, hitbox) = (covers.id.clone(), hitbox.clone());
+            move |event: &MouseDownEvent, phase, window: &mut Window, cx: &mut App| {
+                if phase != DispatchPhase::Bubble
+                    || event.button != MouseButton::Left
+                    || !hitbox.is_hovered(window)
+                {
+                    return;
+                }
+                let Some((at, _)) = hidden
+                    .iter()
+                    .find(|(_, boxes)| boxes.iter().any(|box_| box_.contains(&event.position)))
+                else {
+                    return;
+                };
+                spoiler::uncover(id.clone(), *at, cx);
+                window.refresh();
+            }
+        });
+    }
+
     /// Paints whatever is lit in this run, and listens for what would change it.
     ///
     /// The listeners are the window's rather than the element's, because a drag

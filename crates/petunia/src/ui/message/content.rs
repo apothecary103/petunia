@@ -32,6 +32,11 @@ pub struct Body<'a> {
     pub replies: Reply,
     pub max_image: (f32, f32),
     pub playback: &'a Playback,
+    /// Whether this message is the one that carries the receipt. Not every
+    /// message of ours does: see `Run::marked`.
+    pub marked: bool,
+    /// Whether its text has just been copied, which the bar says for a moment.
+    pub copied: bool,
     /// The one way anything drawn on a message asks for something to happen.
     pub act: &'a Dispatch,
 }
@@ -121,13 +126,13 @@ impl Body<'_> {
         // The mark trails what was said rather than taking a line of its own:
         // one line per message of "Read" doubles the height of a conversation
         // to say something you only look for when you look for it.
-        let mark = (own && self.message.status.is_some()).then(|| {
-            receipt(
-                self.message.status.expect("checked"),
-                self.message.edited.is_some(),
-                theme,
-            )
-        });
+        //
+        // "Edited" is not a receipt and is drawn wherever it applies: a layout
+        // that carries the tick on one message only must still say which messages
+        // were changed after the fact.
+        let status = (own && self.marked).then_some(self.message.status).flatten();
+        let edited = self.message.edited.is_some();
+        let mark = (status.is_some() || edited).then(|| receipt(status, edited, theme));
 
         let mut block = div().flex().flex_col().gap_1p5().child(
             div()
@@ -142,7 +147,7 @@ impl Body<'_> {
             block = block.child(reactions(self.message, self.state, theme, self.act));
         }
 
-        bar::with_actions(block, self.message, own, theme, self.act)
+        bar::with_actions(block, self.message, own, self.copied, theme, self.act)
     }
 
     /// The question, then one row per option: a bar filled to its share of the
@@ -305,28 +310,35 @@ impl Body<'_> {
 /// How far a message of ours has got, in Signal's own language: a circled check
 /// sent, a second circle delivered, both filled read. Small and dim, because it
 /// matters when you look for it and never otherwise.
-fn receipt(status: Status, edited: bool, theme: &Theme) -> gpui::Stateful<Div> {
+fn receipt(status: Option<Status>, edited: bool, theme: &Theme) -> gpui::Stateful<Div> {
     /// How large the mark is beside a message's clock.
     const TICK: f32 = 11.0;
 
-    let mark: AnyElement = match status {
-        Status::Sending => kit::icon(IconName::Loader, 11.0, theme.text_muted).into_any_element(),
-        Status::Failed => kit::icon(IconName::TriangleAlert, 11.0, theme.danger).into_any_element(),
-        Status::Sent => kit::receipt(kit::Mark::Sent, TICK, theme.text_muted).into_any_element(),
-        Status::Delivered => {
-            kit::receipt(kit::Mark::Delivered, TICK, theme.text_muted).into_any_element()
+    let mark = status.map(|status| -> AnyElement {
+        match status {
+            Status::Sending => {
+                kit::icon(IconName::Loader, 11.0, theme.text_muted).into_any_element()
+            }
+            Status::Failed => {
+                kit::icon(IconName::TriangleAlert, 11.0, theme.danger).into_any_element()
+            }
+            Status::Sent => kit::receipt(kit::Mark::Sent, TICK, theme.text_muted).into_any_element(),
+            Status::Delivered => {
+                kit::receipt(kit::Mark::Delivered, TICK, theme.text_muted).into_any_element()
+            }
+            Status::Read | Status::Viewed => {
+                kit::receipt(kit::Mark::Read, TICK, theme.text_muted).into_any_element()
+            }
         }
-        Status::Read | Status::Viewed => {
-            kit::receipt(kit::Mark::Read, TICK, theme.text_muted).into_any_element()
-        }
-    };
+    });
     let words = match status {
-        Status::Sending => "Sending",
-        Status::Failed => "Failed to send",
-        Status::Sent => "Sent",
-        Status::Delivered => "Delivered",
-        Status::Read => "Read",
-        Status::Viewed => "Viewed",
+        Some(Status::Sending) => "Sending",
+        Some(Status::Failed) => "Failed to send",
+        Some(Status::Sent) => "Sent",
+        Some(Status::Delivered) => "Delivered",
+        Some(Status::Read) => "Read",
+        Some(Status::Viewed) => "Viewed",
+        None => "Edited after it was sent",
     };
 
     div()
@@ -344,10 +356,10 @@ fn receipt(status: Status, edited: bool, theme: &Theme) -> gpui::Stateful<Div> {
             gpui_component::tooltip::Tooltip::new(words).build(window, cx)
         })
         .when(edited, |this| this.child("edited"))
-        .when(status == Status::Failed, |this| {
+        .when(status == Some(Status::Failed), |this| {
             this.text_color(theme.danger).child(words)
         })
-        .child(mark)
+        .children(mark)
 }
 
 /// The body, split so that a code block gets a box of its own and everything
@@ -402,7 +414,8 @@ fn prose(
                         // Where the paragraph starts, which is what tells two
                         // paragraphs of one message apart and stays the same
                         // frame to frame.
-                        Some(SharedString::from(format!("{said}-{from}"))),
+                        SharedString::from(format!("{said}-{from}")),
+                        true,
                     ))
                     .into_any_element()
             })
@@ -724,7 +737,12 @@ fn styled(
     ranges: &[Range],
     state: &State,
     theme: &Theme,
-    run: Option<SharedString>,
+    // What this run of text is called: half of what says which spoiler in it has
+    // been uncovered, and which run a selection belongs to.
+    id: SharedString,
+    // False for a quote, which is a picture of something said elsewhere: the
+    // words to take are the ones in the message it was quoted from.
+    selectable: bool,
 ) -> crate::ui::wash::Wash {
     let runs = runs(body, ranges, state, theme);
     // Shared rather than copied: the text is wanted twice, and a selectable run
@@ -739,11 +757,17 @@ fn styled(
         theme.border,
         INLINE_RADIUS,
         INLINE_PAD,
-    );
+    )
+    // Opaque, whatever the theme made of the token: a block you can read through
+    // is not a spoiler.
+    .covering(id.clone(), runs.covered, gpui::Hsla {
+        a: 1.0,
+        ..theme.text_muted
+    });
 
-    match run {
-        Some(run) => washed.selectable(run, text, kit::selection(theme)),
-        None => washed,
+    match selectable {
+        true => washed.selectable(id, text, kit::selection(theme)),
+        false => washed,
     }
 }
 
@@ -756,6 +780,8 @@ struct Runs {
     families: Vec<(std::ops::Range<usize>, SharedString)>,
     /// Which stretches get a box painted behind them.
     boxed: Vec<std::ops::Range<usize>>,
+    /// Which stretches get a block painted *over* them, until they are clicked.
+    covered: Vec<std::ops::Range<usize>>,
 }
 
 fn runs(body: &str, ranges: &[Range], state: &State, theme: &Theme) -> Runs {
@@ -765,23 +791,18 @@ fn runs(body: &str, ranges: &[Range], state: &State, theme: &Theme) -> Runs {
     let mut mono = Vec::new();
     let mut serif = Vec::new();
     let mut boxed = Vec::new();
+    let mut covered = Vec::new();
 
     for segment in segments {
         let styles = segment.styles;
         let start = text.len();
 
-        match (styles.spoiler, styles.mention) {
-            // A hidden spoiler must not leak its text through glyph widths, so
-            // it is replaced rather than merely recoloured.
-            (true, _) => {
-                let width = body[segment.start..segment.end].chars().count();
-                text.push_str(&"█".repeat(width.clamp(1, 40)));
-            }
-            (false, Some(uuid)) => {
+        match styles.mention {
+            Some(uuid) => {
                 text.push('@');
                 text.push_str(&state.sender_name(uuid));
             }
-            (false, None) if styles.monospace => {
+            None if styles.monospace => {
                 text.push_str(&body[segment.start..segment.end]);
             }
             // Maths is the one thing drawn as something other than what was
@@ -794,7 +815,7 @@ fn runs(body: &str, ranges: &[Range], state: &State, theme: &Theme) -> Runs {
             // is set larger and a text run carries no size: inline maths shares
             // the sentence's size and there is nothing to be done about that
             // without breaking the one layout a line needs to wrap as a line.
-            (false, None) => {
+            None => {
                 let source = &body[segment.start..segment.end];
                 let mut upto = 0;
 
@@ -827,13 +848,16 @@ fn runs(body: &str, ranges: &[Range], state: &State, theme: &Theme) -> Runs {
         // font with a faint wash behind it. An override names the family for the
         // run, inside the one text layout, so the line still wraps as a line
         // rather than becoming a row of elements that wrap at their own edges.
-        if styles.monospace && !styles.spoiler {
+        if styles.monospace {
             mono.push((start..text.len(), theme.typography.mono.clone().into()));
             boxed.push(start..text.len());
         }
+        if styles.spoiler {
+            covered.push(start..text.len());
+        }
         // Everything but the maths branch styles the segment in one piece; that
         // one has already put its own pieces in.
-        if styles.mention.is_some() || styles.spoiler {
+        if styles.mention.is_some() {
             note(&mut highlights, start..text.len(), styles, theme);
         } else if styles.monospace {
             cut(&mut highlights, start..text.len(), styles, theme);
@@ -852,6 +876,7 @@ fn runs(body: &str, ranges: &[Range], state: &State, theme: &Theme) -> Runs {
         highlights,
         families,
         boxed,
+        covered,
     }
 }
 
@@ -951,16 +976,10 @@ fn highlight(styles: format::Styles, theme: &Theme) -> Option<HighlightStyle> {
         });
         touched = true;
     }
-    // No background for monospace: the box behind it is painted by `ui::wash`,
-    // which is the only way to get the corners and the hairline a highlight has
+    // No background for monospace, and none for a spoiler: both are boxes
+    // `ui::wash` paints, which is the only way to get the corners a highlight has
     // no room for.
-    if styles.spoiler {
-        // Same colour as the block it draws, so nothing shows through until a
-        // reveal replaces the text.
-        highlight.color = Some(theme.text_muted);
-        highlight.background_color = Some(theme.text_muted);
-        touched = true;
-    } else if styles.mention.is_some() {
+    if styles.mention.is_some() {
         highlight.color = Some(theme.accent);
         highlight.background_color = Some(kit::tinted(theme.accent));
         touched = true;
@@ -999,9 +1018,19 @@ fn quoted(quote: &Quote, state: &State, theme: &Theme, spacing: Spacing, style: 
     // was instead of leaving a blank line where the words would have been. The
     // caption wins when there is one, because that is what was said.
     // Not selectable: a quote is a picture of something said elsewhere, and the
-    // words to take are the ones in the message it was quoted from.
-    let words =
-        (!quote.body.is_empty()).then(|| styled(&quote.body, &quote.ranges, state, theme, None));
+    // words to take are the ones in the message it was quoted from. A spoiler in
+    // one is still a spoiler, and uncovering it here uncovers this copy of it:
+    // the quote is named after the message it quotes, not after the one it is in.
+    let words = (!quote.body.is_empty()).then(|| {
+        styled(
+            &quote.body,
+            &quote.ranges,
+            state,
+            theme,
+            SharedString::from(format!("quote-{}", quote.id.timestamp)),
+            false,
+        )
+    });
     let named = words.is_none().then(|| quote.media.clone()).flatten();
 
     let quoted = Quoted {
@@ -1352,6 +1381,29 @@ mod tests {
             );
         }
         assert_eq!(runs.boxed, [0..3, 32..35]);
+    }
+
+    /// A spoiler is a block painted over the words, so the words are laid out as
+    /// they were written: uncovering one is a repaint rather than a reflow, and
+    /// nothing that holds an offset into the run — a selection, a highlight — has
+    /// to be told. Replaced by blocks instead, as this once was, revealing a
+    /// spoiler rewrote the paragraph under everything holding a position in it.
+    #[test]
+    fn a_spoiler_keeps_its_words_and_is_covered_where_they_are() {
+        let runs = drawn("the butler ||did it|| really");
+
+        assert_eq!(runs.text, "the butler did it really");
+        assert_eq!(runs.covered, [11..17]);
+    }
+
+    /// Nothing else marks it: the cover is opaque, and a colour underneath one is
+    /// a colour nobody can see until it is gone -- at which point the words want
+    /// to look like the words around them.
+    #[test]
+    fn an_uncovered_spoiler_is_styled_like_anything_else() {
+        let runs = drawn("||boo||");
+
+        assert!(runs.highlights.is_empty(), "{:?}", runs.highlights);
     }
 
     /// The overrides have to arrive in order or the pass that applies them walks

@@ -20,6 +20,7 @@ pub fn with_actions(
     body: Div,
     message: &Message,
     own: bool,
+    copied: bool,
     theme: &Theme,
     act: &Dispatch,
 ) -> gpui::Stateful<Div> {
@@ -48,12 +49,16 @@ pub fn with_actions(
                 .top(px(-14.0))
                 .right_0()
                 .invisible()
+                // Whatever else it is doing, the bar stays up while it is saying
+                // the text was taken: an answer that appears under a pointer that
+                // has already moved on is an answer to nobody.
+                .when(copied, |this| this.visible())
                 .group_hover(group, |this| this.visible())
-                .child(bar(message, own, theme, act)),
+                .child(bar(message, own, copied, theme, act)),
         )
 }
 
-fn bar(message: &Message, own: bool, theme: &Theme, act: &Dispatch) -> Div {
+fn bar(message: &Message, own: bool, copied: bool, theme: &Theme, act: &Dispatch) -> Div {
     let id = message.id;
     let has_text = message.text().is_some_and(|text| !text.is_empty());
 
@@ -90,11 +95,19 @@ fn bar(message: &Message, own: bool, theme: &Theme, act: &Dispatch) -> Div {
             Act::Forward(id),
         ));
 
+    // A copy is a thing that happens somewhere else, so the only place it can be
+    // reported is here: the icon becomes a check in the accent for a moment. A
+    // control that answers nothing is a control you press twice.
     if has_text {
-        bar = bar.child(button(
+        let (icon, tooltip, tint) = match copied {
+            true => (IconName::Check, "Copied", theme.accent),
+            false => (IconName::Copy, "Copy text", theme.text_muted),
+        };
+        bar = bar.child(marked(
             format!("copy-{}", id.timestamp),
-            IconName::Copy,
-            "Copy text",
+            icon,
+            tooltip,
+            tint,
             theme,
             act.clone(),
             Act::Copy(id),
@@ -155,12 +168,26 @@ fn button(
     act: Dispatch,
     what: Act,
 ) -> gpui::Stateful<Div> {
+    marked(id, icon, tooltip, theme.text_muted, theme, act, what)
+}
+
+/// The same, in a colour of its own -- which only the copy button asks for, to
+/// say for a moment that it did something.
+fn marked(
+    id: String,
+    icon: IconName,
+    tooltip: &'static str,
+    tint: gpui::Hsla,
+    theme: &Theme,
+    act: Dispatch,
+    what: Act,
+) -> gpui::Stateful<Div> {
     square(id, theme)
         .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tooltip).build(window, cx))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             act(what.clone(), window, cx)
         })
-        .child(kit::icon(icon, 14.0, theme.text_muted))
+        .child(kit::icon(icon, 14.0, tint))
 }
 
 fn square(id: impl Into<SharedString>, theme: &Theme) -> gpui::Stateful<Div> {

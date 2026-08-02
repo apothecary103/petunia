@@ -36,7 +36,7 @@ pub const TITLE_BAR: f32 = 40.0;
 
 /// Wide enough to clear them too, for whatever is leftmost when the sidebar is
 /// not there to hold them.
-const TRAFFIC_LIGHTS: f32 = 84.0;
+pub const TRAFFIC_LIGHTS: f32 = 84.0;
 
 /// The narrowest the conversation column may be squeezed to before a side panel
 /// gives way. Below this the avatar gutter and the reading column stop being a

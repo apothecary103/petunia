@@ -112,6 +112,10 @@ const REVEAL_FOR: std::time::Duration = std::time::Duration::from_millis(2500);
 /// turn into an unbounded download of a conversation with years behind it.
 const REVEAL_PAGES: u32 = 20;
 
+/// How long a message stays lit after its text has been copied. Long enough to
+/// be seen, short enough not to be mistaken for a state the message is in.
+const COPIED_FOR: std::time::Duration = std::time::Duration::from_millis(1200);
+
 /// A message a search asked to be taken to.
 #[derive(Clone, Copy)]
 struct Reveal {
@@ -160,6 +164,9 @@ pub struct Conversation {
     /// What a search asked to be shown, while it is still being looked for or
     /// still lit.
     revealed: Option<Reveal>,
+    /// The message whose text was just copied, and the task that stops saying so.
+    copied: Option<u64>,
+    confirming: Option<gpui::Task<()>>,
     /// Where to put the list once it has been told how many rows there are.
     /// Applied after `reconcile` rather than when the row is worked out, because
     /// scrolling to a row the list has not heard of yet clamps to the end.
@@ -268,6 +275,8 @@ impl Conversation {
             ticking: None,
             aging: None,
             revealed: None,
+            copied: None,
+            confirming: None,
             pending_scroll: None,
             fading: None,
         }
@@ -529,7 +538,7 @@ impl Conversation {
         cx.emit(Raise::new(items, at));
     }
 
-    fn copy(&self, target: MessageId, cx: &mut Context<Self>) {
+    fn copy(&mut self, target: MessageId, cx: &mut Context<Self>) {
         let Some(text) = self
             .store
             .read(cx)
@@ -546,6 +555,20 @@ impl Conversation {
             return;
         };
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+
+        // A clipboard write is invisible, so the message says it happened: it
+        // lights for a moment and the copy button becomes a check.
+        self.copied = Some(target.timestamp);
+        self.confirming = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(COPIED_FOR).await;
+            this.update(cx, |this, cx| {
+                this.copied = None;
+                this.confirming = None;
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
     }
 
     /// Saving is a copy to somewhere the user picks; the cached file stays where
@@ -841,6 +864,13 @@ impl Render for Conversation {
             max_image,
             playback,
             revealed: self.revealed.as_ref().map(|reveal| reveal.target.timestamp),
+            latest_own: history
+                .messages()
+                .iter()
+                .rev()
+                .find(|message| message.sender() == state.aci && message.status.is_some())
+                .map(Message::timestamp),
+            copied: self.copied,
             act,
         });
         let store = self.store.clone();
@@ -959,6 +989,13 @@ struct Frame {
     playback: Playback,
     /// The message a search jumped to, lit until the next one is asked for.
     revealed: Option<u64>,
+    /// The newest message of this account's in the thread, which is the one the
+    /// standard layout marks. Worked out once per repaint rather than per row: a
+    /// scan of the history in every row of every frame is the cost the sidebar's
+    /// previews were moved off the render path to avoid.
+    latest_own: Option<u64>,
+    /// The message whose text was just copied.
+    copied: Option<u64>,
     act: Dispatch,
 }
 
@@ -997,6 +1034,8 @@ impl Frame {
                     max_image: self.max_image,
                     playback: &self.playback,
                     revealed: self.revealed,
+                    latest_own: self.latest_own,
+                    copied: self.copied,
                     act: &self.act,
                 }
                 .render()

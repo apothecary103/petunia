@@ -135,7 +135,28 @@ version is gone and its arrangement is not a precedent for anything.
   how much room a message is given rather than what shape it is. A bubble is for
   words: a sticker and a message that is nothing but pictures are drawn without
   one, because a rounded box around a photograph is a second frame around a frame
-  and Signal draws neither in one.
+  and Signal draws neither in one. Where the *receipt* goes is the layout's too
+  (`Run::marked`): a bubble and an IRC line each carry their own, which is what
+  the client each shape is borrowed from does, but a run of six things you said
+  under one header got six ticks down its side saying the same thing six times.
+  So the standard layout does what Cinny does with Matrix's receipts and marks
+  the furthest one only — the newest message of yours in the thread — since
+  everything above it got at least that far by definition. "Edited" is not a
+  receipt and is still drawn wherever it applies. And a copy says so
+  (`Conversation::copy`): a clipboard write is invisible, so for a moment the
+  message lights in the accent and the copy button becomes a check, and the bar
+  stays up while it does — an answer that appears under a pointer that has moved
+  on is an answer to nobody.
+- **Spoilers.** A rounded block painted *over* the words (`ui::wash`'s `covering`,
+  keyed in `ui::spoiler`), lifted by a click. Over rather than instead of: the
+  text is laid out as it was written, so uncovering one is a repaint rather than a
+  reflow and every offset a selection or a highlight holds stays where it was.
+  What was there before was a run of `█` in place of the words, which had no
+  corners to round, clamped at forty characters, and had nothing to click at all
+  — a spoiler that could not be revealed is a message petunia does not show. The
+  block is the theme's muted grey at full opacity, because one you can read
+  through is not one. A spoiler inside a quote is covered too, and named after the
+  message it quotes rather than the one it is in.
 - **Replies.** Three shapes for the message being answered, beside the layout
   under *Appearance* and for the same reason: how much room the context takes is
   what a reply looks like, not what it says. **Signal**, the default, is Signal's
@@ -209,6 +230,17 @@ version is gone and its arrangement is not a precedent for anything.
   name second, through the same `Prompt` every other single line of text goes
   through, and opens when the server has taken it rather than when the button was
   pressed: until then there is no thread to open.
+- **The viewer** (`ui/viewer.rs`) takes the whole window, as Signal's own does.
+  It was a sheet inset from every edge with the conversation dimmed behind it,
+  which sounds like context and reads as a picture in a smaller window: the thing
+  being looked at is a photograph, and what a photograph wants is the screen.
+  Covering the window means the strip of controls across the top is what the
+  traffic lights float over, so it clears them the way the header does when the
+  sidebar is away. Clicking beside the picture still closes it. The rail of
+  thumbnails underneath is a row of *wells* rather than a row of pictures:
+  `ObjectFit::Cover` fills the box and lets the long axis hang over, and nothing
+  clips that but a parent that says so — so a portrait photograph grew out of the
+  rail and over its neighbours.
 - **The conversation column** is the whole of the space between the panels
   (`kit::column`). It was capped at a reading measure, the way prose is set; a
   chat log is not prose, and a window somebody made wide is a window they want
@@ -418,6 +450,19 @@ Every one of these has already cost a debugging session.
   reclaimed by `App::drop_image`. `BUDGET` has to stay comfortably above what a
   window can show at once: evicting something on screen is asking to decode it
   again next frame, forever.
+- **A size is a cache key, and a drag changes it every frame.** A request is keyed
+  by the device pixels an element occupies, so dragging the window wider asked for
+  a size that had never been decoded on every frame of the drag — and an element
+  handed a decode that has not finished draws *nothing*. That is every picture in
+  the window blinking out and back for as long as the resize lasts. Two answers,
+  because either alone leaves half of it: `image::step` rounds a request up a
+  sixteenth at a time, so a drag across the screen asks for a dozen sizes rather
+  than a thousand and the picture is at most six per cent larger than its box —
+  which the GPU takes out again in the one bilinear tap it was always going to
+  make; and `Cache::nearest` answers a request still being decoded with the same
+  picture at the closest size that is, scaled for a frame or two rather than
+  absent. The stand-in is marked as drawn when it is handed over, or it is evicted
+  for being old while it is the only thing on screen.
 - **A cache counted in entries is a cache for one size of thing.** The ceiling was
   a count, and a photograph and a sticker tile are three orders of magnitude apart
   — so a number generous for a page of photographs was a number the sticker picker

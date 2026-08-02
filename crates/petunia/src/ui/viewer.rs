@@ -37,21 +37,19 @@ impl gpui::EventEmitter<Raise> for Viewer {}
 /// black screen around it.
 const ZOOM: std::ops::RangeInclusive<f32> = 0.2..=8.0;
 
-/// How much of the window the panel takes. A picture wants room, but taking the
-/// whole screen loses the conversation it came from — and a sheet that covers
-/// every edge is indistinguishable from the application having changed mode.
-const PANEL: f32 = 0.86;
-
-/// What the panel spends on its own chrome: the strip of controls above the
-/// picture, and the rail and transport below it. Only the first frame is drawn
-/// against this guess -- `stage` measures the real thing and every frame after
-/// uses that.
+/// What the window spends on the viewer's own chrome: the strip of controls
+/// above the picture, and the rail and transport below it. Only the first frame
+/// is drawn against this guess -- `stage` measures the real thing and every frame
+/// after uses that.
 const CHROME: f32 = super::workspace::TITLE_BAR + 24.0;
 const RAIL: f32 = 72.0;
 
 /// How much of the stage is left clear around the picture, so nothing ever meets
 /// the strip above it or the rail below.
 const INSET: f32 = 12.0;
+
+/// The edge of one tile on the rail.
+const THUMBNAIL: f32 = 44.0;
 
 pub struct Viewer {
     /// Everything of this kind in the thread, so left and right walk it.
@@ -165,8 +163,8 @@ impl Viewer {
 
         let viewport = window.viewport_size();
         (
-            (f32::from(viewport.width) * PANEL - INSET * 2.0).max(120.0),
-            (f32::from(viewport.height) * PANEL
+            (f32::from(viewport.width) - INSET * 2.0).max(120.0),
+            (f32::from(viewport.height)
                 - CHROME
                 - if railed { RAIL } else { 0.0 }
                 - if self.playing.is_some() { RAIL } else { 0.0 })
@@ -292,22 +290,19 @@ impl Render for Viewer {
         let stage = self.box_for_the_picture(window, railed);
         let measured = self.stage.clone();
 
+        // The whole window, the way Signal's own viewer takes it. A sheet inset
+        // from every edge keeps the conversation visible behind it, which sounds
+        // like context and reads as a picture in a smaller window: the thing
+        // being looked at is a photograph, and what a photograph wants is the
+        // screen.
         let panel = div()
             .id("viewer-panel")
             .relative()
-            .w(gpui::relative(PANEL))
-            .h(gpui::relative(PANEL))
+            .size_full()
             .flex()
             .flex_col()
             .overflow_hidden()
-            .rounded(px(kit::RADIUS_LG))
             .bg(palette.background)
-            .border_1()
-            .border_color(palette.border)
-            .shadow_lg()
-            // The scrim behind closes on a click, so the panel stops one from
-            // reaching it.
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
@@ -320,7 +315,7 @@ impl Render for Viewer {
                 let delta = f32::from(event.delta.pixel_delta(px(20.0)).y);
                 this.scale_by(1.0 + delta / 400.0, cx);
             }))
-            .child(self.chrome(&position, &palette, cx))
+            .child(self.chrome(&position, &palette, window, cx))
             .child(
                 div()
                     .id("stage")
@@ -399,18 +394,7 @@ impl Render for Viewer {
             .inset_0()
             .occlude()
             .flex()
-            .items_center()
-            .justify_center()
-            .bg(gpui::Hsla {
-                a: 0.72,
-                ..palette.background
-            })
-            // Clicking beside the panel closes it, the way every other sheet
-            // here is dismissed.
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|_, _, _, cx| cx.emit(Dismissed)),
-            )
+            .bg(palette.background)
             .on_action(cx.listener(|_, _: &crate::actions::Cancel, _, cx| cx.emit(Dismissed)))
             .on_action(cx.listener(|this, _: &crate::actions::ViewerPrevious, _, cx| {
                 this.step(-1, cx)
@@ -666,6 +650,7 @@ impl Viewer {
         &self,
         position: &str,
         palette: &Theme,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let name = self
@@ -680,6 +665,13 @@ impl Viewer {
             .items_center()
             .gap_2()
             .px_3()
+            // The viewer covers the window, so this strip is what the traffic
+            // lights float over -- the sidebar's band is behind it. macOS only,
+            // and not in fullscreen, where there are none to clear.
+            .when(
+                cfg!(target_os = "macos") && !window.is_fullscreen(),
+                |this| this.pl(px(super::workspace::TRAFFIC_LIGHTS)),
+            )
             .h(px(super::workspace::TITLE_BAR))
             .child(
                 div()
@@ -783,7 +775,24 @@ impl Viewer {
                             this.reset(cx);
                         }),
                     )
-                    .child(image::cropped(path, 44.0).rounded(px(kit::RADIUS - 1.0)))
+                    // The well is what makes the tile square, not the picture in
+                    // it: `ObjectFit::Cover` fills the box and lets the long axis
+                    // hang over, and nothing clips that but a parent that says
+                    // so -- so a portrait photograph grew out of the rail and
+                    // over its neighbours. Rounded on the picture as well, since
+                    // `overflow_hidden` clips a child to the parent's rectangle
+                    // rather than to its corners.
+                    .child(
+                        div()
+                            .size(px(THUMBNAIL))
+                            .overflow_hidden()
+                            .rounded(px(kit::RADIUS - 1.0))
+                            .bg(palette.sunken)
+                            .child(
+                                image::cropped(path, THUMBNAIL)
+                                    .rounded(px(kit::RADIUS - 1.0)),
+                            ),
+                    )
             }))
             .child(kit::icon_button(
                 "next",

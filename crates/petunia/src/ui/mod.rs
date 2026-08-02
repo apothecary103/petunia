@@ -23,6 +23,7 @@ pub mod search;
 pub mod selection;
 pub mod settings;
 pub mod sidebar;
+pub mod spoiler;
 pub mod sticker;
 pub mod switcher;
 pub mod themes;

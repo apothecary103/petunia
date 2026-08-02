@@ -65,6 +65,11 @@ pub struct Run<'a> {
     /// The message a search jumped to, lit so the answer is findable in the page
     /// it landed on.
     pub revealed: Option<u64>,
+    /// The newest thing this account said in the thread, which is the one message
+    /// the standard layout puts a receipt on.
+    pub latest_own: Option<u64>,
+    /// The message whose text was just copied, said for a moment and then not.
+    pub copied: Option<u64>,
     pub act: &'a Dispatch,
 }
 
@@ -299,9 +304,28 @@ impl Run<'_> {
             .collect()
     }
 
+    /// Whether this message carries the receipt.
+    ///
+    /// Everywhere but the standard layout, Signal's own answer: every message of
+    /// yours has its mark, because a bubble and a log line are each where the
+    /// client they come from puts one.
+    ///
+    /// The standard layout is Discord's shape, and a tick against every line of a
+    /// run is a column of punctuation down the side saying the same thing about
+    /// all of them. So it does what Cinny does with Matrix's receipts and reports
+    /// the *furthest* one only: the newest thing you said carries how far it got,
+    /// and everything above it got at least that far by definition.
+    fn marked(&self, message: &Message) -> bool {
+        match self.layout {
+            Layout::Standard => self.latest_own == Some(message.timestamp()),
+            Layout::Compact | Layout::Bubbles => true,
+        }
+    }
+
     /// One message, lit when it is the one a search was looking for.
     fn body(&self, message: &Message) -> Div {
         let found = self.revealed == Some(message.timestamp());
+        let copied = self.copied == Some(message.timestamp());
         let body = content::Body {
             message,
             state: self.state,
@@ -311,15 +335,23 @@ impl Run<'_> {
             replies: self.replies,
             max_image: self.max_image,
             playback: self.playback,
+            marked: self.marked(message),
+            copied,
             act: self.act,
         }
         .render();
 
+        // Two washes, one shape: the one a search leaves, and the flash that says
+        // the words are on the clipboard now.
+        let lit = match (found, copied) {
+            (_, true) => Some(kit::tinted(self.theme.accent)),
+            (true, false) => Some(kit::tinted(self.theme.warning)),
+            (false, false) => None,
+        };
+
         div()
-            .when(found, |this| {
-                this.px_1p5()
-                    .rounded(px(kit::RADIUS))
-                    .bg(kit::tinted(self.theme.warning))
+            .when_some(lit, |this, tint| {
+                this.px_1p5().rounded(px(kit::RADIUS)).bg(tint)
             })
             .child(body)
     }
