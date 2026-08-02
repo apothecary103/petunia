@@ -324,10 +324,14 @@ pub fn light() -> Theme {
         border: c(0xd6d6d6),
         border_focus: c(0xa8a8a8),
         text: c(0x1b1b1b),
-        text_dim: c(0x5c5c5c),
-        text_muted: c(0x8a8a8a),
-        hover: c(0xe0e0e0),
-        active: c(0xd2d2d2),
+        // Darker than the dark theme's greys are light, because a light theme's
+        // quiet text has to hold up over a *filled* row as well as over the
+        // background: the greys these were mirrored from put the selected
+        // conversation's preview at barely two to one against its own fill.
+        text_dim: c(0x4e4e4e),
+        text_muted: c(0x6f6f6f),
+        hover: c(0xe2e2e2),
+        active: c(0xd4d4d4),
         selected: c(0xdcdcdc),
         accent: c(0x1b1b1b),
         on_accent: c(0xf5f5f5),
