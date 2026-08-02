@@ -12,6 +12,25 @@ x feat: add sound feedback for sent/received messages
 x feat: add the ability to enable disappearing messages through the app, and add and improve the general support for them
 x fix: make download progress bars actually accurate
 x fix: make this actually build on linux as there's an ssl library mismatch
+x fix: playback speed controls for audio messsages shouldn't change the pitch
+x fix: disappearing messages do not disappear on the client
+x fix: scroll down to the latest message after sending a message
+  fix: syncing something just breaks and doesn't sync the messages while the official signal app syncs perfectly fine
+
+partly  the read syncs were being filed wrong: a SyncMessage.Read names the
+        message's author and its timestamp and says nothing about which
+        conversation it was in, so every group read on the phone cleared
+        nothing here and moved the watermark on an unrelated one-to-one with
+        that person -- which, being a watermark, then hid real unread messages
+        behind it. the store knows where the row is filed and is asked now
+        (`read_thread`), and the badge is recounted against the mark rather
+        than cleared outright.
+        that is one concrete defect, not necessarily the one you hit. if the
+        symptom is "new messages never arrive", say what the log says around
+        `message stream started` -- the socket, not the store, would be the
+        thing at fault. if it is "linking gets me no history", there is nothing
+        to fix: signal's own history transfer is not in presage, and no client
+        that lacks it can get the backlog.
 
 partly  fix: latex rendering being pretty bad and not even rendering fractions
         display maths ($$…$$) is now typeset properly -- a real rule between a

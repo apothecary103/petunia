@@ -111,6 +111,23 @@ version is gone and its arrangement is not a precedent for anything.
   as, so a note recorded here and one from a phone are drawn from the same
   numbers. `voice_note` on the spec is what makes it a voice note on the wire —
   the content type is not, and every other client reads the flag.
+- **Playing faster.** The ladder is Signal's — 1×, 1.5×, 2× — and what it changes
+  is how long the recording takes rather than what it sounds like.
+  `media::stretch` is WSOLA: the sound is cut into overlapping grains and the
+  grains are laid back down closer together, so each keeps the periods it was cut
+  from and only the timeline moves. rodio's own `set_speed` is a *resample* — it
+  reports a higher sample rate for the same samples — which is a voice note an
+  octave up, and a speed control is for getting through the words rather than for
+  making somebody sound like a cartoon. Laying grains down blindly is an echo,
+  since two a hop apart are rarely in phase; the search either side of each
+  grain's nominal position is what repairs that, and a pitch period is a few
+  milliseconds against a ten-millisecond search. The speed is shared with the
+  source rather than baked into it, so changing it is a change to the next
+  twenty-five milliseconds and to nothing already written, and at 1× the search
+  finds the offset it was taken from and the complementary fades reconstruct it
+  exactly — one path through the code rather than two that could sound different
+  from each other. The playhead is the stretcher's own count of the frames it has
+  *read*: rodio counts what it has written, which at 2× is half the answer.
 - **Sounds.** A short tone when a message goes and another when one lands
   (`audio::Chime`), synthesised rather than shipped: two sine partials under an
   exponential decay is a struck bell, which is what a notification has sounded
@@ -598,6 +615,49 @@ Every one of these has already cost a debugging session.
   range: a reader inside it, or on row zero above it, is left at the top with the
   page they asked for below them, so `reconcile` puts them on the first row the
   rewrite did not touch.
+- **A message you wrote is one you are looking for on screen.** The list keeps a
+  reader where they are when something arrives at the back, which is right for
+  everybody else's messages and wrong for your own: sending from halfway up a
+  thread left the message somewhere below the window. `Conversation::follow_own`
+  is the one exception, and it is keyed on *which* message rather than on
+  whether the newest one is ours — that stays true for every frame after a send,
+  and a rule that scrolls to the end on all of them is a thread that cannot be
+  scrolled back through at all.
+- **A message you sent has nobody to read it.** Signal starts the clock on a
+  disappearing message when it is *sent*, for our own, and when it is *read*, for
+  everybody else's — so `expiring` both stamps the field and writes the deadline,
+  and without the second half everything this account said stayed in the
+  conversation forever while vanishing out of every other one. The field is the
+  other half of the same trap: it is what makes a message disappear for the
+  recipient, and a send path that skips it is a conversation with the timer on
+  where only one side's messages go. Every path that puts something in a thread
+  needs it — text, attachments, stickers, polls, and the edit that replaces one.
+- **`activate` asks before the answer can exist.** Reading a conversation is what
+  starts its messages disappearing, and `activate` asked the history for them in
+  the same breath as it requested the page — so on a thread nothing had opened
+  before there was nothing in memory to start, and a conversation full of
+  disappearing messages sat there with not one of them counting down. The page
+  arriving is the moment, which is the same place the first open's read receipts
+  are owed from.
+- **A line outlives the message it was taken from.** The sidebar's preview is
+  written when a message arrives rather than derived per frame, so nothing
+  revisits it — and a disappearing message that has gone from the thread and is
+  still legible in the column beside it has not disappeared. `forget_preview`
+  clears the line when it is of *that* message and leaves `last_activity` alone,
+  so the conversation keeps its place rather than vanishing with the message;
+  what replaces it is whatever the store now says is newest (`reline`), because
+  `touch` refuses to go backwards and the replacement is older by definition.
+- **A read sync names an author and a timestamp, and no thread.** Which thread a
+  `SyncMessage.Read` is about is the receiver's to work out, and taking the
+  author's own one-to-one for it is right for exactly half of them: every group
+  message read on the phone cleared nothing here and moved the watermark on an
+  unrelated conversation with that person — where, being a watermark, it then hid
+  real unread messages behind it. presage's store already answers the question
+  (`thread_for_sender_and_timestamp`); the author's thread is the fallback for a
+  message this device never received. And the mark is a watermark rather than the
+  whole thread, so what follows it is recounted rather than cleared: reading
+  something from this morning on the phone does not mean everything since has
+  been seen.
 - **A history is not a loaded history.** A message arriving live builds one out of
   nothing but itself, because `history_mut` creates the entry it is asked for. So
   "has this thread been opened before" cannot be "does it have a history":
