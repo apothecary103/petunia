@@ -93,6 +93,37 @@ version is gone and its arrangement is not a precedent for anything.
   *inside* it, right-aligned, and a thin context strip beneath. The `+` is a menu
   rather than a button, because attaching a file and starting a poll are the same
   kind of act and a permanent button each said they were equally often wanted.
+- **Voice messages.** A microphone beside the send, and while one is running the
+  card becomes the recording rather than growing a strip: a light that breathes
+  with the level, the clock, the shape of what has been said filling from the
+  right, and the two things that can happen to it. Beside the send rather than in
+  place of it — Signal swaps the two depending on whether the field is empty,
+  which means the control under the pointer changes what it does as you type.
+  What is written is the microphone as it arrived: sixteen-bit PCM at the
+  device's own rate, in a WAV (`crates/media/src/recorder.rs`). Signal's own
+  clients send about thirty-two kilobits of AAC, which is enough for a sentence
+  in a quiet room and audibly not enough for anything else; this is a megabyte a
+  minute against their quarter of one, and it is the recording rather than a
+  guess at it. Sixteen-bit specifically, not the thirty-two-bit float rodio's own
+  writer emits: what is on the other end is a phone, and a phone's decoder knows
+  the format every recorder has written since 1991. The waveform is gathered
+  while recording, in the same measurement `waveform::shape` reads a stored file
+  as, so a note recorded here and one from a phone are drawn from the same
+  numbers. `voice_note` on the spec is what makes it a voice note on the wire —
+  the content type is not, and every other client reads the flag.
+- **Sounds.** A short tone when a message goes and another when one lands
+  (`audio::Chime`), synthesised rather than shipped: two sine partials under an
+  exponential decay is a struck bell, which is what a notification has sounded
+  like since there were notifications, and it is thirty lines instead of two
+  assets to carry and license. Its own voice on the mixer, so it lands over a
+  voice note rather than stopping it. Deliberately quiet — this plays every time
+  a message arrives, and the sound that survives that is the one you stop hearing
+  rather than the one you turn off. The same mute and group rules a banner obeys,
+  through the same predicate (`notify::worth_telling`), because a sound *is* a
+  notification with no words in it and two policies that can disagree is a
+  conversation that is muted for one of them. Unlike a banner it does not care
+  whether the thread is on screen: "did that send" is a question you have with
+  the conversation in front of you.
 - **Pickers.** One control opens both, and what it opens is a panel with two tabs
   (`ui/composer/picker.rs`). A sticker and an emoji are the same gesture — reach
   for a picture, put it in the message — and two buttons beside each other were
@@ -196,11 +227,20 @@ version is gone and its arrangement is not a precedent for anything.
   flight rather than a second connection. And the read is spawned off the worker's
   command loop rather than awaited in it — awaited there it stopped everything
   else, sends and receipts included, for as long as it took.
-- **Maths.** `$…$` and `$$…$$`, read by `data::message::latex` and drawn as the
-  symbols they spell: `\alpha` is α, `x^2` is x², `\frac{a}{b}` is a⁄b. There is no
-  typesetting engine and there is not going to be one — what travels is the source
-  the sender typed, because no other Signal client renders any of it, and a reading
-  is the most that can be honest about that. A dollar is a currency symbol far more
+- **Maths.** `$…$` and `$$…$$`, read by `data::message::latex` into a *tree*
+  (`latex::parse`) and written back out as one line by `latex::flatten`, which is
+  the same grammar read twice rather than two readers that can disagree. A
+  display equation gets the tree: `ui/message/maths.rs` lays it out with real
+  boxes — a numerator over a denominator with a rule between them, limits above
+  and below a ∑, a radical with a bar over what is under it, scripts set smaller
+  and raised, and a `\left…\right` pair stretched to what it holds. An equation
+  *inside a sentence* gets the line — `\frac{a}{b}` as a⁄b — because a wrapping
+  line has to be one text run and gpui has no inline box, which is the same split
+  TeX itself draws and the same reason most houses set an inline fraction on a
+  slash. There is still no maths font and no glyph variants, so an integral sign
+  is the size it is; what is drawn is the structure, and the glyphs are Unicode's.
+  What travels is the source the sender typed, because no other Signal client
+  renders any of it. A dollar is a currency symbol far more
   often than a delimiter, so a pair only counts with no line break and no space
   against either end: `$5 and $6` stays what it says. Set in the theme's serif,
   through the same family-override mechanism inline code uses — an integral sign in
@@ -240,7 +280,16 @@ version is gone and its arrangement is not a precedent for anything.
   thumbnails underneath is a row of *wells* rather than a row of pictures:
   `ObjectFit::Cover` fills the box and lets the long axis hang over, and nothing
   clips that but a parent that says so — so a portrait photograph grew out of the
-  rail and over its neighbours.
+  rail and over its neighbours. The gestures are the platform's: a pinch zooms, a
+  two-finger scroll pans while there is anywhere to pan to and steps the reel
+  when there is not, and a mouse wheel zooms, because a wheel has one axis and in
+  a viewer it means closer. Zoom is anchored on whatever is under the pointer —
+  scaled about the centre, the detail somebody leaned in to look at slides off
+  the stage on the way in, and the gesture becomes zoom, hunt, pan, zoom again.
+  The picture is `absolute` so that being larger than the stage is not a request
+  for room from the very box the zoom is measured against, and the pan is bounded
+  by however much of it hangs over each edge: a picture flicked off the stage
+  entirely is a black screen with no clue that the way back is a keystroke.
 - **The conversation column** is the whole of the space between the panels
   (`kit::column`). It was capped at a reading measure, the way prose is set; a
   chat log is not prose, and a window somebody made wide is a window they want
@@ -274,11 +323,43 @@ rather than by good intentions. Each crate may only reach the ones below it.
   `bridge.rs` (the worker's events into the store), `theme.rs`, `actions.rs`,
   `menus.rs`, `notify.rs`, `session.rs`.
 
-`vendor/presage` is ours to edit, and two things here need it: the block list and
-the nicknames both live in a contact's Storage Service record, which upstream has
-no writer for. `update_contact` is the one read-modify-write behind both — a
+`vendor/presage` is ours to edit, and three things here need it. The block list
+and the nicknames both live in a contact's Storage Service record, which upstream
+has no writer for: `update_contact` is the one read-modify-write behind both — a
 manifest rewrite, retried once on a version conflict, which is what losing a race
 with another device looks like. Neither path has ever run against a live account.
+The third is `get_attachment_reporting`, which is upstream's own download with the
+byte count let out of it: `get_attachment` reads the whole stream in one call, so
+there is nothing to report until there is nothing left to report, which is a
+progress bar that can only slide.
+
+**Disappearing messages** are set from the conversation's own menu, on the ladder
+Signal offers rather than as a switch — "on" is not a setting anybody can act on
+without also being asked how long. Turning one on *is* the message: there is
+nowhere on the server a one-to-one timer is kept, so a client that does not write
+the update down forgets it the moment the window closes, which is what
+`petunia_expire_timers` is for and why a group's own record only seeds it. When
+the clock starts is Signal's rule: the moment a message is sent, for our own, and
+the moment it is *read*, for everybody else's — so nothing vanishes out of a
+conversation nobody opened, and `Command::StartExpiry` comes from the window,
+which is the only thing that knows a message has been seen. `sweep_expired` runs
+every half minute and deletes locally and only locally: everybody in the
+conversation has the same timer and is running the same clock, and asking them to
+delete something they are already deleting is a message per message per
+recipient. The conversation says so where it is being read — a chip in the header
+that opens the same menu — and each message that is going away carries a small
+clock rather than a countdown, because a second-by-second number on every message
+in a thread is a thread that never stops repainting.
+
+**How much has been said** is counted rather than kept (`db::tallies`), behind a
+preference that is off: a running total written as messages arrive would be a
+second copy of the truth going stale the first time a row was deleted from under
+it. It is a full pass over the store, so it is asked for when the details panel
+opens and again when it moves to another conversation, which is when the numbers
+are being read. A receipt, a reaction and a tombstone are rows and are not
+counted — "you have sent four thousand messages" with the thumbs-up in it is not
+the number anybody meant — and `classify` is the same reader the conversation is
+built from, so the two cannot disagree about what a message is.
 
 Whether somebody is **blocked** is not a question the server answers: it is the
 `blocked` flag on that record, which every linked device reads out of the shared
@@ -347,6 +428,14 @@ Anything that *replaces* the environment rather than adding to it — `nix-shell
 needs Signal's contact discovery service, which is presage's `cdsi` feature, which
 reaches libsignal-net and through it Signal's fork of BoringSSL. The failure names
 `boring-sys` and asks for cmake.
+
+**On Linux** the shell carries the system libraries as well, because nothing on
+that platform is simply there the way a framework is: `pkg-config` for the `-sys`
+crates to ask, `openssl` and `dbus`, gpui's wayland, xkbcommon, Vulkan loader, X
+libraries, fontconfig and freetype, and `alsa-lib` for cpal. Wayland, the Vulkan
+loader and the X libraries are opened *by name* at run time rather than linked,
+so `LD_LIBRARY_PATH` is set as well — without it the binary builds and then
+cannot find a surface to draw on.
 
 ## Traps
 
@@ -563,7 +652,15 @@ Every one of these has already cost a debugging session.
   read it there cannot know its own — the symptom was settings reporting no
   username for an account that plainly had one. `refresh_username` reads it once
   at startup, and the `signal.me` link is rebuilt from the entropy and handle
-  beside it rather than stored.
+  beside it rather than stored. The link itself is a *control* rather than a
+  line: forty characters of base64 printed under the username was the one string
+  in the settings pane nobody reads and the one string everybody needs to send,
+  so it is copied or shown as a code somebody else's phone can point a camera at
+  (`kit::qr`, shared with the linking screen). Black on white whatever the theme
+  is, and with the quiet zone the standard asks for — a scanner is looking for a
+  printed mark, not for something that matches the window it is in. Folded away
+  until it is asked for, because it is two hundred pixels tall and the account
+  pane is not mostly about being scanned.
 - **A username is a name and a number** joined by a dot — not `@name#1234`, which
   is Discord's. The discriminator is part of the identity, so two people may share
   a nickname; `reserve_username` offers the server one candidate when the caller
@@ -895,6 +992,72 @@ Every one of these has already cost a debugging session.
 - **A sticker is a cut-out.** The sheet used to sit each one on a sunken square so
   it would have an edge; what that actually draws is a grid of boxes with pictures
   in them. Nothing behind them.
+- **`Decoder::new` builds a decoder that cannot seek.** rodio's `new` takes a
+  reader and is told nothing else; `Decoder::try_from(File)` reads the length off
+  the file's own metadata and marks the stream seekable. Without both, `try_seek`
+  refuses outright and symphonia cannot work out the length of a format that does
+  not store one — which is mp3, ogg and every voice note Signal sends. That is
+  the whole of "clicking the waveform does nothing", and it is also why the bar
+  never filled: the fallback to the tags was covering for a decoder that had been
+  built wrong.
+- **rodio counts the position in the sped-up timeline.** `Speed` works by
+  reporting a higher sample rate and `track_position` wraps it, so at double speed
+  `get_pos` returns half the real position and `try_seek` takes half the real
+  target — and *changing* the speed rescales every sample already counted, which
+  is a playhead that jumps. `audio::elapsed` and `audio::scaled` are the one
+  boundary where the two clocks are converted, and `set_speed` re-seeks to where
+  it was so the count starts again against the new rate.
+- **A group's hover is its own rectangle's.** `group_hover` asks
+  `GroupHitboxes::get(..).is_hovered`, which is the group element's bounds and
+  nothing else — so a control positioned *outside* those bounds is visible only
+  while the pointer is somewhere it is not. The message toolbar hangs above the
+  message by half its own height, and reaching for it took the pointer out of the
+  message, which hid the thing being reached for: the top half of every button in
+  it was unusable. The bar keeps itself up with a `hover` of its own, which is the
+  only thing that can.
+- **A drag has to show what letting go will do.** Dragging the sidebar divider
+  past the snap point narrowed the column to the rail's width while the list
+  inside went on drawing two-line rows, because whether it *is* a rail was applied
+  on release. `Drag::railed` is the live answer and `drag_sidebar` applies it on
+  the frame it crosses.
+- **A control sized to its contents resizes when its contents appear.** The
+  sidebar's search box grew by half its own height the moment the first character
+  was typed, because the clear button is a twenty-eight pixel hit target and the
+  search glyph is fourteen — and the whole list under it stepped down and back on
+  every empty query. Anything that gains a control conditionally needs a height of
+  its own.
+- **Zoom must not be laid out.** A zoomed picture is drawn larger than the stage,
+  and in the flow that is a flex item asking its parent for room — while the
+  parent's measured size is what the zoom is a multiple of. The viewer's picture
+  is `absolute` for that reason alone: its size is nothing's business but its own.
+- **A trackpad and a mouse wheel arrive as the same event.** `ScrollDelta::Lines`
+  is a wheel and `ScrollDelta::Pixels` is two fingers, and in a picture viewer
+  they mean opposite things: a wheel means closer, and fingers mean pan, because
+  that is what they do in every application on the platform. gpui has `on_pinch`
+  for the gesture that really is a zoom.
+- **presage reports a download when it has finished downloading.** Upstream's
+  `get_attachment` reads the whole stream in one `read_to_end`, which is a
+  progress bar that can only slide.
+  `get_attachment_reporting` (`vendor/presage`) reads it in chunks and says how
+  far it has got; the declared size is the *plaintext* length and what arrives is
+  the ciphertext with an IV and a MAC on it, so the fraction is clamped rather
+  than allowed to read past one.
+- **A one-to-one disappearing timer is kept nowhere a client can read back.** The
+  `EXPIRATION_TIMER_UPDATE` message *is* the setting, so a client that does not
+  write it down forgets it the moment the window closes —
+  `petunia_expire_timers` is that memory, and a group's own record seeds it. When
+  the clock starts is Signal's rule and not ours: the moment a message is sent,
+  for our own, and the moment it is *read*, for everybody else's, so nothing
+  vanishes out of a conversation nobody has opened. The sweep deletes locally and
+  only locally: everybody else has the same timer and is running the same clock.
+- **The Linux shell had no system libraries in it at all.** macOS hands gpui,
+  cpal and the crypto everything they need from frameworks that are simply there,
+  so the dev shell needed none of it and the Linux build then found whatever the
+  host distribution happened to have, or nothing — most visibly `openssl`, since
+  that is the one with a name anybody recognises. `flake.nix` lists them per
+  platform now, with `pkg-config` for the `-sys` crates to ask and
+  `LD_LIBRARY_PATH` for wayland, the Vulkan loader and the X libraries, which are
+  opened by name at run time rather than linked.
 
 ## Coding rules
 
