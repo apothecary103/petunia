@@ -98,6 +98,10 @@ where
             ServiceId::parse_from_service_id_string(self.local_address.name())
                 .expect("valid protocol address name");
 
+        // Nothing else may touch a session record while this one is being
+        // ratcheted. See `session_lock`.
+        let _sessions = crate::session_lock::sessions().await;
+
         if envelope.content.is_some() {
             let plaintext = self.decrypt(&envelope, csprng).await?;
             let was_plaintext = plaintext.metadata.was_plaintext;

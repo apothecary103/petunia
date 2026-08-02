@@ -720,6 +720,11 @@ impl<S: Store> Manager<S, Registered> {
                 loop {
                     match state.encrypted_messages.next().await {
                         Some(Ok(Incoming::Envelope(envelope))) => {
+                            // Read off before the envelope is consumed: a
+                            // decryption failure has to be able to say whose
+                            // session it was, and a sealed sender envelope only
+                            // names one from inside the error.
+                            let source = envelope.parse_source_service_id();
                             let envelope = {
                                 // the permit is released at the end of the block (impl Drop)
                                 match ServiceId::parse_from_service_id_string(
@@ -1071,6 +1076,9 @@ impl<S: Store> Manager<S, Registered> {
                                 }
                                 Err(error) => {
                                     error!(%error, "error opening envelope, message will be skipped!");
+                                    if let Some(sender) = broken_session(&error, source) {
+                                        return Some((Received::Undecryptable(sender), state));
+                                    }
                                 }
                             }
                         }
@@ -1581,6 +1589,10 @@ impl<S: Store> Manager<S, Registered> {
 
         let mut store = self.store.aci_protocol_store();
 
+        // Archiving is a write to the very records the stream may be ratcheting
+        // right now. See `libsignal_service::session_lock`.
+        let sessions = libsignal_service::session_lock::sessions().await;
+
         // Archive all sessions with all receiver devices.
         // Note that the "get_sub_device_sessions" does not include the main device, therefore add it.
         // Note that deleting the session is not equivalent to archiving:
@@ -1604,6 +1616,9 @@ impl<S: Store> Manager<S, Registered> {
 
         // TODO: Signal Android also deletes entries in some sender_key_shared table; we don't have such a table yet.
         // Does not seem necessary though.
+
+        // Before the send, which takes the same lock to build the new session.
+        drop(sessions);
 
         // Send a null message.
         let message = NullMessage::generate(&mut rand::rng());
@@ -2098,6 +2113,48 @@ impl<S: Store> Manager<S, Registered> {
             .await?;
 
         Ok(())
+    }
+}
+
+/// Who to reset the session with, for a message that would not open — and
+/// `None` when the failure says nothing about the session.
+///
+/// A sealed sender envelope does not name its sender in the clear, so the only
+/// place the name can come from is the error itself, which carries it once the
+/// sender certificate has been validated. An unsealed one names it on the
+/// envelope, which the caller read before the envelope was consumed.
+///
+/// A duplicate and a message we sent to ourselves are ordinary; so is an
+/// identity that has changed, which is answered by trusting the new one rather
+/// than by throwing the session away. Everything else here is a session the two
+/// sides no longer agree on.
+fn broken_session(
+    error: &libsignal_service::push_service::ServiceError,
+    source: Option<ServiceId>,
+) -> Option<ServiceId> {
+    use libsignal_service::protocol::SignalProtocolError::*;
+    use libsignal_service::push_service::ServiceError;
+
+    let (inner, sender) = match error {
+        ServiceError::SealedSenderDecryptionError(error) => (
+            &error.inner,
+            error
+                .sender
+                .as_ref()
+                .and_then(|address| ServiceId::parse_from_service_id_string(address.name())),
+        ),
+        ServiceError::SignalProtocolError(error) => (error, None),
+        _ => return None,
+    };
+
+    match inner {
+        DuplicatedMessage(..) | SealedSenderSelfSend | UntrustedIdentity(..) => None,
+        InvalidMessage(..)
+        | InvalidState(..)
+        | SessionNotFound(..)
+        | InvalidSessionStructure(..)
+        | InvalidRegistrationId(..) => sender.or(source),
+        _ => None,
     }
 }
 

@@ -658,6 +658,10 @@ async fn receive(
 ) {
     let mut queue_signal = Some(queue_tx);
     let mut wait = RECONNECT_MIN;
+    // When each peer's session was last reset. Kept across reconnects, because a
+    // session nothing can be decrypted on is redelivered by the server on every
+    // one of them: reset per stream, a reconnect loop is a reset loop.
+    let mut resets: HashMap<ServiceId, tokio::time::Instant> = HashMap::new();
     loop {
         // Three states rather than two: opening a socket is not the same as
         // waiting to try again, and a label that says "Reconnecting" for both
@@ -672,6 +676,7 @@ async fn receive(
             &mut events,
             &mut queue_signal,
             &wake,
+            &mut resets,
         )
         .await
         {
@@ -780,6 +785,7 @@ async fn receive_once(
     events: &mut Events,
     queue_signal: &mut Option<oneshot::Sender<()>>,
     wake: &Notify,
+    resets: &mut HashMap<ServiceId, tokio::time::Instant>,
 ) -> Result<Stopped, Error> {
     let messages = manager.receive_messages().await?;
     pin_mut!(messages);
@@ -829,6 +835,7 @@ async fn receive_once(
                 let aci = manager.registration_data().service_ids.aci;
                 tokio::task::spawn_local(fetch_previews(db.clone(), aci, events.clone()));
             }
+            Received::Undecryptable(sender) => reset_session(manager, resets, sender),
             Received::Content(content) => {
                 debug!(timestamp = content.timestamp(), "received content");
 
@@ -2023,6 +2030,54 @@ fn deliver(manager: &RegisteredManager, sender: Uuid, timestamps: Vec<u64>) {
             .await
         {
             debug!(%error, "failed to send a delivery receipt");
+        }
+    });
+}
+
+/// How long a peer is left alone after its session has been reset. A reset costs
+/// a message and a whole new session, and what prompts one is a backlog the
+/// server redelivers on every reconnect: without a hand on it, one broken
+/// session is a message to that peer per message they ever sent.
+const RESET_AGAIN: Duration = Duration::from_secs(60 * 60);
+
+/// Throws away a session neither side agrees on any more, so that a new one can
+/// be negotiated.
+///
+/// Nothing from that device will decrypt until this happens — the ratchets have
+/// diverged, and every message after the first failure fails in the same way.
+/// Archiving ours and sending a null message is what makes the peer negotiate a
+/// fresh one, and the messages already lost stay lost.
+///
+/// Off the loop, like a receipt: it is a round trip, and the stream has a
+/// backlog of things it cannot open to get through.
+fn reset_session(
+    manager: &RegisteredManager,
+    resets: &mut HashMap<ServiceId, tokio::time::Instant>,
+    sender: ServiceId,
+) {
+    // presage's own reset addresses the peer by ACI, and a PNI has no session
+    // worth resetting: what arrives on one is a first message from somebody who
+    // has only ever had a phone number for us.
+    if !matches!(sender, ServiceId::Aci(_)) {
+        return;
+    }
+
+    let attempted = tokio::time::Instant::now();
+    if let Some(last) = resets.get(&sender)
+        && attempted.duration_since(*last) < RESET_AGAIN
+    {
+        return;
+    }
+    resets.insert(sender, attempted);
+
+    let mut manager = manager.clone();
+    tokio::task::spawn_local(async move {
+        warn!(
+            peer = %sender.service_id_string(),
+            "nothing from this device decrypts; resetting the session"
+        );
+        if let Err(error) = manager.send_session_reset(&sender, now()).await {
+            warn!(%error, "failed to reset a session");
         }
     });
 }

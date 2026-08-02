@@ -872,6 +872,10 @@ where
         unidentified_access: Option<&SenderCertificate>,
         content: &[u8],
     ) -> Result<Option<EncryptedMessages>, MessageSenderError> {
+        // Held for the encryption only: the round trip that carries the result
+        // happens in `try_send_message`, outside it. See `session_lock`.
+        let _sessions = crate::session_lock::sessions().await;
+
         let mut messages = vec![];
 
         let mut devices: HashSet<DeviceId> = self
