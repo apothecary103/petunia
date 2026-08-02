@@ -12,7 +12,38 @@ use gpui::{AssetSource, SharedString};
 /// picker's categories, which are drawn as icons rather than as one emoji each:
 /// a rail of nine emoji is a rail of nine things the grid below it is also full
 /// of, and the eye cannot tell the label from the contents.
-const OWN: [(&str, &str); 11] = [
+const OWN: [(&str, &str); 20] = [
+    // The chrome's own. The library's set is drawn at a hairline weight with
+    // square ends, which beside a column of rounded cards and pill-shaped chips
+    // reads as a toolbar from another application: these are the same Lucide
+    // geometry with round caps and joins, at the weight the rest of the window
+    // is set in.
+    // The receipt marks are Signal's own shape rather than Lucide's: a check in
+    // a ring, a second ring beside it, and both filled once it has been read.
+    (
+        "icons/receipt-sent.svg",
+        include_str!("../assets/icons/receipt-sent.svg"),
+    ),
+    (
+        "icons/receipt-delivered.svg",
+        include_str!("../assets/icons/receipt-delivered.svg"),
+    ),
+    (
+        "icons/receipt-read.svg",
+        include_str!("../assets/icons/receipt-read.svg"),
+    ),
+    ("icons/search.svg", include_str!("../assets/icons/search.svg")),
+    (
+        "icons/compose.svg",
+        include_str!("../assets/icons/compose.svg"),
+    ),
+    (
+        "icons/settings.svg",
+        include_str!("../assets/icons/settings.svg"),
+    ),
+    ("icons/plus.svg", include_str!("../assets/icons/plus.svg")),
+    ("icons/send.svg", include_str!("../assets/icons/send.svg")),
+    ("icons/close.svg", include_str!("../assets/icons/close.svg")),
     ("icons/music.svg", include_str!("../assets/icons/music.svg")),
     (
         "icons/sticker.svg",
