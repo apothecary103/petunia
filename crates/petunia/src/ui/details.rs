@@ -15,6 +15,9 @@ use petunia_data::{Member, State, Thread};
 use crate::store::{Focus, Store};
 use crate::theme::ActivePalette;
 
+/// How large one cell of the shared-media grid is.
+const SHARED_TILE: f32 = 62.0;
+
 /// Something in the panel was asked to open full size. The workspace owns the
 /// viewer, so the panel only says what was clicked.
 #[derive(Debug, Clone)]
@@ -335,15 +338,34 @@ fn conversation(
                             .children(shared.into_iter().enumerate().map(|(index, path)| {
                                 let target = path.clone();
                                 let view = hooks.view.clone();
+                                // The square is the *box*, not the picture. An
+                                // image is only square once it has decoded, so a
+                                // grid built out of the pictures themselves is a
+                                // grid that settles into line a tile at a time
+                                // and holds whatever shape the odd failure left
+                                // behind. Given a well to sit in, every cell is a
+                                // square from the first frame.
                                 div()
                                     .id(SharedString::from(format!("shared-{index}")))
                                     .flex_none()
+                                    .size(px(SHARED_TILE))
+                                    .overflow_hidden()
+                                    .rounded(px(kit::RADIUS))
+                                    .bg(palette.sunken)
                                     .cursor_pointer()
                                     .on_mouse_down(
                                         MouseButton::Left,
                                         move |_, window, cx| view(target.clone(), window, cx),
                                     )
-                                    .child(image::cropped(&path, 62.0).rounded(px(kit::RADIUS)))
+                                    // Rounded on the picture as well as on the
+                                    // well behind it: `overflow_hidden` clips a
+                                    // child to the parent's rectangle rather
+                                    // than to its corners, so a square image in
+                                    // a rounded well keeps its square corners.
+                                    .child(
+                                        image::cropped(&path, SHARED_TILE)
+                                            .rounded(px(kit::RADIUS)),
+                                    )
                             })),
                     ),
             )
