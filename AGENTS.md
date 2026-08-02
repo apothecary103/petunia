@@ -32,8 +32,46 @@ version is gone and its arrangement is not a precedent for anything.
   floating over its own top padding — a band that exists *for* them, so it
   collapses where there are none: off macOS, and in fullscreen, where macOS takes
   them away. Small quiet section headers and two-line entries carrying real
-  metadata. Identity sits at the very bottom: the display name and the connection,
-  and nothing that changes under the pointer — hovering it used to swap the name
+  metadata — a face at Signal's own size, which is taller than the two lines beside
+  it, the count in the accent on a filled pill rather than as one more grey
+  annotation, and the ticks for the last thing *you* said where Signal puts them:
+  on the line, not only in the conversation. Only our own messages carry a status
+  at all, so `Preview::status` being `Some` is also the answer to "was this mine",
+  and there is nothing to draw on anybody else's row. The badge is always the
+  number now: the dot that stood for a single unread said less than it cost, since
+  the row already reports that something is new by setting the name in the emphasis
+  weight — a name is the row's headline and is set in one (Semibold, as AppKit
+  sets the title line of any two-line row), so what unread changes is the colour
+  rather than the weight; a column that restyles a line every time a message lands
+  has two typefaces in it. The one you are *in* is a filled row and nothing else
+  (`kit::row`): Signal's own grey, a clear step above the hover. An accent tint
+  with a hairline and a stripe down the edge was legible from across the room and
+  read as a selected *cell* — the eye finds one filled row among unfilled ones
+  without being shouted at. What the fill does change is the preview under the
+  name: the quietest grey in a theme was chosen to sit on the list's background
+  rather than on a fill, and on the fill it was a line you could see was there and
+  not read — worst in light, where two of those greys were mirrored straight off
+  the dark theme's. So the row you are in steps its second line up exactly as an
+  unread one does, and petunia's own `light` is lettered darker than its `dark` is
+  lettered light. Rows are given room to be read down rather than
+  across: `LIST_PADDING` and the padding inside a row are what make the column
+  scannable, and they were set for a table of contents.
+  Above the list, one box that searches (`Sidebar::filter`): it narrows the list
+  to the names that match *and* asks the store the same question `cmd-f` asks, so
+  what was said appears under a **Messages** heading below the conversations and
+  opens where it was said. One search in the application rather than two that can
+  disagree — picking a result goes through the workspace's `reveal_hit`, which is
+  the sheet's own path. Above the list rather than over it, because a field that
+  scrolled away with the rows is a field you have to go back for. Return opens the
+  top of whichever half answered. Not on
+  the rail, which has no room for a line of text — so what was typed before it
+  collapsed narrows nothing while it is one. Identity sits at the very bottom: the
+  display name and the connection, at a face smaller than the list's, since that
+  picture is a label on a line and at the rows' size it was the largest thing in
+  the column — the account shouting over every conversation in it. The presence
+  dot is sized off that face rather than the list's for the same reason: it
+  annotates a name here, where in a list it badges a control. And nothing
+  that changes under the pointer — hovering it used to swap the name
   for the username, which meant the one line that says who you are was the one
   line that would not hold still, for a string that has a settings pane of its
   own. Its right
@@ -98,6 +136,24 @@ version is gone and its arrangement is not a precedent for anything.
   words: a sticker and a message that is nothing but pictures are drawn without
   one, because a rounded box around a photograph is a second frame around a frame
   and Signal draws neither in one.
+- **Replies.** Three shapes for the message being answered, beside the layout
+  under *Appearance* and for the same reason: how much room the context takes is
+  what a reply looks like, not what it says. **Signal**, the default, is Signal's
+  own — a rounded block nested in the message that answers it, with the thumbnail
+  at the far end; a block, because a quote is not an annotation but a second
+  message drawn inside the first, and round on every side because what it sits in
+  is round too. Filled in the theme's own quiet grey and lettered in the theme's
+  own text, which is the one thing about Signal's shape not worth copying: they
+  fill it with the conversation's colour, and a hue generated per person puts a
+  different bright rectangle in the middle of the thread for every person quoted,
+  which is a lot of noise for the part of a reply nobody reads first. The name at
+  the top is what says whose words these are — in every one of the three shapes,
+  and in none of them in their colour;
+  **bar**, petunia's original, a hairline with the quote beside it, context kept
+  as light as context can be drawn; and **line**, the reply mark, who, and what
+  they said on one truncated row, which is the least a quote can be and still be
+  one. All three are `content::Quoted`, resolved once so they cannot disagree
+  about what was actually quoted.
 - **Stickers.** Clicking one opens `ui/sticker.rs` — the picture at a size worth
   looking at, what the pack is called, and the rest of it. Not an install: a click
   that silently added a pack to your account, with a tooltip for a warning, was one
@@ -515,6 +571,18 @@ Every one of these has already cost a debugging session.
   bug cmd+f had. An overlay with an input focuses the *input* and nothing else;
   actions still reach the overlay, because dispatch walks up the element tree from
   whatever holds the focus.
+- **There is no Medium on macOS, and the ladder is what carries the hierarchy.**
+  The obvious repair for the note below — ask for 510 rather than 500, since CSS
+  matching walks *upward* first above 500 and Medium is reported at 530 — does not
+  work either: it finds Semibold at 600 and sets the entire application in it.
+  Which is what "everything is bold" looks like, and it is also the wrong idea.
+  The Human Interface Guidelines set body text, list rows, labels and control
+  titles in Regular and spend weight on *hierarchy*: Semibold is a headline. So
+  `kit::BODY` is Regular, applied once at the root, and the things that are
+  headlines say so — the conversation title in the header, the name on a sidebar
+  row, the author of a quote. Everything below Semibold does its work with size
+  and colour instead, and the smallest size in the window is eleven, which is the
+  Guidelines' footnote; ten was a size nothing else used and nobody could read.
 - **`FontWeight::MEDIUM` draws as Regular on macOS.** gpui hands font-kit a CSS
   weight and font-kit matches per CSS Fonts 3. The system family's faces report
   CoreText's own weights, and the conversion puts Medium at 530 rather than 500 —
@@ -624,6 +692,32 @@ Every one of these has already cost a debugging session.
   therefore starts the stream *before* anything else touches the network, and
   `receive` backs off rather than retrying on a fixed five seconds — a fixed
   interval is what keeps a fight going at that interval.
+- **A reconnect handed the old socket is not a reconnect.** A websocket whose peer
+  stopped listening without saying so — the machine slept, the network changed —
+  does not fail: it sits there open on this side until a keep-alive goes
+  unanswered, which libsignal-service notices a minute or two later. presage's
+  `identified_websocket` hands the cached socket to whoever asks as long as it is
+  not *closed*, so `receive_messages` was routinely given that corpse, the stream
+  it built ended the moment it was read, and the loop reported itself as
+  reconnecting every few seconds while delivering nothing. Which is the whole of
+  *"the connection keeps flickering and messages arrive minutes late"*.
+  `fresh_identified_websocket` (`vendor/presage`) opens a new one for the stream
+  and drops the cached handle, and dropping it is what closes the old one: the
+  process behind a socket ends when the last sender for its request channel goes.
+  And rather than wait to be told, `watch_for_sleep` notices the sleep itself —
+  `Instant` does not advance while the machine is asleep and the wall clock does,
+  so a gap between the two is a sleep and a reason to throw the socket away at
+  once. A network change with no sleep behind it is still the keep-alive's to
+  find.
+- **A typing indicator is not a data message.** presage's
+  `Thread::try_from(&Content)` reads a group out of a `DataMessage` and answers
+  `Contact(sender)` for everything else, so every group's dots were filed under
+  the sender's one-to-one thread: beside the wrong name in the list, and never in
+  the group they were typed in. A `TypingMessage` names its group by the
+  *identifier* derived from the master key, and that derivation runs one way only,
+  so `typing_thread` derives it for every group this account is in and matches —
+  cached for the life of the stream, rebuilt when an id is not in it, which is
+  what a group joined since it started looks like.
 - **macOS asks who is asking, with a file chooser.** `notify-rust`'s backend needs
   a bundle identifier and looks one up by name when it has not been given one; the
   name it looks up is the literal string `use_default`, nothing is called that, and
@@ -631,6 +725,30 @@ Every one of these has already cost a debugging session.
   notification therefore put a chooser on screen naming a document nobody has ever
   had — *"a file chooser keeps appearing at random"*. `notify::name_the_application`
   hands over this process's own identifier once, before any notification is posted.
+- **A cached attachment has no name.** It is content-addressed: a digest, with
+  whatever extension the *declared* content type happened to name — and Signal
+  declares source code `application/octet-stream`, which names nothing, and used to
+  name nothing for FLAC and AIFF either. Everything that read a file by its path
+  therefore worked while the message was being sent, where the path is still the
+  file we picked, and stopped the moment the thread was reloaded out of the cache:
+  a listing went back to being a chip (`text::language_of` asks the declared file
+  name first, and the path second), and a record went back to being forty-four grey
+  bars, because `Probe::open` reads the format off the extension and errors outright
+  when there is none — `song::probe` guesses it from the bytes instead.
+- **A decoder does not know how long a track is.** `Source::total_duration` is
+  `None` for mp3, flac and ogg, which is most of what anybody attaches: the bar
+  never filled and a click on it seeked nowhere, since a fraction of an unknown
+  length is nothing. The tags know, having read the stream's own properties, so
+  `audio::toggle` falls back to them.
+- **A receipt has to reach the list as well as the conversation.** The sidebar is
+  not built from the histories — a thread nobody has opened has none — so a status
+  lives on the line too (`Index::apply_status`, and the `status` column of
+  `petunia_preview`). Which it has to be *given*: `project` reads presage's store,
+  which knows nothing of receipts, and the real aggregate is only resolved while a
+  page is loading, because it needs the recipient count and therefore the manager.
+  So the startup scan resolves what it can from disk and a group is counted as
+  having more recipients than have reported — sent rather than read, since claiming
+  delivery on one member's receipt is the one answer that would be a lie.
 - **A voice note is marked, a record is read.** Signal has one kind of attached
   sound and draws it one way, which is right for somebody talking and wrong for an
   album track: forty-four identical grey bars where the cover belongs, and none of
@@ -640,6 +758,98 @@ Every one of these has already cost a debugging session.
   still wins outright: a mark from the sender outranks anything guessed from bytes.
   And the tags are read once per file, not per frame, for the same reason the text
   preview is.
+- **Only Signal's own clients send a waveform.** The protocol carries one beside a
+  voice note, and everything else — a note recorded elsewhere, an `.m4a` somebody
+  attached, and every voice note petunia itself has sent — arrives with the field
+  empty and got `audio::bars`' flat fallback: forty-four identical grey bars, which
+  is a picture of nothing where the sound should be. `media::waveform` reads it out
+  of the file instead, into the same array of bytes the protocol would have carried
+  so nothing downstream knows which it got. Peaks gathered per chunk while decoding
+  and resampled at the end, because no format anybody attaches stores a sample
+  count; normalised, because a voice note is recorded at whatever level the room
+  agreed on and against an absolute scale a quiet one is a flat line; and
+  square-rooted, because amplitude is not loudness. What the sender sent still wins
+  outright — it is what every other client is drawing for that message. It is a
+  *decode*, asked for from a render, so it is cached per file like the tags and
+  skipped above `waveform::LIMIT`, which is set where a voice note stops and an
+  album side begins.
+- **A strip of bars is not forty-four divs.** Each `flex_1` with a margin of a
+  pixel is forty-four boxes whose widths are whatever is left after the layout has
+  rounded each of them to the device grid — and at the width a message actually
+  gives one, a couple of pixels apiece, that is bars in two widths with gaps that
+  come and go. The record's bar had the matching failure at the other extreme: a
+  three-pixel rounded rail with a percentage-width fill inside it, which is one
+  rounded box clipping another and reads as a bar that is broken rather than empty.
+  Both are painted now (`media::wave`, `media::rail`) from the bounds the `canvas`
+  measured, which is the only number in the frame that is not a guess — as many
+  bars as fit at a fixed size, spaced across the whole of it, and a knob on the
+  rail so it reads as something that can be moved rather than only watched.
+- **A theme may point two tokens at one colour.** `signal-dark` sets
+  `border_focus` to the accent, which is perfectly reasonable and made every
+  transport in the application look full: the unplayed track and the played fill
+  were the same blue, so a voice note was a solid block and a record's bar was at
+  100% before it had been touched. `media::unplayed` is the accent worn thin — a
+  difference of *alpha*, which no theme can collapse — and anything else drawing a
+  "not yet" against a "so far" wants the same treatment.
+- **A record is a player, so it is laid out like one.** The card follows Apple's
+  transport (`media::record`): artwork with a hairline, title and credit beside
+  it, and across the bottom a round play button, the bar, and the times *under*
+  the bar at either end — elapsed left, remaining right, signed. One clock at the
+  end of the row read as a duration when stopped and as a position when playing,
+  said nothing about what was left, and squeezed the bar into what was left over.
+- **A picture in the viewer is sized to itself.** Handed the whole stage as its
+  box, `ObjectFit::Contain` centres it correctly and to the pixel — and a portrait
+  photograph then reads as a small picture adrift in a large black panel, because
+  nothing on screen says where the box ends. `viewer::filling` gives it its own
+  shape at the largest the stage allows. Not `media::fit`, which caps its scale at
+  one: refusing to enlarge is right in a message and wrong in the one place whose
+  entire purpose is to show a picture as large as the window can.
+- **A grid of pictures is a grid of *boxes*.** An image is only square once it has
+  decoded, so a shared-media grid built out of the pictures themselves settles
+  into line a tile at a time and keeps whatever shape the odd failure leaves
+  behind. The square is the well the picture sits in (`details::SHARED_TILE`),
+  with `overflow_hidden` and a fill, and every cell is square from the first
+  frame — and rounded on the *picture* as well as on the well, since
+  `overflow_hidden` clips a child to the parent's rectangle rather than to its
+  corners and a square image in a rounded well otherwise keeps its own corners.
+- **The chrome has its own icons.** The library's set is hairline and
+  square-ended, which beside a column of rounded cards reads as a toolbar borrowed
+  from another application: `assets/icons` now holds the handful the chrome
+  actually shows — search, compose, settings, plus, send, close — at the same
+  Lucide geometry with round caps and joins. And the send arrow was the character
+  `↑`, set in whatever the interface font made of it — the one mark in the window
+  not drawn like the rest.
+- **A receipt mark is a circled check.** Which is Signal's own alphabet and not
+  Lucide's: one ring with a check in it sent, a second ring beside it delivered,
+  and both rings *filled* read. Bare ticks in three colours were petunia's
+  invention, and the colour was carrying what the shape should — Signal draws all
+  three in the same grey and lets the fill say which is which, so `kit::receipt`
+  does too. The pair only reads as a pair because the ring in front knocks a gap
+  out of the one behind, and that gap cannot be had by drawing one glyph twice: it
+  is a `clipPath` in `receipt-delivered.svg`, and the checks in the read mark are
+  holes knocked out of filled discs with `fill-rule="evenodd"`. gpui rasterises an
+  SVG to an alpha mask and tints it, so a hole is simply a hole and a two-colour
+  icon is not available at all. The doubles are an eighteen-by-twelve box, so
+  anything asking for a square squashes them.
+- **Selecting words in a message is petunia's own.** gpui has no selectable text
+  outside its own input, and the widget library's `TextView` selection reaches only
+  its own views: a message is a laid-out run of glyphs. `ui::selection` holds the
+  one selection there is — a range in one run — in a global, because the element
+  that paints the wash and the element that hears the mouse are the same element,
+  rebuilt every frame, with nowhere of its own to keep anything. `ui::wash` grew
+  the drawing and the mouse handling, since it already had the layout and already
+  paints boxes underneath text. The listeners are the *window's*: a drag leaves the
+  paragraph it started in almost at once, and a `div` only hears a mouse move while
+  the pointer is over it. Signal's behaviour, which is the browser's — a drag takes
+  what it crosses, a double click a word, a third click the paragraph — and `cmd-c`
+  copies it. That chord is bound with no context, so the deeper bindings win first:
+  the library's `Root` tries its own copy and passes it on when it has nothing, and
+  a field's copy is deeper still. Clearing is a *captured* mouse down on the
+  conversation, which runs before the words hear the click; as two bubble handlers
+  it would come down to which was painted last.
+- **A sticker is a cut-out.** The sheet used to sit each one on a sunken square so
+  it would have an edge; what that actually draws is a grid of boxes with pictures
+  in them. Nothing behind them.
 
 ## Coding rules
 
