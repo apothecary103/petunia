@@ -11,6 +11,8 @@ pub struct Messages {
     /// How a message is shaped. Independent of `density`, which is how much room
     /// it is given: either layout reads at either density.
     pub layout: Layout,
+    /// How the message being answered is drawn above the answer.
+    pub replies: Reply,
     pub density: Density,
     pub timestamps: Timestamps,
     /// Seconds. Messages from one sender closer together than this group.
@@ -61,6 +63,46 @@ impl Layout {
     }
 }
 
+/// The three shapes a quote can take. A reply carries the message it answers, and
+/// how much of the answer that context is allowed to take up is a matter of
+/// taste rather than of information: all three say the same thing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Reply {
+    /// Signal's own: a filled block with a thick edge in the sender's colour,
+    /// which reads as a thing that was said rather than as a margin note.
+    #[default]
+    Signal,
+    /// A hairline in the sender's colour with the quote beside it. Context, kept
+    /// as light as context can be drawn.
+    Bar,
+    /// One quiet line: who, and what they said, on a single truncated row. The
+    /// least a quote can be and still be one.
+    Line,
+}
+
+impl Reply {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Signal => "Signal",
+            Self::Bar => "Bar",
+            Self::Line => "Line",
+        }
+    }
+
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Signal => "A filled block edged in the sender's colour.",
+            Self::Bar => "A hairline with the quote beside it.",
+            Self::Line => "One quiet line above the reply.",
+        }
+    }
+
+    pub fn every() -> [Self; 3] {
+        [Self::Signal, Self::Bar, Self::Line]
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Density {
@@ -83,6 +125,7 @@ impl Default for Messages {
         Self {
             scale: 1.0,
             layout: Layout::default(),
+            replies: Reply::default(),
             density: Density::default(),
             timestamps: Timestamps::default(),
             group_within: 300,
@@ -247,6 +290,24 @@ mod tests {
     #[test]
     fn the_default_layout_is_standard() {
         assert_eq!(Messages::default().layout, Layout::Standard);
+    }
+
+    /// The quote everybody already recognises, since a reply is the one place
+    /// petunia had a shape of its own that nothing else uses.
+    #[test]
+    fn the_default_reply_is_signals() {
+        assert_eq!(Messages::default().replies, Reply::Signal);
+    }
+
+    #[test]
+    fn every_reply_style_is_offered_once_and_describes_itself() {
+        let every = Reply::every();
+
+        assert_eq!(every.len(), 3);
+        for style in every {
+            assert!(!style.label().is_empty());
+            assert!(!style.describe().is_empty());
+        }
     }
 
     #[test]

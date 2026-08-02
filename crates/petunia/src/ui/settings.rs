@@ -10,7 +10,7 @@ use gpui::prelude::*;
 use gpui::{App, Context, Entity, MouseButton, MouseDownEvent, SharedString, Window, div, px};
 
 use super::kit;
-use petunia_config::messages::{Density, Layout, Timestamps};
+use petunia_config::messages::{Density, Layout, Reply, Timestamps};
 use petunia_config::{Config, GroupNotifications, Sort, Theme, theme, write};
 use crate::store::Store;
 use crate::theme::ActivePalette;
@@ -595,6 +595,18 @@ impl Settings {
                         palette,
                         cx,
                         |config, layout| config.messages.layout = layout,
+                    ))
+                    .into_any_element(),
+                // Beside the layout for the same reason the layout is here: how
+                // much room the message being answered takes is what a reply
+                // looks like, not what it says.
+                described("Replies", draft.messages.replies.describe(), palette)
+                    .child(choices(
+                        Reply::every().map(|style| (style.label(), style)),
+                        draft.messages.replies,
+                        palette,
+                        cx,
+                        |config, style| config.messages.replies = style,
                     ))
                     .into_any_element(),
             ],

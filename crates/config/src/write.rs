@@ -12,7 +12,7 @@
 use std::fmt::Write as _;
 
 use super::{Config, GroupNotifications, Sort};
-use crate::messages::{Density, Layout, Timestamps};
+use crate::messages::{Density, Layout, Reply, Timestamps};
 
 /// The whole file, as petunia would write it.
 pub fn to_toml(config: &Config) -> String {
@@ -27,6 +27,7 @@ pub fn to_toml(config: &Config) -> String {
 
     let _ = writeln!(out, "\n[messages]");
     let _ = writeln!(out, "layout = {:?}", layout(config.messages.layout));
+    let _ = writeln!(out, "replies = {:?}", replies(config.messages.replies));
     let _ = writeln!(out, "density = {:?}", density(config.messages.density));
     let _ = writeln!(out, "timestamps = {:?}", timestamps(config.messages.timestamps));
     let _ = writeln!(out, "group_within = {}", config.messages.group_within);
@@ -97,6 +98,14 @@ fn layout(layout: Layout) -> &'static str {
     }
 }
 
+fn replies(replies: Reply) -> &'static str {
+    match replies {
+        Reply::Signal => "signal",
+        Reply::Bar => "bar",
+        Reply::Line => "line",
+    }
+}
+
 fn density(density: Density) -> &'static str {
     match density {
         Density::Compact => "compact",
@@ -142,6 +151,7 @@ mod tests {
             scale: 1.25,
             messages: crate::Messages {
                 layout: Layout::Bubbles,
+                replies: Reply::Line,
                 density: Density::Compact,
                 timestamps: Timestamps::Hover,
                 group_within: 120,
@@ -171,6 +181,7 @@ mod tests {
         assert_eq!(read.theme, config.theme);
         assert_eq!(read.scale, config.scale);
         assert_eq!(read.messages.layout, config.messages.layout);
+        assert_eq!(read.messages.replies, config.messages.replies);
         assert_eq!(read.messages.density, config.messages.density);
         assert_eq!(read.messages.timestamps, config.messages.timestamps);
         assert_eq!(read.messages.group_within, config.messages.group_within);

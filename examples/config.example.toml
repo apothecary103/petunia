@@ -26,6 +26,10 @@ scale = 1.0
 # "compact" (one line per message, IRC style) or "bubbles" (Signal's own, yours
 # on the right). Independent of density, which is how much room it is given.
 layout = "standard"
+# How the message being answered is drawn above the answer: "signal" (a filled
+# block edged in the sender's colour), "bar" (a hairline with the quote beside
+# it) or "line" (one quiet row above the reply).
+replies = "signal"
 # "comfortable" or "compact".
 density = "comfortable"
 # "always", "hover" or "never".

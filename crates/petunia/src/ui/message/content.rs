@@ -11,7 +11,7 @@ use super::{bar, emoji, format, media};
 use petunia_data::message::{latex, markup};
 use petunia_media::audio::Playback;
 use petunia_config::Theme;
-use petunia_config::messages::Spacing;
+use petunia_config::messages::{Reply, Spacing};
 use petunia_data::attachment::Blob;
 use petunia_data::message::{Content, Poll, Quote, Range, Status, Sticker, Update};
 use petunia_data::{Message, State};
@@ -28,6 +28,8 @@ pub struct Body<'a> {
     /// a round trip through Zed's theme JSON, and this runs per frame.
     pub highlights: &'a HighlightTheme,
     pub spacing: Spacing,
+    /// What shape the message being answered is drawn in.
+    pub replies: Reply,
     pub max_image: (f32, f32),
     pub playback: &'a Playback,
     /// The one way anything drawn on a message asks for something to happen.
@@ -45,7 +47,7 @@ impl Body<'_> {
             .flex_col()
             .gap_1p5()
             .when_some(self.message.quote.as_ref(), |this, quote| {
-                this.child(quoted(quote, self.state, theme, spacing))
+                this.child(quoted(quote, self.state, theme, spacing, self.replies))
             });
 
         said = match &self.message.content {
@@ -79,6 +81,7 @@ impl Body<'_> {
                     theme,
                     self.highlights,
                     size,
+                    self.message.timestamp(),
                 ))
             }
             Content::Sticker(sticker) => said.child(self.sticker(sticker)),
@@ -299,16 +302,23 @@ impl Body<'_> {
     }
 }
 
-/// How far a message of ours has got. Signal's own language: one tick sent, two
-/// delivered, two in the accent colour read. Small and dim, because it matters
-/// when you look for it and never otherwise.
+/// How far a message of ours has got, in Signal's own language: a circled check
+/// sent, a second circle delivered, both filled read. Small and dim, because it
+/// matters when you look for it and never otherwise.
 fn receipt(status: Status, edited: bool, theme: &Theme) -> gpui::Stateful<Div> {
+    /// How large the mark is beside a message's clock.
+    const TICK: f32 = 11.0;
+
     let mark: AnyElement = match status {
         Status::Sending => kit::icon(IconName::Loader, 11.0, theme.text_muted).into_any_element(),
         Status::Failed => kit::icon(IconName::TriangleAlert, 11.0, theme.danger).into_any_element(),
-        Status::Sent => ticks(1, theme.text_muted).into_any_element(),
-        Status::Delivered => ticks(2, theme.text_muted).into_any_element(),
-        Status::Read | Status::Viewed => ticks(2, theme.accent).into_any_element(),
+        Status::Sent => kit::receipt(kit::Mark::Sent, TICK, theme.text_muted).into_any_element(),
+        Status::Delivered => {
+            kit::receipt(kit::Mark::Delivered, TICK, theme.text_muted).into_any_element()
+        }
+        Status::Read | Status::Viewed => {
+            kit::receipt(kit::Mark::Read, TICK, theme.text_muted).into_any_element()
+        }
     };
     let words = match status {
         Status::Sending => "Sending",
@@ -340,19 +350,6 @@ fn receipt(status: Status, edited: bool, theme: &Theme) -> gpui::Stateful<Div> {
         .child(mark)
 }
 
-/// Two ticks are one tick drawn twice, overlapped, because the icon set has no
-/// double-tick and a second glyph beside the first reads as two separate marks.
-fn ticks(count: usize, tint: gpui::Hsla) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .children((0..count).map(|index| {
-            div()
-                .when(index > 0, |this| this.ml(px(-4.0)))
-                .child(kit::icon(IconName::Check, 11.0, tint))
-        }))
-}
-
 /// The body, split so that a code block gets a box of its own and everything
 /// else stays in the paragraph it belongs to.
 ///
@@ -367,6 +364,9 @@ fn prose(
     theme: &Theme,
     highlights: &HighlightTheme,
     size: f32,
+    // What this message's runs of text are called while one of them is selected,
+    // which is the timestamp it was said at. See `ui::selection`.
+    said: u64,
 ) -> Vec<AnyElement> {
     let mut blocks = blocks(body, ranges);
     blocks.sort_by_key(|(start, _, _)| *start);
@@ -394,7 +394,16 @@ fn prose(
                     .text_size(px(size))
                     .line_height(px(size * theme.typography.line_height))
                     .text_color(theme.text)
-                    .child(styled(text, &shifted, state, theme))
+                    .child(styled(
+                        text,
+                        &shifted,
+                        state,
+                        theme,
+                        // Where the paragraph starts, which is what tells two
+                        // paragraphs of one message apart and stays the same
+                        // frame to frame.
+                        Some(SharedString::from(format!("{said}-{from}"))),
+                    ))
                     .into_any_element()
             })
         })
@@ -710,11 +719,19 @@ const INLINE_PAD: f32 = 4.0;
 /// highlighter pen over monospace rather than as code. See `ui::wash` for why
 /// none of this can be a highlight, and for why the padding is the box's rather
 /// than two thin spaces nobody typed.
-fn styled(body: &str, ranges: &[Range], state: &State, theme: &Theme) -> crate::ui::wash::Wash {
+fn styled(
+    body: &str,
+    ranges: &[Range],
+    state: &State,
+    theme: &Theme,
+    run: Option<SharedString>,
+) -> crate::ui::wash::Wash {
     let runs = runs(body, ranges, state, theme);
-
-    crate::ui::wash::wash(
-        StyledText::new(runs.text)
+    // Shared rather than copied: the text is wanted twice, and a selectable run
+    // is asked for it again on every frame it is on screen.
+    let text = SharedString::from(runs.text);
+    let washed = crate::ui::wash::wash(
+        StyledText::new(text.clone())
             .with_highlights(runs.highlights)
             .with_font_family_overrides(runs.families),
         runs.boxed,
@@ -722,7 +739,12 @@ fn styled(body: &str, ranges: &[Range], state: &State, theme: &Theme) -> crate::
         theme.border,
         INLINE_RADIUS,
         INLINE_PAD,
-    )
+    );
+
+    match run {
+        Some(run) => washed.selectable(run, text, kit::selection(theme)),
+        None => washed,
+    }
 }
 
 /// What one paragraph comes to: the text actually drawn, and the three things
@@ -955,70 +977,191 @@ fn highlight(styles: format::Styles, theme: &Theme) -> Option<HighlightStyle> {
     touched.then_some(highlight)
 }
 
-/// The message being answered, as a bar rather than a box: it is context, and
-/// context should not outweigh the reply.
-fn quoted(quote: &Quote, state: &State, theme: &Theme, spacing: Spacing) -> Div {
-    let author = state.sender_name(quote.id.sender);
-    let tint = theme.accent_for(quote.id.sender.as_bytes());
-    // A picture with no caption has no text to quote, so the bar says what it
+/// Everything the three quote styles draw, resolved once so they cannot disagree
+/// about what the message being answered actually said.
+struct Quoted<'a> {
+    author: String,
+    /// What was said, styled as it was said. Absent for a picture with no
+    /// caption, which has no words to quote.
+    words: Option<crate::ui::wash::Wash>,
+    /// What it was instead, when there are no words: "Photo", "Voice message".
+    named: Option<String>,
+    still: Option<std::path::PathBuf>,
+    theme: &'a Theme,
+    spacing: Spacing,
+}
+
+/// The message being answered, in whichever of the three shapes is asked for.
+/// They differ only in how loud the context is allowed to be; all three carry the
+/// same four things.
+fn quoted(quote: &Quote, state: &State, theme: &Theme, spacing: Spacing, style: Reply) -> Div {
+    // A picture with no caption has no text to quote, so the quote says what it
     // was instead of leaving a blank line where the words would have been. The
     // caption wins when there is one, because that is what was said.
-    let words = (!quote.body.is_empty()).then(|| styled(&quote.body, &quote.ranges, state, theme));
+    // Not selectable: a quote is a picture of something said elsewhere, and the
+    // words to take are the ones in the message it was quoted from.
+    let words =
+        (!quote.body.is_empty()).then(|| styled(&quote.body, &quote.ranges, state, theme, None));
     let named = words.is_none().then(|| quote.media.clone()).flatten();
-    let still = match quote.thumbnail.as_ref().map(|thumbnail| &thumbnail.blob) {
-        Some(Blob::Cached(path)) => Some(path.clone()),
-        _ => None,
-    };
-    // Square, at the height the two lines beside it come to, so the bar keeps
-    // its shape whether a still arrived or not.
-    let edge = spacing.small * 2.0 + spacing.body;
 
-    div()
-        .flex()
-        .gap_2p5()
-        .child(div().w_px().flex_none().bg(tint).rounded_full())
-        .when_some(still, |this, path| {
-            this.child(
+    let quoted = Quoted {
+        author: state.sender_name(quote.id.sender),
+        words,
+        named,
+        still: match quote.thumbnail.as_ref().map(|thumbnail| &thumbnail.blob) {
+            Some(Blob::Cached(path)) => Some(path.clone()),
+            _ => None,
+        },
+        theme,
+        spacing,
+    };
+
+    match style {
+        Reply::Signal => quoted.signal(),
+        Reply::Bar => quoted.bar(),
+        Reply::Line => quoted.line(),
+    }
+}
+
+impl Quoted<'_> {
+    /// Square, at the height the two lines beside it come to, so a quote keeps
+    /// its shape whether a still arrived or not.
+    fn edge(&self) -> f32 {
+        self.spacing.small * 2.0 + self.spacing.body
+    }
+
+    /// Who is being answered. Emphasised everywhere but the bar, which is the
+    /// one shape whose whole point is to be quieter than what it sits above.
+    ///
+    /// In the text colour rather than in theirs. A name is already the answer to
+    /// whose words these are; colouring it as well puts a second, brighter
+    /// statement of the same thing inside every reply.
+    fn who(&self, emphasis: bool) -> Div {
+        div()
+            .truncate()
+            .text_size(px(self.spacing.small))
+            .when(emphasis, |this| this.font_weight(kit::EMPHASIS))
+            .text_color(self.theme.text_dim)
+            .child(SharedString::from(self.author.clone()))
+    }
+
+    /// What was said, or what it was. One or the other: `named` only exists
+    /// where there were no words.
+    fn said(&mut self) -> Option<Div> {
+        let line = div().truncate().text_size(px(self.spacing.small));
+
+        match (self.words.take(), self.named.take()) {
+            (Some(words), _) => Some(line.text_color(self.theme.text_muted).child(words)),
+            (None, Some(named)) => Some(
+                line.text_color(self.theme.text_dim)
+                    .child(SharedString::from(named)),
+            ),
+            (None, None) => None,
+        }
+    }
+
+    fn thumbnail(&mut self, edge: f32) -> Option<Div> {
+        let path = self.still.take()?;
+
+        Some(
+            div()
+                .flex_none()
+                .size(px(edge))
+                .overflow_hidden()
+                .rounded(px(4.0))
+                .bg(self.theme.surface)
+                .child(image::cropped(path, edge)),
+        )
+    }
+
+    /// Signal's own: a rounded block sat inside the message answering it, with
+    /// the still at the far end.
+    ///
+    /// Filled in the theme's own quiet grey, and *not* in the sender's colour,
+    /// which is the one thing about Signal's shape not worth copying: a hue
+    /// generated per person puts a different bright rectangle in the middle of
+    /// the thread for every person quoted, and a quote is the part of a reply
+    /// nobody reads first. One fill, a step off whatever it sits on, and the name
+    /// at the top of it is what says whose words these were. Rounded on every
+    /// side, because what it is nested in is round too.
+    fn signal(mut self) -> Div {
+        let theme = self.theme;
+        let edge = self.edge() + self.spacing.small;
+        let said = self.said();
+        let still = self.thumbnail(edge);
+        let who = self.who(true).text_color(theme.text);
+
+        div()
+            .flex()
+            .items_stretch()
+            .overflow_hidden()
+            .rounded(px(10.0))
+            .bg(gpui::Hsla {
+                a: 0.5,
+                ..theme.sunken
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .justify_center()
+                    .gap_px()
+                    .px_2p5()
+                    .py_1p5()
+                    .child(who)
+                    .children(said),
+            )
+            .children(still)
+    }
+
+    /// A hairline with the quote beside it: context, kept as light as context can
+    /// be drawn. What petunia had before there was a choice.
+    fn bar(mut self) -> Div {
+        let edge = self.edge();
+        let said = self.said();
+        let still = self.thumbnail(edge);
+        let who = self.who(false);
+
+        div()
+            .flex()
+            .gap_2p5()
+            .child(div().w_px().flex_none().bg(self.theme.border_focus).rounded_full())
+            .children(still)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .min_w_0()
+                    .gap_px()
+                    .child(who)
+                    .children(said),
+            )
+    }
+
+    /// One row: the reply mark, who, and what they said, truncated where the
+    /// message is. Nothing is stacked, so a quote costs a line rather than a
+    /// block.
+    fn line(mut self) -> Div {
+        let small = self.spacing.small;
+        let said = self.said();
+        let who = self.who(true);
+
+        div()
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .child(
                 div()
                     .flex_none()
-                    .size(px(edge))
-                    .overflow_hidden()
-                    .rounded(px(4.0))
-                    .bg(theme.surface)
-                    .child(image::cropped(path, edge)),
+                    .flex()
+                    .items_center()
+                    .child(kit::icon(IconName::Undo, small, self.theme.text_muted)),
             )
-        })
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .min_w_0()
-                .gap_px()
-                .child(
-                    div()
-                        .text_size(px(spacing.small))
-                        .text_color(tint)
-                        .child(SharedString::from(author)),
-                )
-                .when_some(words, |this, words| {
-                    this.child(
-                        div()
-                            .truncate()
-                            .text_size(px(spacing.small))
-                            .text_color(theme.text_muted)
-                            .child(words),
-                    )
-                })
-                .when_some(named, |this, named| {
-                    this.child(
-                        div()
-                            .truncate()
-                            .text_size(px(spacing.small))
-                            .text_color(theme.text_dim)
-                            .child(SharedString::from(named)),
-                    )
-                }),
-        )
+            .child(who.flex_none())
+            .children(said.map(|said| said.flex_1().min_w_0()))
+    }
 }
 
 /// The card a sender attached to a link.
