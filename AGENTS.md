@@ -1118,6 +1118,30 @@ Every one of these has already cost a debugging session.
   platform now, with `pkg-config` for the `-sys` crates to ask and
   `LD_LIBRARY_PATH` for wayland, the Vulkan loader and the X libraries, which are
   opened by name at run time rather than linked.
+- **Encrypting and decrypting are the same read-modify-write.** libsignal loads a
+  session record, ratchets it and stores it back, with the store's own awaits in
+  the middle — so a delivery receipt going out while the stream opens an envelope
+  from that same device is a lost update, and whichever writes second rolls the
+  other's work back. The Double Ratchet survives being rolled back, since a stale
+  root key still derives the chain the sender is on. The post-quantum ratchet does
+  not: its state is sparse and ordered, and every later message from that device
+  then fails with `post-quantum ratchet error`, forever. Which is the whole of
+  *"message syncing is broken"* — the busiest session an account has is with its
+  own phone, which is the one every sync transcript is encrypted to and the one
+  everything read there comes back on. `libsignal_service::session_lock` is one
+  mutex around the crypto and nothing else — `create_encrypted_messages` and
+  `open_envelope` — so the round trips that carry the results still overlap, which
+  is what the receipts were taken off the loop for in the first place.
+- **A session neither side agrees on does not repair itself.** presage logged the
+  failure and skipped the envelope, so a ratchet that had diverged stayed diverged
+  and the server redelivered the same unopenable backlog at every reconnect.
+  `Received::Undecryptable` names the sender — out of the error for a sealed
+  sender message, which does not name one in the clear, and off the envelope for
+  anything else — and `reset_session` archives our side and sends a null message,
+  which is what makes the other end negotiate a new one. Messages already lost
+  stay lost. Once an hour per peer, and remembered across reconnects rather than
+  per stream: what prompts a reset is a backlog, and one reset per undecryptable
+  message is a message to that peer per message they ever sent.
 
 ## Coding rules
 
