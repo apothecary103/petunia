@@ -13,6 +13,8 @@ use std::time::Duration;
 use rodio::{Decoder, Source};
 use tracing::warn;
 
+use crate::stretch::{Progress, Speed, Stretch};
+
 /// How often the thread republishes where playback has got to. Fine enough that
 /// a progress bar moves smoothly, coarse enough to cost nothing.
 const TICK: Duration = Duration::from_millis(100);
@@ -71,10 +73,11 @@ pub fn speed_label(speed: f32) -> String {
 /// What is playing and how far in. Cloned out per frame, so the views never
 /// hold the lock.
 ///
-/// The times are the file's own, whatever speed it is being played at: rodio
-/// counts in the sped-up timeline, and a bar that ran out halfway through a
-/// track at double speed would be reporting the player's clock rather than the
-/// recording's. The conversion is `serve`'s, at the one boundary.
+/// The times are the file's own, whatever speed it is being played at: what is
+/// coming out of the speaker at 2× is half as long as the recording, and a bar
+/// that ran out halfway through would be reporting the player's clock rather
+/// than the thing being played. `Stretch` counts the frames it has read rather
+/// than the frames it has written, which is that number and needs no conversion.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Playback {
     pub file: Option<PathBuf>,
@@ -176,18 +179,33 @@ fn serve(requests: Receiver<Request>, published: Arc<RwLock<Playback>>) {
     // stops what you were listening to in order to tell you something arrived.
     let bell = rodio::Player::connect_new(sink.mixer());
     let mut state = Playback::default();
+    // Outlives any one file, because how fast to play is the player's answer
+    // and not the recording's.
+    let speed = Speed::default();
+    // One per file rather than one per player: a source that has been cleared
+    // may still be dropping its last buffer, and a dead source writing to a
+    // live playhead is a position that steps backwards after every skip.
+    let mut progress = Progress::default();
 
     loop {
         match requests.recv_timeout(TICK) {
-            Ok(Request::Toggle(file)) => toggle(&player, &mut state, file),
-            Ok(Request::Seek(file, fraction)) => seek(&player, &mut state, file, fraction),
-            Ok(Request::Speed(speed)) => set_speed(&player, &mut state, speed),
+            Ok(Request::Toggle(file)) => {
+                toggle(&player, &mut state, &speed, &mut progress, file)
+            }
+            Ok(Request::Seek(file, fraction)) => {
+                seek(&player, &mut state, &speed, &mut progress, file, fraction)
+            }
+            Ok(Request::Speed(wanted)) => {
+                speed.set(wanted);
+                state.speed = speed.get();
+            }
             Ok(Request::Chime(chime)) => {
                 bell.append(tone(chime));
                 bell.play();
             }
             Ok(Request::Stop) => {
                 player.clear();
+                progress = Progress::default();
                 state = Playback {
                     speed: state.speed,
                     ..Default::default()
@@ -198,7 +216,7 @@ fn serve(requests: Receiver<Request>, published: Arc<RwLock<Playback>>) {
         }
 
         if state.file.is_some() {
-            state.position = elapsed(&player, state.speed);
+            state.position = progress.position();
             // A finished track is not a paused one: it goes back to the start
             // so pressing play again replays it rather than doing nothing.
             if player.empty() {
@@ -214,7 +232,13 @@ fn serve(requests: Receiver<Request>, published: Arc<RwLock<Playback>>) {
     }
 }
 
-fn toggle(player: &rodio::Player, state: &mut Playback, file: PathBuf) {
+fn toggle(
+    player: &rodio::Player,
+    state: &mut Playback,
+    speed: &Speed,
+    progress: &mut Progress,
+    file: PathBuf,
+) {
     if state.is(&file) && !player.empty() {
         if player.is_paused() {
             player.play();
@@ -224,13 +248,19 @@ fn toggle(player: &rodio::Player, state: &mut Playback, file: PathBuf) {
         return;
     }
 
-    load(player, state, file);
+    load(player, state, speed, progress, file);
 }
 
 /// Reads a file in and starts it. The player's speed survives, being the
 /// player's rather than the file's.
-fn load(player: &rodio::Player, state: &mut Playback, file: PathBuf) {
-    let speed = state.speed;
+fn load(
+    player: &rodio::Player,
+    state: &mut Playback,
+    speed: &Speed,
+    progress: &mut Progress,
+    file: PathBuf,
+) {
+    *progress = Progress::default();
     player.clear();
     // `Decoder::try_from` rather than `Decoder::new`, which is the whole of why
     // seeking did nothing: `new` builds a decoder that is neither seekable nor
@@ -246,7 +276,7 @@ fn load(player: &rodio::Player, state: &mut Playback, file: PathBuf) {
         Err(error) => {
             warn!(%error, file = %file.display(), "cannot play this file");
             *state = Playback {
-                speed,
+                speed: speed.get(),
                 ..Default::default()
             };
             return;
@@ -261,53 +291,47 @@ fn load(player: &rodio::Player, state: &mut Playback, file: PathBuf) {
 
     *state = Playback {
         duration,
-        speed,
+        speed: speed.get(),
         file: Some(file),
         playing: true,
         position: Duration::ZERO,
     };
-    player.append(source);
-    player.set_speed(speed);
+    // Through the stretcher whatever the speed is, so that changing it is a
+    // change to the next grain rather than a source that has to be rebuilt --
+    // and so that 1× goes down exactly one path rather than two that could
+    // sound different from each other.
+    player.append(Stretch::new(source, speed.clone(), progress.clone()));
     player.play();
 }
 
 /// Clicking into the bar of something that is not playing means "play this,
 /// from here" — and so does clicking into one that has run to the end, where
 /// the queue is empty and a seek would land on nothing.
-fn seek(player: &rodio::Player, state: &mut Playback, file: PathBuf, fraction: f32) {
+fn seek(
+    player: &rodio::Player,
+    state: &mut Playback,
+    speed: &Speed,
+    progress: &mut Progress,
+    file: PathBuf,
+    fraction: f32,
+) {
     if !state.is(&file) || player.empty() {
-        load(player, state, file);
+        load(player, state, speed, progress, file);
     }
 
     let Some(duration) = state.duration else {
         return;
     };
+    // The file's own time on both sides of the call: the stretcher seeks the
+    // recording rather than the playback, so there is nothing to scale.
     let target = duration.mul_f32(fraction.clamp(0.0, 1.0));
-    if let Err(error) = player.try_seek(scaled(target, state.speed)) {
+    if let Err(error) = player.try_seek(target) {
         warn!(%error, "cannot seek in this file");
         return;
     }
     // Published straight away rather than waited a tick for, so the playhead
     // lands under the pointer that put it there.
     state.position = target;
-}
-
-/// rodio speeds a source up by reporting a higher sample rate, and counts the
-/// position it gives back in that same stretched timeline — so changing the
-/// speed rescales every sample already counted and the playhead jumps. Seeking
-/// back to where it was resets the count against the new rate.
-fn set_speed(player: &rodio::Player, state: &mut Playback, speed: f32) {
-    let speed = speed.clamp(0.25, 4.0);
-    let at = state.position;
-    state.speed = speed;
-    player.set_speed(speed);
-
-    if state.file.is_some()
-        && !player.empty()
-        && let Err(error) = player.try_seek(scaled(at, speed))
-    {
-        warn!(%error, "cannot hold the position across a speed change");
-    }
 }
 
 /// The rate the chimes are built at. Any rate would do — the mixer resamples —
@@ -358,16 +382,6 @@ fn tone(chime: Chime) -> rodio::buffer::SamplesBuffer {
         std::num::NonZeroU32::new(CHIME_RATE).expect("a rate"),
         samples,
     )
-}
-
-/// A time in the file, as the player counts it.
-fn scaled(position: Duration, speed: f32) -> Duration {
-    position.div_f32(speed.max(0.01))
-}
-
-/// Where the player has got to, in the file's own time.
-fn elapsed(player: &rodio::Player, speed: f32) -> Duration {
-    player.get_pos().mul_f32(speed)
 }
 
 #[derive(Debug, thiserror::Error)]

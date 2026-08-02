@@ -4,5 +4,6 @@
 pub mod audio;
 pub mod recorder;
 pub mod song;
+pub mod stretch;
 pub mod waveform;
 pub mod video;
