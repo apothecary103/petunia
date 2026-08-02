@@ -15,7 +15,7 @@ use crate::ui::avatar::avatar;
 use crate::ui::kit;
 use crate::ui::relative as when;
 use petunia_config::Theme;
-use petunia_config::messages::{Layout, Spacing, Timestamps};
+use petunia_config::messages::{Layout, Reply, Spacing, Timestamps};
 use petunia_data::{Member, Message, State, Thread};
 use petunia_media::audio::Playback;
 
@@ -57,6 +57,7 @@ pub struct Run<'a> {
     pub theme: &'a Theme,
     pub highlights: &'a HighlightTheme,
     pub layout: Layout,
+    pub replies: Reply,
     pub spacing: Spacing,
     pub timestamps: Timestamps,
     pub max_image: (f32, f32),
@@ -307,6 +308,7 @@ impl Run<'_> {
             theme: self.theme,
             highlights: self.highlights,
             spacing: self.spacing,
+            replies: self.replies,
             max_image: self.max_image,
             playback: self.playback,
             act: self.act,

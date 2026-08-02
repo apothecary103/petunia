@@ -3,4 +3,5 @@
 
 pub mod audio;
 pub mod song;
+pub mod waveform;
 pub mod video;

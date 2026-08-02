@@ -153,8 +153,14 @@ fn toggle(player: &rodio::Player, state: &mut Playback, file: PathBuf) {
         }
     };
 
+    // The decoder only knows the length of a format that stores one, which mp3,
+    // flac and ogg do not: without this the bar never filled and a click on it
+    // seeked nowhere, since `seek` has nothing to take a fraction of. The tags
+    // know, having read the stream's own properties.
+    let duration = source.total_duration().or_else(|| crate::song::read(&file)?.duration);
+
     *state = Playback {
-        duration: source.total_duration(),
+        duration,
         file: Some(file),
         playing: true,
         position: Duration::ZERO,
@@ -182,9 +188,15 @@ enum Error {
 }
 
 /// Signal ships a precomputed waveform with a voice note: one byte per bar, so
-/// there is nothing to decode before the bars can be drawn. Anything else gets a
-/// flat bar, which is honest about knowing nothing rather than inventing a
-/// shape.
+/// there is nothing to decode before the bars can be drawn. What arrives without
+/// one is read from the file instead (`crate::waveform`), and only a sound that
+/// could not be read at all falls back to the flat bar — which is honest about
+/// knowing nothing rather than inventing a shape.
+///
+/// The loudest value in the range each bar covers rather than the one that
+/// happens to land on its edge: a shape kept at a finer resolution than it is
+/// drawn at, point-sampled, loses whichever peaks fall between the bars — which
+/// on speech is most of them, and the strip flattens as the window narrows.
 pub fn bars(waveform: Option<&[u8]>, wanted: usize) -> Vec<f32> {
     let Some(waveform) = waveform.filter(|waveform| !waveform.is_empty()) else {
         return vec![0.35; wanted];
@@ -192,11 +204,11 @@ pub fn bars(waveform: Option<&[u8]>, wanted: usize) -> Vec<f32> {
 
     (0..wanted)
         .map(|index| {
-            let at = index * waveform.len() / wanted.max(1);
-            let sample = waveform.get(at).copied().unwrap_or(0) as f32 / 255.0;
+            let (from, to) = crate::waveform::span(index, wanted, waveform.len());
+            let peak = waveform[from..to].iter().copied().max().unwrap_or(0);
             // A bar of nothing is invisible, and a run of them reads as a
             // rendering failure rather than as silence.
-            sample.max(0.08)
+            (peak as f32 / 255.0).max(0.08)
         })
         .collect()
 }

@@ -75,7 +75,7 @@ impl Song {
 /// not audio, or that will not parse -- a file petunia cannot read is a file the
 /// waveform still draws.
 pub fn read(path: &Path) -> Option<Song> {
-    let tagged = Probe::open(path).ok()?.read().ok()?;
+    let tagged = probe(path)?;
     let properties = tagged.properties();
     let tag = tagged.primary_tag().or_else(|| tagged.first_tag());
 
@@ -98,10 +98,20 @@ pub fn read(path: &Path) -> Option<Song> {
     })
 }
 
+/// Opens a file by what is *in* it. `Probe::open` reads the format off the path's
+/// extension and errors outright when there is none -- and an attachment on disk
+/// is a digest with whatever extension its declared content type happened to
+/// name, which for a lossless track is frequently nothing at all. So every track
+/// read as a record while it was being sent went back to being a row of grey bars
+/// the moment the thread was reloaded from the cache.
+fn probe(path: &Path) -> Option<lofty::file::TaggedFile> {
+    Probe::open(path).ok()?.guess_file_type().ok()?.read().ok()
+}
+
 /// The embedded cover, as the bytes it is stored as. Whatever picture format that
 /// happens to be is the decoder's problem, not this one's.
 pub fn cover(path: &Path) -> Option<Vec<u8>> {
-    let tagged = Probe::open(path).ok()?.read().ok()?;
+    let tagged = probe(path)?;
     let tag = tagged.primary_tag().or_else(|| tagged.first_tag())?;
     tag.pictures()
         .first()

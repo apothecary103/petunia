@@ -83,7 +83,9 @@ impl Frame<'_> {
                 Some(song) => self.record(attached, &song, path),
                 None => self.audio(attached, waveform.as_deref(), path),
             },
-            (_, Blob::Cached(path)) => match text::language(path).zip(text::head(path)) {
+            (_, Blob::Cached(path)) => match text::language_of(attached.file_name.as_deref(), path)
+                .zip(text::head(path))
+            {
                 Some((language, head)) => self.text(attached, path, language, &head),
                 None => self.file(attached, path),
             },
@@ -191,14 +193,22 @@ impl Frame<'_> {
             .into_any_element()
     }
 
-    /// A record as a record: the cover, what it is called, who made it, and the
-    /// numbers that say what was kept of it.
+    /// A record as a record, laid out the way every Apple player lays one out:
+    /// the artwork, the title and who made it beside it, and the transport across
+    /// the bottom with the times *under* the bar at either end.
+    ///
+    /// The times are the whole of what the old shape got wrong. A single clock
+    /// crammed in at the end of the row read as a duration when nothing was
+    /// playing and as a position when something was, said nothing about how much
+    /// was left, and pushed the bar into whatever width was left over — three
+    /// controls fighting for one line. Elapsed on the left and what remains on
+    /// the right, both under the bar they describe, is the arrangement in Music,
+    /// in QuickTime and in every transport Apple ships, and it leaves the bar the
+    /// full width of the card.
     ///
     /// The waveform is left off deliberately. Signal ships one with a voice note
     /// and nothing else, so on a track it is forty-four identical grey bars — a
-    /// picture of no information, standing where the cover belongs. What replaces
-    /// it is a bar that fills, which is the one thing about a playing track the
-    /// interface actually knows.
+    /// picture of no information, standing where the cover belongs.
     fn record(
         &self,
         attached: &Attachment,
@@ -213,10 +223,16 @@ impl Frame<'_> {
         } else {
             0.0
         };
-        let elapsed = match mine {
-            true => Some(self.playback.position),
-            false => song.duration.or_else(|| length(attached)),
+        let whole = song.duration.or_else(|| length(attached));
+        let position = match mine {
+            true => self.playback.position,
+            false => std::time::Duration::ZERO,
         };
+        // What is left, which is the number a player is actually asked for. Signed
+        // the way every transport signs it.
+        let left = whole
+            .map(|whole| whole.saturating_sub(position))
+            .map(|left| format!("-{}", audio::clock(left)));
 
         let act = self.act.clone();
         let target = path.to_path_buf();
@@ -232,110 +248,138 @@ impl Frame<'_> {
             .collect::<Vec<_>>()
             .join(" — ");
 
-        chip_shell(theme)
-            .w(px(320.0))
-            .items_start()
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .w(px(340.0))
+            .p_3()
+            .rounded(px(kit::RADIUS_LG))
+            .bg(theme.elevated)
+            .border_1()
+            .border_color(theme.border)
             .child(
                 div()
-                    .size(px(COVER))
                     .flex()
-                    .flex_none()
                     .items_center()
-                    .justify_center()
-                    .overflow_hidden()
-                    .rounded(px(kit::RADIUS))
-                    .bg(theme.sunken)
-                    // Rounded on the picture as well as on the well behind it:
-                    // `overflow_hidden` clips a child to the parent's rectangle
-                    // rather than to its corners, so a square cover in a rounded
-                    // box keeps its own square corners.
-                    .when(song.cover, |this| {
-                        this.child(image::artwork(path, COVER).rounded(px(kit::RADIUS)))
-                    })
-                    // A record with no artwork gets the mark a record gets, not
-                    // the bell an attached sound gets.
-                    .when(!song.cover, |this| {
-                        this.child(kit::glyph("icons/music.svg", 18.0, theme.text_dim))
-                    }),
+                    .gap_3()
+                    .child(
+                        div()
+                            .size(px(COVER))
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .justify_center()
+                            .overflow_hidden()
+                            .rounded(px(kit::RADIUS))
+                            .bg(theme.sunken)
+                            // The hairline is Apple's: artwork is a photograph of
+                            // an object, and a light cover on a light card has no
+                            // edge of its own to end at.
+                            .border_1()
+                            .border_color(theme.border)
+                            // Rounded on the picture as well as on the well behind
+                            // it: `overflow_hidden` clips a child to the parent's
+                            // rectangle rather than to its corners, so a square
+                            // cover in a rounded box keeps its own square corners.
+                            .when(song.cover, |this| {
+                                this.child(image::artwork(path, COVER).rounded(px(kit::RADIUS)))
+                            })
+                            // A record with no artwork gets the mark a record
+                            // gets, not the bell an attached sound gets.
+                            .when(!song.cover, |this| {
+                                this.child(kit::glyph("icons/music.svg", 20.0, theme.text_dim))
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(theme.typography.ui_size + 1.0))
+                                    .font_weight(kit::EMPHASIS)
+                                    .text_color(theme.text)
+                                    .child(SharedString::from(
+                                        song.title.clone().unwrap_or_else(|| label(attached)),
+                                    )),
+                            )
+                            .when(!credit.is_empty(), |this| {
+                                this.child(
+                                    div()
+                                        .truncate()
+                                        .text_size(px(theme.typography.ui_size))
+                                        .text_color(theme.text_dim)
+                                        .child(SharedString::from(credit)),
+                                )
+                            })
+                            .when_some(song.quality(), |this, quality| {
+                                this.child(
+                                    div()
+                                        .truncate()
+                                        .text_size(px(self.spacing.small))
+                                        .text_color(theme.text_muted)
+                                        .child(SharedString::from(quality)),
+                                )
+                            }),
+                    ),
             )
             .child(
                 div()
                     .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_0p5()
+                    .items_center()
+                    .gap_3()
                     .child(
                         div()
-                            .truncate()
-                            .text_size(px(theme.typography.ui_size))
-                            .font_weight(kit::EMPHASIS)
-                            .text_color(theme.text)
-                            .child(SharedString::from(
-                                song.title.clone().unwrap_or_else(|| label(attached)),
+                            .id(SharedString::from(format!("track-{}", attached.id.as_str())))
+                            .size(px(32.0))
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .cursor_pointer()
+                            .bg(theme.accent)
+                            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                                act(Act::Play(target.clone()), window, cx)
+                            })
+                            .child(kit::icon(
+                                if playing {
+                                    IconName::Pause
+                                } else {
+                                    IconName::Play
+                                },
+                                14.0,
+                                theme.on_accent,
                             )),
                     )
-                    .when(!credit.is_empty(), |this| {
-                        this.child(
-                            div()
-                                .truncate()
-                                .text_size(px(self.spacing.small))
-                                .text_color(theme.text_muted)
-                                .child(SharedString::from(credit)),
-                        )
-                    })
-                    .when_some(song.quality(), |this, quality| {
-                        this.child(
-                            div()
-                                .truncate()
-                                .text_size(px(self.spacing.small))
-                                .text_color(theme.text_dim)
-                                .child(SharedString::from(quality)),
-                        )
-                    })
                     .child(
                         div()
                             .flex()
-                            .items_center()
-                            .gap_2()
-                            .pt_1()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .child(rail(
+                                format!("scrub-{}", attached.id.as_str()),
+                                progress,
+                                theme,
+                                seek,
+                                seek_target,
+                            ))
                             .child(
                                 div()
-                                    .id(SharedString::from(format!(
-                                        "track-{}",
-                                        attached.id.as_str()
-                                    )))
-                                    .size(px(26.0))
                                     .flex()
-                                    .flex_none()
                                     .items_center()
-                                    .justify_center()
-                                    .rounded_full()
-                                    .cursor_pointer()
-                                    .bg(theme.accent)
-                                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                                        act(Act::Play(target.clone()), window, cx)
-                                    })
-                                    .child(kit::icon(
-                                        if playing {
-                                            IconName::Pause
-                                        } else {
-                                            IconName::Play
-                                        },
-                                        12.0,
-                                        theme.on_accent,
-                                    )),
-                            )
-                            .child(track(attached, progress, theme, seek, seek_target))
-                            .when_some(elapsed, |this, elapsed| {
-                                this.child(
-                                    div()
-                                        .flex_none()
-                                        .text_size(px(self.spacing.small))
-                                        .text_color(theme.text_muted)
-                                        .child(SharedString::from(audio::clock(elapsed))),
-                                )
-                            }),
+                                    .justify_between()
+                                    .text_size(px(self.spacing.small))
+                                    .text_color(theme.text_muted)
+                                    .child(SharedString::from(audio::clock(position)))
+                                    .children(left.map(SharedString::from)),
+                            ),
                     ),
             )
             .into_any_element()
@@ -388,9 +432,14 @@ impl Frame<'_> {
                         theme.on_accent,
                     )),
             )
-            .child(
-                waveform_strip(attached, waveform, progress, theme, seek, seek_target),
-            )
+            .child(wave(
+                format!("seek-{}", attached.id.as_str()),
+                sound(waveform, path),
+                progress,
+                theme,
+                seek,
+                seek_target,
+            ))
             .when_some(elapsed, |this, elapsed| {
                 this.child(
                     div()
@@ -608,68 +657,145 @@ impl Frame<'_> {
     }
 }
 
-/// Clicking the waveform seeks to that point, which means turning a click into a
-/// fraction — and nothing in a layout closure knows how wide it ended up. A
-/// `canvas` behind the bars records the bounds it was laid out at, which the
-/// click handler then reads.
-fn waveform_strip(
-    attached: &Attachment,
-    waveform: Option<&[u8]>,
+/// How tall the two strips are. A waveform is a picture and wants room; a rail
+/// is a line and only needs enough around it to be clicked.
+const WAVE_HEIGHT: f32 = 26.0;
+const RAIL_HEIGHT: f32 = 16.0;
+
+/// The shape of the sound, in the bars there is room for.
+///
+/// Painted rather than built out of elements. Forty-four divs each `flex_1` with
+/// a margin of a pixel is forty-four boxes whose widths are whatever is left over
+/// after the layout has rounded each of them to the device grid — at the widths a
+/// message actually gets, a couple of pixels apiece, that is a strip of bars in
+/// two different widths and gaps that come and go. Here the geometry is arrived
+/// at from the bounds the strip was *given*: as many bars as fit at a fixed size,
+/// spaced across the whole of it.
+fn wave(
+    id: String,
+    waveform: Option<Vec<u8>>,
     progress: f32,
     theme: &Theme,
     act: Dispatch,
     path: std::path::PathBuf,
 ) -> gpui::Stateful<Div> {
-    use std::cell::Cell;
-    use std::rc::Rc;
+    /// Signal's own proportions: a bar about as wide as the gap beside it.
+    const BAR: f32 = 3.0;
+    const GAP: f32 = 2.0;
 
-    let bounds: Rc<Cell<gpui::Bounds<gpui::Pixels>>> = Rc::new(Cell::new(gpui::Bounds::default()));
-    let measured = bounds.clone();
+    let (played, rest) = (theme.accent, unplayed(theme));
 
-    div()
-        .id(SharedString::from(format!("seek-{}", attached.id.as_str())))
-        .relative()
-        .flex()
-        .flex_1()
-        .min_w_0()
-        .items_center()
-        .gap_px()
-        .h(px(26.0))
-        .cursor_pointer()
-        .child(
-            gpui::canvas(
-                move |at, _, _| measured.set(at),
-                |_, _: (), _, _| {},
-            )
-            .absolute()
-            .size_full(),
-        )
-        .on_mouse_down(
-            MouseButton::Left,
-            move |event: &gpui::MouseDownEvent, window, cx| {
-                let at = bounds.get();
-                if at.size.width <= gpui::px(0.0) {
-                    return;
-                }
-                let fraction = ((event.position.x - at.origin.x) / at.size.width).clamp(0.0, 1.0);
-                act(Act::Seek(path.clone(), fraction), window, cx)
-            },
-        )
-        .children(bars(waveform, progress, theme))
+    seekable(id, WAVE_HEIGHT, act, path, move |at, window| {
+        let (width, height) = (f32::from(at.size.width), f32::from(at.size.height));
+        // Bounded below so a narrow window draws a waveform rather than three
+        // bars, and above so a wide one does not draw hair.
+        let count = (((width + GAP) / (BAR + GAP)).floor() as usize).clamp(8, 96);
+        let step = (width + GAP) / count as f32;
+
+        for (index, level) in audio::bars(waveform.as_deref(), count).into_iter().enumerate() {
+            let tall = (height * level).max(2.0);
+            let bounds = gpui::Bounds {
+                origin: gpui::point(
+                    at.origin.x + px(index as f32 * step),
+                    at.origin.y + px((height - tall) / 2.0),
+                ),
+                size: gpui::size(px(BAR), px(tall)),
+            };
+            // Measured at the middle of the bar: a bar is only played once the
+            // playhead has passed it, not once it has touched its leading edge.
+            let done = (index as f32 + 0.5) / count as f32 <= progress;
+
+            window.paint_quad(
+                gpui::fill(bounds, if done { played } else { rest })
+                    .corner_radii(px(BAR / 2.0)),
+            );
+        }
+    })
 }
 
 /// How large the cover is drawn. Square, and tall enough for the three lines
 /// beside it.
 const COVER: f32 = 64.0;
 
-/// A plain progress bar, seekable the same way the waveform is. What a track has
-/// instead of a shape, because nothing ships one for it.
-fn track(
-    attached: &Attachment,
+/// A plain bar with the playhead on it, seekable the same way the waveform is.
+/// What a track has instead of a shape, because nothing ships one for it and
+/// reading one off a whole album side is not what an attachment row is for.
+fn rail(
+    id: String,
     progress: f32,
     theme: &Theme,
     act: Dispatch,
     path: std::path::PathBuf,
+) -> gpui::Stateful<Div> {
+    const THICK: f32 = 4.0;
+    const KNOB: f32 = 10.0;
+
+    let (played, rest) = (theme.accent, unplayed(theme));
+
+    seekable(id, RAIL_HEIGHT, act, path, move |at, window| {
+        let (width, height) = (f32::from(at.size.width), f32::from(at.size.height));
+        let progress = progress.clamp(0.0, 1.0);
+        let line = |from: f32, to: f32, colour| {
+            let bounds = gpui::Bounds {
+                origin: gpui::point(
+                    at.origin.x + px(from),
+                    at.origin.y + px((height - THICK) / 2.0),
+                ),
+                size: gpui::size(px(to - from), px(THICK)),
+            };
+            gpui::fill(bounds, colour).corner_radii(px(THICK / 2.0))
+        };
+
+        window.paint_quad(line(0.0, width, rest));
+        if progress > 0.0 {
+            window.paint_quad(line(0.0, width * progress, played));
+        }
+        // The knob is what says the bar can be moved rather than only watched.
+        // Kept inside the ends, so at nought and at one it is a circle on the
+        // rail rather than half a circle beside it.
+        let centre = (width * progress).clamp(KNOB / 2.0, (width - KNOB / 2.0).max(KNOB / 2.0));
+        window.paint_quad(
+            gpui::fill(
+                gpui::Bounds {
+                    origin: gpui::point(
+                        at.origin.x + px(centre - KNOB / 2.0),
+                        at.origin.y + px((height - KNOB) / 2.0),
+                    ),
+                    size: gpui::size(px(KNOB), px(KNOB)),
+                },
+                played,
+            )
+            .corner_radii(px(KNOB / 2.0)),
+        );
+    })
+}
+
+/// What the part that has not been played yet is drawn in.
+///
+/// The accent, worn thin — the same thing, not yet — rather than a colour of its
+/// own. This was `border_focus`, which in `signal-dark` *is* the accent: the
+/// played half and the unplayed half were the same blue, so a voice note was a
+/// solid block and a track's bar looked full from the moment it appeared. Any
+/// theme is free to point two tokens at one colour; a difference of alpha is the
+/// one distinction none of them can collapse.
+fn unplayed(theme: &Theme) -> gpui::Hsla {
+    gpui::Hsla {
+        a: 0.3,
+        ..theme.accent
+    }
+}
+
+/// A strip that paints itself and turns a click on it into a fraction.
+///
+/// Both halves need the bounds and a layout closure does not know what it ended
+/// up as, so a `canvas` records them: the paint closure is handed them outright,
+/// and the click handler reads the ones the last paint recorded.
+fn seekable(
+    id: String,
+    height: f32,
+    act: Dispatch,
+    path: std::path::PathBuf,
+    draw: impl Fn(gpui::Bounds<gpui::Pixels>, &mut gpui::Window) + 'static,
 ) -> gpui::Stateful<Div> {
     use std::cell::Cell;
     use std::rc::Rc;
@@ -678,18 +804,18 @@ fn track(
     let measured = bounds.clone();
 
     div()
-        .id(SharedString::from(format!("scrub-{}", attached.id.as_str())))
-        .relative()
+        .id(SharedString::from(id))
         .flex()
         .flex_1()
         .min_w_0()
-        .items_center()
-        .h(px(16.0))
+        .h(px(height))
         .cursor_pointer()
         .child(
-            gpui::canvas(move |at, _, _| measured.set(at), |_, _: (), _, _| {})
-                .absolute()
-                .size_full(),
+            gpui::canvas(
+                move |at, _, _| measured.set(at),
+                move |at, _: (), window, _| draw(at, window),
+            )
+            .size_full(),
         )
         .on_mouse_down(
             MouseButton::Left,
@@ -701,20 +827,6 @@ fn track(
                 let fraction = ((event.position.x - at.origin.x) / at.size.width).clamp(0.0, 1.0);
                 act(Act::Seek(path.clone(), fraction), window, cx)
             },
-        )
-        .child(
-            div()
-                .w_full()
-                .h(px(3.0))
-                .rounded_full()
-                .bg(theme.border_focus)
-                .child(
-                    div()
-                        .w(gpui::relative(progress.clamp(0.0, 1.0)))
-                        .h_full()
-                        .rounded_full()
-                        .bg(theme.accent),
-                ),
         )
 }
 
@@ -757,25 +869,56 @@ fn song(path: &Path) -> Option<std::rc::Rc<petunia_media::song::Song>> {
     })
 }
 
-/// Signal ships a waveform with a voice note, so the shape of the sound is drawn
-/// from the protocol rather than by decoding anything.
-fn bars(waveform: Option<&[u8]>, progress: f32, theme: &Theme) -> Vec<AnyElement> {
-    const COUNT: usize = 44;
+/// What the strip draws: whatever the sender sent, and otherwise whatever can be
+/// read out of the file.
+///
+/// The protocol's own wins outright. It is what every other client is drawing for
+/// this message, it cost nothing to obtain, and a second opinion computed here
+/// would be the same sound in a different shape depending on which client you
+/// happened to open it in.
+fn sound(waveform: Option<&[u8]>, path: &Path) -> Option<Vec<u8>> {
+    match waveform.filter(|waveform| !waveform.is_empty()) {
+        Some(waveform) => Some(waveform.to_vec()),
+        None => shape(path).map(|shape| shape.as_ref().clone()),
+    }
+}
 
-    audio::bars(waveform, COUNT)
-        .into_iter()
-        .enumerate()
-        .map(|(index, height)| {
-            let played = (index as f32 / COUNT as f32) < progress;
-            div()
-                .flex_1()
-                .mx_px()
-                .h(px(4.0 + height * 18.0))
-                .rounded_full()
-                .bg(if played { theme.accent } else { theme.border_focus })
-                .into_any_element()
-        })
-        .collect()
+/// The shape of a sound the sender sent none for, read once per file.
+///
+/// Cached the way the tags are and for the same reason: a visible row is
+/// rebuilt every frame, and this is a decode. Keyed on the metadata as well as
+/// the path, since a file being sent is one somebody may still be writing.
+fn shape(path: &Path) -> Option<std::rc::Rc<Vec<u8>>> {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::rc::Rc;
+
+    const CAPACITY: usize = 64;
+
+    type Key = (std::path::PathBuf, u64, Option<std::time::SystemTime>);
+
+    thread_local! {
+        static CACHE: RefCell<HashMap<Key, Option<Rc<Vec<u8>>>>> = RefCell::new(HashMap::new());
+    }
+
+    let metadata = std::fs::metadata(path).ok()?;
+    let key = (path.to_path_buf(), metadata.len(), metadata.modified().ok());
+
+    CACHE.with(|cache| {
+        if let Some(known) = cache.borrow().get(&key) {
+            return known.clone();
+        }
+
+        let read = petunia_media::waveform::read(path)
+            .filter(|shape| !shape.is_empty())
+            .map(Rc::new);
+        let mut cache = cache.borrow_mut();
+        if cache.len() >= CAPACITY {
+            cache.clear();
+        }
+        cache.insert(key, read.clone());
+        read
+    })
 }
 
 fn length(attached: &Attachment) -> Option<std::time::Duration> {

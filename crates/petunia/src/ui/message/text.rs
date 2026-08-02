@@ -12,6 +12,23 @@ use std::rc::Rc;
 const LINES: usize = 14;
 const BYTES: u64 = 512 * 1024;
 
+/// The same question asked of an attachment, which has two names and only one of
+/// them says anything.
+///
+/// The bytes on disk are content-addressed: a digest, with whatever extension the
+/// declared content type happened to name -- and Signal declares source code
+/// `application/octet-stream`, which names nothing. So a listing was drawn as a
+/// listing while it was being sent, where the path is still the file we picked,
+/// and went back to being a chip the moment the thread was reloaded out of the
+/// cache. The name the file travelled under is the one that knows; the path is the
+/// fallback, for our own attachments that have not been through the cache yet.
+pub fn language_of(declared: Option<&str>, path: &Path) -> Option<&'static str> {
+    declared
+        .map(Path::new)
+        .and_then(language)
+        .or_else(|| language(path))
+}
+
 /// What the highlighter calls the language a file is written in, or `"text"` for
 /// something plain. `None` means it is not text at all, and gets the chip every
 /// other attachment gets.
@@ -166,6 +183,29 @@ mod tests {
         assert_eq!(language(Path::new("/tmp/cat.png")), None);
         assert_eq!(language(Path::new("/tmp/clip.mp4")), None);
         assert_eq!(language(Path::new("/tmp/mystery")), None);
+    }
+
+    /// The cached bytes are a digest with no extension, which is what a reloaded
+    /// thread hands this: the name it was sent under is the only thing left that
+    /// says what it holds.
+    #[test]
+    fn the_declared_name_answers_for_a_cached_file() {
+        let cached = Path::new("/cache/attachments/ab/abcdef");
+
+        assert_eq!(language_of(Some("main.rs"), cached), Some("rust"));
+        assert_eq!(language_of(Some("cat.png"), cached), None);
+        assert_eq!(language_of(None, cached), None);
+    }
+
+    /// Our own attachments are still where we picked them and carry no declared
+    /// name until the message comes back off disk.
+    #[test]
+    fn the_path_answers_when_nothing_was_declared() {
+        assert_eq!(language_of(None, Path::new("/tmp/notes.md")), Some("markdown"));
+        assert_eq!(
+            language_of(Some("blob"), Path::new("/tmp/notes.md")),
+            Some("markdown")
+        );
     }
 
     #[test]
