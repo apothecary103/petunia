@@ -1,7 +1,6 @@
 use gpui::prelude::*;
-use gpui::{Context, Entity, Window, div, px, white};
+use gpui::{Context, Entity, Window, div};
 use gpui_component::ActiveTheme;
-use qrcode::QrCode;
 
 use crate::store::Store;
 
@@ -82,33 +81,6 @@ impl Render for Linking {
     }
 }
 
-/// gpui has no QR widget, and the matrix is small enough that a grid of divs is
-/// cheaper than decoding a generated image.
 fn qr(url: &str) -> impl IntoElement {
-    const MODULE: f32 = 5.0;
-    const QUIET: f32 = 4.0 * MODULE;
-
-    let Ok(code) = QrCode::new(url.as_bytes()) else {
-        return div().child("Could not render the linking code.");
-    };
-
-    let width = code.width();
-    let colors = code.to_colors();
-
-    let rows = colors.chunks(width).map(|row| {
-        div().flex().children(row.iter().map(|module| {
-            div()
-                .w(px(MODULE))
-                .h(px(MODULE))
-                .when(*module == qrcode::Color::Dark, |this| {
-                    this.bg(gpui::black())
-                })
-        }))
-    });
-
-    div()
-        .bg(white())
-        .p(px(QUIET))
-        .rounded(px(8.0))
-        .child(div().flex().flex_col().children(rows))
+    super::kit::qr(url, 5.0)
 }

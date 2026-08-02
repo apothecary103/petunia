@@ -13,6 +13,39 @@ pub fn icon(name: IconName, size: f32, tint: Hsla) -> Icon {
     Icon::new(name).size(px(size)).text_color(tint)
 }
 
+/// A QR code. gpui has no widget for one, and the matrix is small enough that a
+/// grid of divs is cheaper than generating an image and decoding it again.
+///
+/// Black on white whatever the theme is, and with the quiet zone around it that
+/// the standard asks for: a scanner is looking for a printed mark, not for
+/// something that matches the window it happens to be in. A code inverted to
+/// suit a dark theme is a code half the readers on the market will not see.
+pub fn qr(url: &str, module: f32) -> Div {
+    let quiet = 4.0 * module;
+
+    let Ok(code) = qrcode::QrCode::new(url.as_bytes()) else {
+        return div().child("Could not draw a code for this.");
+    };
+
+    let width = code.width();
+    let colors = code.to_colors();
+    let rows = colors.chunks(width).map(|row| {
+        div().flex().children(row.iter().map(|at| {
+            div()
+                .w(px(module))
+                .h(px(module))
+                .when(*at == qrcode::Color::Dark, |this| this.bg(gpui::black()))
+        }))
+    });
+
+    div()
+        .flex_none()
+        .bg(gpui::white())
+        .p(px(quiet))
+        .rounded(px(RADIUS))
+        .child(div().flex().flex_col().children(rows))
+}
+
 /// One of petunia's own icons, which the library's set does not ship. Named by
 /// the path `crate::assets` serves it at.
 pub fn glyph(path: &'static str, size: f32, tint: Hsla) -> Icon {
