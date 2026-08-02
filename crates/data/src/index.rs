@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::{Contact, ContactId, Group, Message, Thread};
+use super::{Contact, ContactId, Group, Message, Status, Thread};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -53,6 +53,11 @@ impl Flags {
 #[derive(Debug, Clone)]
 pub struct Preview {
     pub line: String,
+    /// How far the last thing said got, when the last thing said was ours. Only
+    /// our own messages ever carry a status, so `Some` is also the answer to
+    /// "was this mine" -- which is what lets the row show the ticks Signal shows
+    /// there, and show them for nobody else's message.
+    pub status: Option<Status>,
     at: u64,
 }
 
@@ -66,18 +71,27 @@ impl Preview {
         }
         Self {
             line,
+            status: message.status,
             at: message.timestamp(),
         }
     }
 
     /// One read back from disk, which is the only other way one is made. The
     /// line was clipped when it was written, so it is taken as it stands.
-    pub fn new(line: String, at: u64) -> Self {
-        Self { line, at }
+    pub fn new(line: String, at: u64, status: Option<Status>) -> Self {
+        Self { line, status, at }
     }
 
     pub fn at(&self) -> u64 {
         self.at
+    }
+
+    /// A receipt for the message this line is of. Forwards only, the way every
+    /// status is: a delivery receipt arriving after a read one says nothing new.
+    fn advance(&mut self, status: Status) {
+        if self.status.is_some_and(|current| current < status) {
+            self.status = Some(status);
+        }
     }
 }
 
@@ -327,6 +341,22 @@ impl Index {
 
         self.entries = entries;
         self.reorder();
+    }
+
+    /// A receipt reaching the list rather than the conversation. Receipts name a
+    /// timestamp and no thread, so every line is asked whether it is of that
+    /// message -- the same scan `History::apply_status` does, over one line per
+    /// thread instead of a whole history.
+    pub fn apply_status(&mut self, timestamps: &[u64], status: Status) {
+        for entry in &mut self.entries {
+            if let Some(preview) = entry
+                .preview
+                .as_mut()
+                .filter(|preview| timestamps.contains(&preview.at()))
+            {
+                preview.advance(status);
+            }
+        }
     }
 
     /// Records activity for a thread the contact sync has not produced yet, so
@@ -609,6 +639,54 @@ mod tests {
 
         assert_eq!(index.get(&thread).unwrap().preview.as_ref().unwrap().line, "hi");
         assert_eq!(index.get(&thread).unwrap().last_activity, 200);
+    }
+
+    /// The ticks the sidebar draws come off the line, so a receipt has to reach
+    /// the list as well as the conversation -- a thread nobody has opened has no
+    /// history for one to land in.
+    #[test]
+    fn a_receipt_raises_the_line_it_is_of() {
+        let alice = contact("Alice");
+        let thread = Thread::Contact(ContactId::Aci(alice.uuid));
+        let (mut index, aci) = index(std::slice::from_ref(&alice), &[]);
+        let mut mine = message(100, aci, "on my way");
+        mine.status = Some(Status::Sent);
+        index.touch(&thread, Preview::of(&mine), unknown);
+
+        index.apply_status(&[100], Status::Read);
+
+        let status = index.get(&thread).unwrap().preview.as_ref().unwrap().status;
+        assert_eq!(status, Some(Status::Read));
+    }
+
+    /// Receipts name a timestamp and no thread, so every line is asked -- and
+    /// somebody else's has no status to raise, whatever the timestamps do.
+    #[test]
+    fn a_receipt_leaves_somebody_elses_line_alone() {
+        let alice = contact("Alice");
+        let thread = Thread::Contact(ContactId::Aci(alice.uuid));
+        let (mut index, _) = index(std::slice::from_ref(&alice), &[]);
+        index.touch(&thread, Preview::of(&message(100, alice.uuid, "hi")), unknown);
+
+        index.apply_status(&[100], Status::Read);
+
+        let status = index.get(&thread).unwrap().preview.as_ref().unwrap().status;
+        assert_eq!(status, None);
+    }
+
+    #[test]
+    fn a_receipt_never_lowers_a_line() {
+        let alice = contact("Alice");
+        let thread = Thread::Contact(ContactId::Aci(alice.uuid));
+        let (mut index, aci) = index(std::slice::from_ref(&alice), &[]);
+        let mut mine = message(100, aci, "on my way");
+        mine.status = Some(Status::Read);
+        index.touch(&thread, Preview::of(&mine), unknown);
+
+        index.apply_status(&[100], Status::Delivered);
+
+        let status = index.get(&thread).unwrap().preview.as_ref().unwrap().status;
+        assert_eq!(status, Some(Status::Read));
     }
 
     /// Somebody the contact sync has never mentioned, whose only trace is a row

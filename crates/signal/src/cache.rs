@@ -321,6 +321,8 @@ fn declared(content_type: &str) -> Option<&'static str> {
         "audio/mpeg" => "mp3",
         "audio/ogg" | "audio/opus" => "ogg",
         "audio/wav" => "wav",
+        "audio/flac" | "audio/x-flac" => "flac",
+        "audio/aiff" | "audio/x-aiff" => "aiff",
         "application/pdf" => "pdf",
         "text/plain" => "txt",
         _ => return None,

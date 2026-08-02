@@ -201,7 +201,17 @@ impl Workspace {
 
     fn enter_main(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let rail = self.session.sidebar.rail;
-        let sidebar = cx.new(|cx| Sidebar::new(self.store.clone(), rail, cx));
+        let sidebar = cx.new(|cx| Sidebar::new(self.store.clone(), rail, window, cx));
+        // The box above the list answers with messages as well as with names, and
+        // a message is opened the same way the search sheet opens one.
+        cx.subscribe_in(
+            &sidebar,
+            window,
+            |this, _, chosen: &search::Chosen, window, cx| {
+                this.reveal_hit(chosen.0.clone(), window, cx)
+            },
+        )
+        .detach();
         let drafts = std::mem::take(&mut self.session.drafts);
         let conversation = cx.new(|cx| {
             Conversation::new(self.store.clone(), self.player.clone(), drafts, window, cx)
@@ -1017,6 +1027,26 @@ impl Workspace {
 
     /// cmd+f searches everywhere; cmd+shift+f searches what is on screen. One
     /// surface either way, because they differ only in what they ask.
+    /// A result was picked, wherever it was picked from. Opening the conversation
+    /// is only half of it: the answer is some way back up the thread, and finding
+    /// it again by hand is what the search was for.
+    fn reveal_hit(
+        &mut self,
+        hit: petunia_signal::db::search::Hit,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = petunia_data::MessageId {
+            timestamp: hit.timestamp,
+            sender: hit.sender,
+        };
+        self.store
+            .update(cx, |store, cx| store.activate(hit.thread, cx));
+        self.with_conversation(window, cx, move |conversation, _, cx| {
+            conversation.reveal(target, cx)
+        });
+    }
+
     fn open_search(&mut self, scope: Scope, window: &mut Window, cx: &mut Context<Self>) {
         if !matches!(self.screen, Screen::Main { .. }) {
             return;
@@ -1035,19 +1065,7 @@ impl Workspace {
                 &search,
                 window,
                 |this, _, chosen: &search::Chosen, window, cx| {
-                    let hit = chosen.0.clone();
-                    let target = petunia_data::MessageId {
-                        timestamp: hit.timestamp,
-                        sender: hit.sender,
-                    };
-                    this.store
-                        .update(cx, |store, cx| store.activate(hit.thread, cx));
-                    // Opening the conversation is only half of it: the answer is
-                    // some way back up the thread, and finding it again by hand
-                    // is what the search was for.
-                    this.with_conversation(window, cx, move |conversation, _, cx| {
-                        conversation.reveal(target, cx)
-                    });
+                    this.reveal_hit(chosen.0.clone(), window, cx)
                 },
             )
             .detach();
@@ -1520,6 +1538,9 @@ impl Render for Workspace {
             // would cover the vibrancy layer the whole effect depends on.
             .when(!translucent, |this| this.bg(palette.background))
             .text_color(palette.text)
+            // One weight for the whole window. Everything that wants more says so
+            // (`kit::EMPHASIS`, `kit::STRONG`); nothing has to ask for this.
+            .font_weight(kit::BODY)
             .on_action(cx.listener(|this, _: &actions::ToggleSidebar, _, cx| {
                 this.toggle_sidebar(cx)
             }))
@@ -1557,7 +1578,15 @@ impl Render for Workspace {
                 this.open_search(scope, window, cx)
             }))
             .on_action(cx.listener(|this, _: &actions::Cancel, window, cx| {
+                super::selection::clear(cx);
                 this.cancel(window, cx)
+            }))
+            // Passed on when nothing is lit, so cmd-c with no selection is a
+            // chord nobody claimed rather than one that quietly did nothing.
+            .on_action(cx.listener(|_, _: &actions::CopySelection, _, cx| {
+                if !super::selection::copy(cx) {
+                    cx.propagate();
+                }
             }))
             .on_action(cx.listener(|this, _: &actions::FocusComposer, window, cx| {
                 this.with_conversation(window, cx, |conversation, window, cx| {
@@ -1736,7 +1765,10 @@ impl Workspace {
                     .flex_1()
                     .min_w_0()
                     .truncate()
+                    // The window's headline, in the weight the Guidelines put a
+                    // headline in. It names what everything under it belongs to.
                     .text_size(px(palette.typography.ui_size))
+                    .font_weight(kit::EMPHASIS)
                     .text_color(palette.text)
                     .child(SharedString::from(title.to_owned())),
             )

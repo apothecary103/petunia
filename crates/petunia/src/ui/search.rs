@@ -414,7 +414,7 @@ fn row(
 /// The line a hit matched on, with the words that matched picked out. A list of
 /// twenty results all reading "…and then I said…" is a list you have to read;
 /// marking the match is what makes it a list you can scan.
-fn matched(body: &str, query: &str, palette: &Theme) -> gpui::StyledText {
+pub fn matched(body: &str, query: &str, palette: &Theme) -> gpui::StyledText {
     let highlight = gpui::HighlightStyle {
         color: Some(palette.accent),
         font_weight: Some(kit::EMPHASIS),

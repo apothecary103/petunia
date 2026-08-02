@@ -16,7 +16,7 @@ use presage::manager::Registered;
 use presage::model::messages::Received;
 use presage::store::{ContentExt, ContentsStore, StateStore, Store};
 use presage_store_sqlite::SqliteStore;
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -149,6 +149,7 @@ async fn session(
         policy: media_policy,
     };
     let (queue_tx, mut queue_rx) = oneshot::channel();
+    let wake = Arc::new(Notify::new());
     let receive_task = tokio::task::spawn_local(receive(
         manager.clone(),
         db.clone(),
@@ -156,7 +157,9 @@ async fn session(
         media.clone(),
         events.clone(),
         queue_tx,
+        wake.clone(),
     ));
+    let sleep_watch = tokio::task::spawn_local(watch_for_sleep(wake));
 
     tokio::task::spawn_local(show_cached_avatars(manager.clone(), cache.clone(), events.clone()));
     tokio::task::spawn_local(refresh_profiles(
@@ -489,6 +492,7 @@ async fn session(
                 }
                 Some(Command::LogOut) => {
                     receive_task.abort();
+                    sleep_watch.abort();
                     if let Err(error) = manager.unlink_self().await {
                         warn!(%error, "failed to unlink this device from the server");
                     }
@@ -548,6 +552,7 @@ async fn session(
                 }
                 None => {
                     receive_task.abort();
+                    sleep_watch.abort();
                     return Ok(Ended::Shutdown);
                 }
             },
@@ -581,22 +586,32 @@ async fn receive(
     media: Media,
     mut events: Events,
     queue_tx: oneshot::Sender<()>,
+    wake: Arc<Notify>,
 ) {
     let mut queue_signal = Some(queue_tx);
     let mut wait = RECONNECT_MIN;
     loop {
+        // Three states rather than two: opening a socket is not the same as
+        // waiting to try again, and a label that says "Reconnecting" for both
+        // spends the whole of a backoff claiming something is happening.
+        emit(&mut events, Event::Connection(Connection::Connecting)).await;
         let started = tokio::time::Instant::now();
-        match receive_once(
+        let asked = match receive_once(
             &mut manager,
             &db,
             &cache,
             &media,
             &mut events,
             &mut queue_signal,
+            &wake,
         )
         .await
         {
-            Ok(()) => warn!(?wait, "message stream ended, reconnecting"),
+            Ok(Stopped::Asked) => true,
+            Ok(Stopped::Ended) => {
+                warn!(?wait, "message stream ended, reconnecting");
+                false
+            }
             Err(error) => {
                 error!(%error, "failed to receive messages");
                 emit(
@@ -604,8 +619,18 @@ async fn receive(
                     Event::Error(format!("failed to receive messages: {error}")),
                 )
                 .await;
+                false
             }
+        };
+
+        // Asked for, which means something outside knows the old socket is dead
+        // -- the machine has been asleep. There is nothing to back off from and
+        // nothing to wait for.
+        if asked {
+            wait = RECONNECT_MIN;
+            continue;
         }
+
         emit(&mut events, Event::Connection(Connection::Reconnecting)).await;
         tokio::time::sleep(wait).await;
 
@@ -620,6 +645,49 @@ async fn receive(
             true => RECONNECT_MIN,
             false => (wait * 2).min(RECONNECT_MAX),
         };
+    }
+}
+
+/// Why a message stream stopped, which decides whether to wait before opening
+/// another.
+enum Stopped {
+    /// The server, the network or presage ended it.
+    Ended,
+    /// Something here decided the socket was no longer worth anything.
+    Asked,
+}
+
+/// Notices that the machine has been asleep, and throws the socket away when it
+/// has.
+///
+/// A websocket whose peer stopped listening while the lid was shut does not
+/// fail: it sits there apparently open until a keep-alive goes unanswered, which
+/// is a minute or two in which nothing arrives and everything on screen is
+/// stale. Nothing in the stream says the machine slept and there is no portable
+/// notification to subscribe to -- but the two clocks disagree about it, since
+/// `Instant` does not advance while the machine is asleep and the wall clock
+/// does. A gap between them is a sleep, and a sleep is a reason to open a new
+/// socket rather than wait to find out that the old one is dead.
+async fn watch_for_sleep(wake: Arc<Notify>) {
+    /// How often the two clocks are compared.
+    const TICK: Duration = Duration::from_secs(10);
+    /// How far apart they may drift before it counts as a sleep rather than as a
+    /// busy machine being late to a timer.
+    const GAP: Duration = Duration::from_secs(5);
+
+    loop {
+        let monotonic = tokio::time::Instant::now();
+        let wall = std::time::SystemTime::now();
+        tokio::time::sleep(TICK).await;
+
+        let slept = std::time::SystemTime::now()
+            .duration_since(wall)
+            .unwrap_or(TICK)
+            .saturating_sub(monotonic.elapsed());
+        if slept > GAP {
+            info!(?slept, "the machine was asleep; reopening the connection");
+            wake.notify_one();
+        }
     }
 }
 
@@ -638,7 +706,8 @@ async fn receive_once(
     media: &Media,
     events: &mut Events,
     queue_signal: &mut Option<oneshot::Sender<()>>,
-) -> Result<(), Error> {
+    wake: &Notify,
+) -> Result<Stopped, Error> {
     let messages = manager.receive_messages().await?;
     pin_mut!(messages);
     info!("message stream started");
@@ -646,8 +715,25 @@ async fn receive_once(
 
     // Delivery receipts owed but not yet sent, by sender. See `owe`.
     let mut owed: HashMap<Uuid, Vec<u64>> = HashMap::new();
+    // Master keys by the group identifier derived from them. See `typing_thread`.
+    let mut group_ids: HashMap<Vec<u8>, [u8; 32]> = HashMap::new();
 
-    while let Some(received) = messages.next().await {
+    loop {
+        // Biased, so that a socket already known to be dead is dropped rather
+        // than read: whatever is buffered behind it arrives again over the next
+        // one, and reading it here only delays that.
+        let received = tokio::select! {
+            biased;
+            () = wake.notified() => {
+                deliver_all(manager, &mut owed);
+                return Ok(Stopped::Asked);
+            }
+            received = messages.next() => match received {
+                Some(received) => received,
+                None => break,
+            },
+        };
+
         match received {
             Received::QueueEmpty => {
                 debug!("message queue empty");
@@ -715,9 +801,11 @@ async fn receive_once(
                 if let ContentBody::TypingMessage(typing) = &content.body {
                     let started = typing.action()
                         == presage::libsignal_service::proto::typing_message::Action::Started;
-                    if let Ok(thread) = presage::store::Thread::try_from(content.as_ref()) {
+                    if let Some(thread) =
+                        typing_thread(manager, &mut group_ids, typing, &content).await
+                    {
                         emit(events, Event::Typing {
-                            thread: (&thread).into(),
+                            thread,
                             sender: content.metadata.sender.raw_uuid(),
                             started,
                         })
@@ -728,6 +816,7 @@ async fn receive_once(
                     if let Err(error) = db.record_receipts(&timestamps, recipient, status).await {
                         warn!(%error, "failed to save receipt statuses");
                     }
+                    advance_preview(db, &timestamps, status).await;
                     emit(events, Event::MessageStatus { timestamps, status }).await;
                 } else if let Some((thread, mut fragment)) = data::classify(&content) {
                     if let Fragment::Message(message) | Fragment::Edit { message, .. } =
@@ -738,7 +827,8 @@ async fn receive_once(
                         // The one moment writing the sidebar's line is free: the
                         // message is decoded, projected and in hand. Everything
                         // else that ever needed it had to work it out again.
-                        remember_preview(db, &thread, message).await;
+                        let aci = manager.registration_data().service_ids.aci;
+                        remember_preview(db, &thread, message, aci).await;
                     }
                     let pointers = data::pointers(&content);
                     if !pointers.is_empty() {
@@ -763,7 +853,51 @@ async fn receive_once(
     // is a reconnect: what is still owed has to go now, since nothing will
     // deliver these messages a second time to ask again.
     deliver_all(manager, &mut owed);
-    Ok(())
+    Ok(Stopped::Ended)
+}
+
+/// Which conversation somebody is typing in.
+///
+/// presage's `Thread::try_from` reads the group out of a *data* message and
+/// answers `Contact(sender)` for everything else, a typing indicator included —
+/// so every group's dots were filed under the sender's one-to-one thread, where
+/// they appeared beside the wrong name in the list and never in the group at all.
+///
+/// A `TypingMessage` names its group by the identifier *derived* from the master
+/// key, and that derivation only runs one way: the answer is to derive it for
+/// every group this account is in and match. Cached for the life of the stream,
+/// and rebuilt when an id is not in it, which is what a group joined since the
+/// stream started looks like.
+async fn typing_thread(
+    manager: &RegisteredManager,
+    known: &mut HashMap<Vec<u8>, [u8; 32]>,
+    typing: &presage::libsignal_service::proto::TypingMessage,
+    content: &presage::libsignal_service::content::Content,
+) -> Option<Thread> {
+    let Some(id) = typing.group_id.as_ref().filter(|id| !id.is_empty()) else {
+        return Some(Thread::Contact((&content.metadata.sender).into()));
+    };
+
+    if !known.contains_key(id) {
+        match manager.store().groups().await {
+            Ok(groups) => {
+                *known = groups
+                    .filter_map(Result::ok)
+                    .map(|(master_key, _)| (outgoing::group_identifier(&master_key), master_key))
+                    .collect();
+            }
+            Err(error) => warn!(%error, "failed to list groups for a typing indicator"),
+        }
+    }
+
+    match known.get(id) {
+        Some(master_key) => Some(Thread::Group(*master_key)),
+        // A group we are not in, which is nothing we can draw dots for.
+        None => {
+            debug!("typing indicator for an unknown group");
+            None
+        }
+    }
 }
 
 /// Records a delivery receipt, and sends it when there is nothing to be gained
@@ -849,6 +983,7 @@ async fn send(manager: &mut RegisteredManager, db: &Db, events: &mut Events, out
     if let Err(error) = db.set_send_state(timestamp, &thread, status).await {
         warn!(%error, "failed to save message status");
     }
+    advance_preview(db, &[timestamp], status).await;
     emit(
         events,
         Event::MessageStatus {
@@ -952,8 +1087,44 @@ async fn index_bodies(db: &Db, thread: &Thread, messages: &[data::Message]) {
 /// Keeps the line the sidebar will draw for this thread. Older lines are refused
 /// by the store, so this can be called for any message without asking whether it
 /// is the newest one.
-async fn remember_preview(db: &Db, thread: &Thread, message: &data::Message) {
-    let preview = data::index::Preview::of(message);
+/// How far one of our own messages got, as far as anything on disk can say.
+///
+/// A group is counted as having more recipients than have reported, so it reads
+/// as sent rather than as read: the member list lives with the manager and this
+/// runs before it, and claiming delivery on one person's receipt is the one answer
+/// that would be a lie. Receipts arriving afterwards raise it in the ordinary way.
+async fn stored_status(db: &Db, thread: &Thread, timestamp: u64) -> data::Status {
+    let recipients = match thread {
+        Thread::Contact(_) => 1,
+        Thread::Group(_) => usize::MAX,
+    };
+    db.statuses(&[timestamp], recipients)
+        .await
+        .unwrap_or_default()
+        .get(&timestamp)
+        .copied()
+        .unwrap_or(data::Status::Sent)
+}
+
+/// Raises the status on the sidebar's line, when the line is of the message the
+/// status is about. Written beside the receipt it comes from, because the list is
+/// not rebuilt from the histories at startup: a thread nobody has opened has no
+/// history for a tick to be read out of.
+async fn advance_preview(db: &Db, timestamps: &[u64], status: data::Status) {
+    if let Err(error) = db.advance_preview(timestamps, status).await {
+        warn!(%error, "failed to record a receipt against a thread preview");
+    }
+}
+
+async fn remember_preview(db: &Db, thread: &Thread, message: &data::Message, aci: Uuid) {
+    let mut preview = data::index::Preview::of(message);
+    // A message of ours arriving here came from another of this account's
+    // devices, so nothing local sent it and there is no send state to read. It
+    // still gets receipts, and a status is what a receipt raises: without one the
+    // row would have no mark on it and no way to grow one.
+    if message.sender() == aci && preview.status.is_none() {
+        preview.status = Some(stored_status(db, thread, message.timestamp()).await);
+    }
     if let Err(error) = db.set_preview(thread, &preview).await {
         warn!(%error, "failed to store a thread preview");
     }
@@ -1854,7 +2025,16 @@ async fn fetch_previews(db: Db, aci: Uuid, mut events: Events) {
         match data::project(recent.rows).pop() {
             // Written as well as sent: a line the scan had to work for is a line
             // the next launch should be handed.
-            Some(message) => {
+            Some(mut message) => {
+                // The row carries no status: `project` reads presage's own store,
+                // which knows nothing about receipts. So the ticks the sidebar
+                // draws are resolved here, from what petunia kept -- otherwise a
+                // thread whose newest message is ours opens with a line and no
+                // mark on it, and the receipt that would have raised one has
+                // already been and gone.
+                if message.sender() == aci {
+                    message.status = Some(stored_status(&db, &thread, message.timestamp()).await);
+                }
                 let preview = data::index::Preview::of(&message);
                 if let Err(error) = db.set_preview(&thread, &preview).await {
                     warn!(%error, "failed to store a thread preview");

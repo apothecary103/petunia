@@ -960,6 +960,10 @@ impl Store {
                 for history in state.histories.values_mut() {
                     history.apply_status(&timestamps, aci, status);
                 }
+                // The sidebar shows the same ticks on the line it draws, so it
+                // has to hear the same receipt: the list is not built from the
+                // histories, and a thread that has never been opened has none.
+                state.index.apply_status(&timestamps, status);
             }
             Event::Fragment {
                 thread,

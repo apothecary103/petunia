@@ -284,7 +284,7 @@ pub fn typing(thread: &Thread, started: bool, timestamp: u64) -> TypingMessage {
     }
 }
 
-fn group_identifier(master_key: &[u8; 32]) -> Vec<u8> {
+pub fn group_identifier(master_key: &[u8; 32]) -> Vec<u8> {
     let key = GroupMasterKey::new(*master_key);
     GroupSecretParams::derive_from_master_key(key)
         .get_group_identifier()

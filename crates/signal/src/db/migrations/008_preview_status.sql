@@ -1,0 +1,13 @@
+-- How far the sidebar's line got, when the line is one of ours.
+--
+-- Signal draws the ticks in the list as well as in the conversation, and the
+-- list is not built from the histories: a thread that has never been opened has
+-- no history to read a status out of, and the status of a thread's newest message
+-- is otherwise only resolved while a page of it is being loaded -- which needs the
+-- recipient count, and therefore the network. So the aggregate is kept beside the
+-- line it belongs to, written whenever it is known.
+--
+-- NULL means there is nothing to show, which is every message somebody else sent:
+-- only our own ever carry a status at all, so the column doubles as the answer to
+-- "was this mine".
+ALTER TABLE petunia_preview ADD COLUMN status INTEGER;

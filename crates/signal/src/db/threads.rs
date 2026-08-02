@@ -188,7 +188,7 @@ mod tests {
         db.index_bodies(thread, &[(ts, sender, "hi".into())])
             .await
             .unwrap();
-        db.set_preview(thread, &petunia_data::index::Preview::new("hi".into(), ts))
+        db.set_preview(thread, &petunia_data::index::Preview::new("hi".into(), ts, None))
             .await
             .unwrap();
         db.mark_read(thread, ts).await.unwrap();

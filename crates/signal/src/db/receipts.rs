@@ -157,7 +157,7 @@ fn placeholders(count: usize) -> String {
     vec!["?"; count].join(",")
 }
 
-fn to_int(status: Status) -> i64 {
+pub(super) fn to_int(status: Status) -> i64 {
     match status {
         Status::Sending => 0,
         Status::Failed => 1,
@@ -168,7 +168,7 @@ fn to_int(status: Status) -> i64 {
     }
 }
 
-fn from_int(value: i64) -> Option<Status> {
+pub(super) fn from_int(value: i64) -> Option<Status> {
     match value {
         0 => Some(Status::Sending),
         1 => Some(Status::Failed),

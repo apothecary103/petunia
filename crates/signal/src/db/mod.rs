@@ -31,6 +31,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/005_search.sql"),
     include_str!("migrations/006_flags.sql"),
     include_str!("migrations/007_directory.sql"),
+    include_str!("migrations/008_preview_status.sql"),
 ];
 
 #[cfg(test)]
